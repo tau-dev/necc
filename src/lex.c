@@ -20,6 +20,7 @@ struct { char *name; TokenKind key; } names[KEYWORDS] = {
 // 	{"and", Keyword_And},
 	{"if", Tok_Key_If},
 	{"else", Tok_Key_Else},
+	{"goto", Tok_Key_Goto},
 	{"while", Tok_Key_While},
 	{"do", Tok_Key_Do},
 	{"for", Tok_Key_For},
@@ -65,6 +66,31 @@ Token getToken (const char **p) {
 	case ']': tok.kind = Tok_CloseBracket; break;
 	case ';': tok.kind = Tok_Semicolon; break;
 	case ',': tok.kind = Tok_Comma; break;
+	case ':': tok.kind = Tok_Colon; break;
+	case '^': tok.kind = Tok_Hat; break;
+	case '~': tok.kind = Tok_Tilde; break;
+	case '<':
+		if (pos[1] == '=') {
+			pos++;
+			tok.kind = Tok_LessEquals;
+		} else if (pos[1] == '<') {
+			pos++;
+			tok.kind = Tok_DoubleLess;
+		} else {
+			tok.kind = Tok_Less;
+		}
+		break;
+	case '>':
+		if (pos[1] == '=') {
+			pos++;
+			tok.kind = Tok_GreaterEquals;
+		} else if (pos[1] == '>') {
+			pos++;
+			tok.kind = Tok_DoubleGreater;
+		} else {
+			tok.kind = Tok_Greater;
+		}
+		break;
 	case '+':
 		if (pos[1] == '=') {
 			pos++;
@@ -102,9 +128,25 @@ Token getToken (const char **p) {
 	case '=':
 		if (pos[1] == '=') {
 			pos++;
-			tok.kind = Tok_EqualsEquals;
+			tok.kind = Tok_DoubleEquals;
 		} else {
 			tok.kind = Tok_Equals;
+		}
+		break;
+	case '&':
+		if (pos[1] == '&') {
+			pos++;
+			tok.kind = Tok_DoubleAmpersand;
+		} else {
+			tok.kind = Tok_Ampersand;
+		}
+		break;
+	case '|':
+		if (pos[1] == '|') {
+			pos++;
+			tok.kind = Tok_DoublePipe;
+		} else {
+			tok.kind = Tok_Pipe;
 		}
 		break;
 	case '\0': tok.kind = Tok_EOF; pos--; break;
@@ -171,25 +213,44 @@ const char *token_names[Tok_EOF+1] = {
 	[Tok_Real] = "floating point literal",
 	[Tok_String] = "string literal",
 
-	[Tok_OpenParen] = "opening parenthesis",
-	[Tok_CloseParen] = "closing parenthesis",
-	[Tok_OpenBrace] = "opening curly brace",
-	[Tok_CloseBrace] = "closing curly brace",
-	[Tok_OpenBracket] = "opening square bracket",
-	[Tok_CloseBracket] = "closing square bracket",
+	[Tok_OpenParen] = "`(`",
+	[Tok_CloseParen] = "`)`",
+	[Tok_OpenBrace] = "`{`",
+	[Tok_CloseBrace] = "`}`",
+	[Tok_OpenBracket] = "`[`",
+	[Tok_CloseBracket] = "`]`",
 
-	[Tok_Semicolon] = "semicolon",
-	[Tok_Comma] = "comma",
+	[Tok_Semicolon] = "`;`",
+	[Tok_Comma] = "`,`",
+	[Tok_Colon] = "`:`",
 
-	[Tok_Equals] = "equals sign",
-	[Tok_EqualsEquals] = "double equals sign",
-	[Tok_Plus] = "plus sign",
-	[Tok_Minus] = "minus sign",
-	[Tok_Asterisk] = "asterisk",
-	[Tok_Slash] = "slash",
+	[Tok_Equals] = "`=`",
+	[Tok_DoubleEquals] = "`==`",
+	[Tok_Arrow] = "`->`",
+	[Tok_Plus] = "`+`",
+	[Tok_PlusEquals] = "`+=`",
+	[Tok_Minus] = "`-`",
+	[Tok_MinusEquals] = "`-=`",
+	[Tok_Asterisk] = "`*`",
+	[Tok_AsteriskEquals] = "`*=`",
+	[Tok_Slash] = "`/`",
+	[Tok_SlashEquals] = "`/=`",
+	[Tok_Less] = "`<`",
+	[Tok_DoubleLess] = "`<<`",
+	[Tok_LessEquals] = "`<=`",
+	[Tok_Greater] = "`>`",
+	[Tok_DoubleGreater] = "`>>`",
+	[Tok_GreaterEquals] = "`>=`",
+	[Tok_Pipe] = "`|`",
+	[Tok_DoublePipe] = "`||`",
+	[Tok_Ampersand] = "`&`",
+	[Tok_DoubleAmpersand] = "`&&`",
+	[Tok_Hat] = "`^`",
+	[Tok_Tilde] = "`~`",
 
 	[Tok_Key_If] = "`if`",
 	[Tok_Key_Else] = "`else`",
+	[Tok_Key_Goto] = "`goto`",
 	[Tok_Key_While] = "`while`",
 	[Tok_Key_Do] = "`do`",
 	[Tok_Key_For] = "`for`",

@@ -15,10 +15,13 @@
 
 StringMap symbols = {0};
 
+typedef LIST(String) Scope;
+
 typedef struct {
 	Arena *arena;
 	IrBuild ir;
 	Function *current_function;
+	Scope current_scope;
 	const char *code;
 	const char *pos;
 } Parse;
@@ -62,9 +65,9 @@ _Noreturn void comperror(const char *source, const char *pos, const char *msg, .
     vprintf(msg, args);
     va_end(args);
     printf(".\n");
-#ifndef DNDEBUG
-	PRINT_STACK_TRACE;
-#endif
+// #ifndef DNDEBUG
+// 	PRINT_STACK_TRACE;
+// #endif
 	exit(1);
 }
 
@@ -73,9 +76,9 @@ _Noreturn void unexpectedToken(const char *source, const char *pos, Token got, c
 
 	printf("%lu:%lu: " RED "error: " RESET "expected %s, found %s.\n",
 			(unsigned long) p.line, (unsigned long) p.col, expected, tokenName(got.kind));
-#ifndef DNDEBUG
-	PRINT_STACK_TRACE;
-#endif
+// #ifndef DNDEBUG
+// 	PRINT_STACK_TRACE;
+// #endif
 	exit(1);
 }
 
@@ -90,22 +93,21 @@ _Noreturn void parseerror(Parse *parse, const char *msg, ...) {
     vprintf(msg, args);
     va_end(args);
     printf(".\n");
-#ifndef DNDEBUG
-	PRINT_STACK_TRACE;
-#endif
+// #ifndef DNDEBUG
+// 	PRINT_STACK_TRACE;
+// #endif
 	exit(1);
 }
 
 
-Declaration parseDeclaration(Arena *arena, const char *code, const char **pos, Type base_type);
-Type parseType (const char *code, const char **pos);
-void parseFunction(Parse *parse);
-IrRef lvalue(Value v);
-Value rvalue(Value v, Parse *parse);
-IrRef coerce(Value v, Type t, Parse *p);
-bool fnTypeEqual(FunctionType a, FunctionType b);
-bool typeEqual(Type a, Type b);
-char *printType(Arena *arena, Type t);
+static Declaration parseDeclaration(Arena *arena, const char *code, const char **pos, Type base_type);
+static Type parseTypeBase (const char *code, const char **pos);
+static bool tryParseTypeBase (const char **pos, Type *dest);
+static void parseFunction(Parse *parse);
+static Value rvalue(Value v, Parse *parse);
+static Value dereference(IrBuild *ir, Value v);
+static IrRef coerce(Value v, Type t, Parse *p);
+static Value pointerAdd(IrBuild *, Value lhs, Value rhs, Parse *op_parse);
 
 
 void parseFile (Arena *arena, const char *code) {
@@ -113,7 +115,7 @@ void parseFile (Arena *arena, const char *code) {
 	(void) arena;
 
 	while (peekToken(c).kind != Tok_EOF) {
-		Type base_type = parseType(code, &c);
+		Type base_type = parseTypeBase(code, &c);
 		Declaration decl = parseDeclaration(arena, code, &c, base_type);
 
 		void **slot = mapGetOrCreate(&symbols, decl.name);
@@ -182,10 +184,9 @@ void parseFile (Arena *arena, const char *code) {
 	}
 }
 
-typedef LIST(String) Scope;
 
-Symbol *defSymbol(Scope *scope, String name) {
-	PUSH(*scope, name);
+Symbol *defSymbol(Parse *parse, String name) {
+	PUSH_A(parse->arena, parse->current_scope, name);
 	Symbol *sym = malloc(sizeof(Symbol));
 	*sym = (Symbol) {name};
 	void **slot = mapGetOrCreate(&symbols, name);
@@ -203,39 +204,56 @@ void popScope(Scope names) {
 	}
 }
 
-void parseCompound(Parse *parse);
+static void parseCompound(Parse *parse);
+static void parseStatement(Parse *parse);
+static Value parseExpression(Parse *parse);
+static Value parseExprAssignment(Parse *parse);
+static Value parseExprBitOr(Parse *parse);
+static Value parseExprBitXor(Parse *parse);
+static Value parseExprBitAnd(Parse *parse);
+static Value parseExprGreaterLess(Parse *parse);
+static Value parseExprAddition(Parse *parse);
+static Value parseExprMultiplication(Parse *parse);
+static Value parseExprLeftUnary(Parse *parse);
+static Value parseExprRightUnary(Parse *parse);
+static Value parseExprBase(Parse *parse);
 
 void parseFunction (Parse *parse) {
+	const char *start = parse->pos;
 	Function *func = parse->current_function;
 	u32 count = func->type.parameters.len;
-	Scope param_names = {0};
 
 	func->entry = ALLOC(parse->arena, Block);
-	*func->entry = (Block) {
-		.exit.kind = Exit_None,
-	};
-	parse->ir.insertion_block = func->entry;
+	func->entry = genNewBlockLabeled(parse->arena, &parse->ir, STRING("[entry]"));
+	parse->current_scope = (Scope) {0};
 
 	for (u32 i = 0; i < count; i++) {
 		Declaration param = func->type.parameters.ptr[i];
-		Symbol *sym = defSymbol(&param_names, param.name);
+		Symbol *sym = defSymbol(parse, param.name);
 		sym->kind = Sym_Value;
-		sym->value = (Value) {param.type, {{genParameter(&parse->ir, param.type), false}}};
+		sym->value = (Value) {param.type, {{genParameter(&parse->ir, param.type), true}}};
 	}
 
 	parseCompound(parse);
 
+	// TODO Warning if this is reachable.
+	genReturnVal(&parse->ir, IR_REF_NONE);
+
+	popScope(parse->current_scope);
 	// TODO Find and report undefined labels
-	popScope(param_names);
-	free(param_names.ptr);
-// 	return block;
+	for (u32 i = 0; i < func->labels.capacity; i++) {
+		Block *b = func->labels.content[i];
+		if (b && b->exit.kind == Exit_None)
+			comperror(parse->code, start, "a goto references label `%s`, which is not declared in this function", b->label.ptr);
+	}
 }
 
-void parseStatement(Parse *parse);
-
-void parseCompound (Parse *parse) {
+static void parseCompound (Parse *parse) {
 	const char *block_begin = parse->pos;
 	const char **pos = &parse->pos;
+	Scope enclosing_scope = parse->current_scope;
+	parse->current_scope = (Scope) {0};
+
 	while (true) {
 		Token t = peekToken(*pos);
 		if (t.kind == Tok_CloseBrace) {
@@ -247,21 +265,57 @@ void parseCompound (Parse *parse) {
 			parseStatement(parse);
 		}
 	}
+
+	popScope(parse->current_scope);
+	parse->current_scope = enclosing_scope;
 }
 
-static Value parseExpression(Parse *parse);
-Value parseExprAddition(Parse *parse);
-Value parseExprMultiplication(Parse *parse);
-Value parseExprLeftUnary(Parse *parse);
-Value parseExprRightUnary(Parse *parse);
-Value parseExprBase(Parse *parse);
+static Block *getLabeledBlock (Parse *parse, String label) {
+	void **slot = mapGetOrCreate(&parse->current_function->labels, label);
+	if (*slot == NULL) {
+		*slot = ALLOC(parse->arena, Block);
+		// null-terminate the label
+		char *s = aalloc(parse->arena, label.len + 1);
+		memcpy(s, label.ptr, label.len);
+		s[label.len] = 0;
+		*(Block *)*slot = (Block) {
+			.label = {label.len, s},
+		};
+	}
+	return *slot;
+}
 
-
-void parseStatement (Parse *parse) {
+static void parseStatement (Parse *parse) {
 	const char **pos = &parse->pos;
 // 	const char *begin = *pos;
-	Token t = peekToken(*pos);
+	const char *peek = parse->pos;
+	Token t = getToken(&peek);
+	bool labeled = false;
+	if (t.kind == Tok_Identifier && getToken(&peek).kind == Tok_Colon) {
+		void **slot = mapGetOrCreate(&parse->current_function->labels, t.val.identifier);
+		Block *blk = *slot;
+		Block *previous = parse->ir.insertion_block;
+		genJump(&parse->ir, blk);
+
+		if (blk) {
+			if (blk->exit.kind != Exit_None)
+				comperror(parse->code, *pos, "redefinition of label `%s`", blk->label.ptr);
+			blk->first_inst = parse->ir.ir.len;
+			parse->ir.insertion_block = blk;
+		} else {
+			*slot = genNewBlockLabeled(parse->arena, &parse->ir, t.val.identifier);
+			previous->exit.unconditional = *slot;
+		}
+
+		labeled = true;
+		parse->pos = peek;
+	}
+	t = peekToken(parse->pos);
 	switch (t.kind) {
+		case Tok_OpenBrace:
+			getToken(pos);
+			parseCompound(parse);
+			return;
 		case Tok_Key_Return:
 			getToken(pos);
 			// TODO Check against function return type
@@ -269,46 +323,207 @@ void parseStatement (Parse *parse) {
 				getToken(pos);
 				genReturnVal(&parse->ir, IR_REF_NONE);
 			} else {
-				genReturnVal(&parse->ir, parseExpression(parse).ir);
+				Parse start = *parse;
+				genReturnVal(&parse->ir, coerce(
+						rvalue(parseExpression(parse), parse),
+						*parse->current_function->type.rettype,
+						&start));
 			}
+			// Unreferenced dummy block for further instructions, will be ignored
+			genNewBlock(parse->arena, &parse->ir);
 			t = getToken(pos);
 			if (t.kind != Tok_Semicolon)
-				unexpectedToken(parse->code, parse->pos, t, "semicolon");
+				unexpectedToken(parse->code, *pos, t, "semicolon");
 			return;
 
-// 		case Tok_Identifier:
-// 			String identifier = t.val.identifier:
-// 			t = getToken(pos);
-// 			switch (t.kind) {
-// 				case Tok_Equals:
-
-// 					return;
-// 			}
-// 			return;
 		case Tok_Key_If:
 			getToken(pos);
 			t = getToken(pos);
-			Value v = parseExpression(parse);
-			(void) v;
-			// ...
+			if (t.kind != Tok_OpenParen)
+				unexpectedToken(parse->code, *pos, t, "opening paren");
+			Parse start = *parse;
+			Value condition = rvalue(parseExpression(parse), parse);
+			t = getToken(pos);
+			if (t.kind != Tok_CloseParen)
+				unexpectedToken(parse->code, *pos, t, "closing paren");
+
+			genBranch(&parse->ir, coerce(condition, BASIC_INT, &start));
+			Block *head = parse->ir.insertion_block;
+			head->exit.branch.on_true = genNewBlock(parse->arena, &parse->ir);
+			parseStatement(parse);
+			Block *body = parse->ir.insertion_block;
+			genJump(&parse->ir, NULL);
+			Block *join = genNewBlock(parse->arena, &parse->ir);
+			body->exit.unconditional = join;
+
+			if (peekToken(*pos).kind == Tok_Key_Else) {
+				getToken(pos);
+				head->exit.branch.on_false = genNewBlock(parse->arena, &parse->ir);
+				parseStatement(parse);
+				genJump(&parse->ir, join);
+			} else {
+				head->exit.branch.on_false = join;
+			}
+			parse->ir.insertion_block = join;
 			break;
-		default:
+		case Tok_Key_Goto:
+			getToken(pos);
+			t = getToken(pos);
+			if (t.kind != Tok_Identifier)
+				unexpectedToken(parse->code, parse->pos, t, "label name");
+			String label = t.val.identifier;
+			t = getToken(pos);
+			if (t.kind != Tok_Semicolon)
+				unexpectedToken(parse->code, parse->pos, t, "semicolon");
+			genJump(&parse->ir, getLabeledBlock(parse, label));
+			// Unreferenced dummy block for further instructions, will be ignored
+			genNewBlock(parse->arena, &parse->ir);
+			return;
+		case Tok_Semicolon:
+			return;
+		default:;
+			Type base_type;
+			if (tryParseTypeBase(pos, &base_type)) {
+				// PERMIT This is a silly rule.
+				if (labeled)
+					comperror(parse->code, *pos, "a label may not appear directly before a declaration; you will want to add a semicolon or open a braced block between the two");
+				// TODO Structs may be declared without introducing any identifiers.
+				while (true) {
+					Declaration decl = parseDeclaration(parse->arena, parse->code, pos, base_type);
+					Symbol *sym = defSymbol(parse, decl.name);
+					sym->kind = Sym_Value;
+					sym->value = (Value) {decl.type, {{genStackAlloc(&parse->ir, decl.type), true}}};
+					t = getToken(pos);
+					if (t.kind == Tok_Equals) {
+						Parse start = *parse;
+						IrRef val = coerce(rvalue(parseExprAssignment(parse), parse), decl.type, &start);
+						genStore(&parse->ir, sym->value.ir, val);
+						t = getToken(pos);
+					}
+					if (t.kind == Tok_Semicolon)
+						break;
+					else if (t.kind != Tok_Comma)
+						unexpectedToken(parse->code, *pos, t, "comma or semicolon");
+				}
+
+				return;
+			}
 			parseExpression(parse);
 			Token t = getToken(pos);
 			if (t.kind != Tok_Semicolon)
-				unexpectedToken(parse->code, parse->pos, t, "semicolon");
+				unexpectedToken(parse->code, *pos, t, "semicolon");
 			return;
 	}
 }
 
 static Value parseExpression (Parse *parse) {
-	return parseExprAddition(parse);
+	Value v = parseExprAssignment(parse);
+
+	while (peekToken(parse->pos).kind == Tok_Comma) {
+		getToken(&parse->pos);
+		v = parseExprAssignment(parse);
+	}
+	return v;
 }
 
-Value parseExprAddition (Parse *parse) {
+static Value parseExprAssignment (Parse *parse) {
+	const char *start = parse->pos;
+	Value v = parseExprBitOr(parse);
+
+	switch (peekToken(parse->pos).kind) {
+	case Tok_Equals:
+		getToken(&parse->pos);
+		if (v.typ.kind == Kind_Function)
+			comperror(parse->code, start, "cannot assign to a function");
+		if (!v.byref)
+			comperror(parse->code, start, "cannot assign to rvalue of type %s", printType(parse->arena, v.typ));
+		Value assignment = parseExprAssignment(parse);
+
+		genStore(&parse->ir, v.ir, coerce(rvalue(assignment, parse), v.typ, parse));
+		return assignment;
+	default:
+		return v;
+	}
+}
+
+
+// TODO All of these should associate left-to-right instead of
+// right-to-left; most of them are commutative tho.
+static Value parseExprBitOr(Parse *parse) {
+	Value lhs = parseExprBitXor(parse);
+	if (peekToken(parse->pos).kind == Tok_Pipe) {
+		getToken(&parse->pos);
+		Parse start = *parse;
+		IrRef a = coerce(rvalue(lhs, parse), BASIC_INT, &start);
+		IrRef b = coerce(rvalue(parseExprBitOr(parse), parse), BASIC_INT, &start);
+		return (Value) {BASIC_INT, {{genOr(&parse->ir, a, b)}}};
+	}
+	return lhs;
+}
+
+static Value parseExprBitXor(Parse *parse) {
+	Value lhs = parseExprBitAnd(parse);
+	if (peekToken(parse->pos).kind == Tok_Hat) {
+		getToken(&parse->pos);
+		Parse start = *parse;
+		IrRef a = coerce(rvalue(lhs, parse), BASIC_INT, &start);
+		IrRef b = coerce(rvalue(parseExprBitXor(parse), parse), BASIC_INT, &start);
+		return (Value) {BASIC_INT, {{genXor(&parse->ir, a, b)}}};
+	}
+	return lhs;
+}
+
+static Value parseExprBitAnd(Parse *parse) {
+	Value lhs = parseExprGreaterLess(parse);
+	if (peekToken(parse->pos).kind == Tok_Ampersand) {
+		getToken(&parse->pos);
+		Parse start = *parse;
+		IrRef a = coerce(rvalue(lhs, parse), BASIC_INT, &start);
+		IrRef b = coerce(rvalue(parseExprBitAnd(parse), parse), BASIC_INT, &start);
+		return (Value) {BASIC_INT, {{genAnd(&parse->ir, a, b)}}};
+	}
+	return lhs;
+}
+
+static Value parseExprGreaterLess(Parse *parse) {
+	Value lhs = parseExprAddition(parse);
+	Token t = peekToken(parse->pos);
+	Parse start = *parse;
+	switch (t.kind) {
+	case Tok_Less: {
+		getToken(&parse->pos);
+		lhs = rvalue(lhs, parse);
+		Value rhs = rvalue(parseExprAddition(parse), parse);
+		return (Value) {BASIC_INT, {{genLessThan(&parse->ir, coerce(lhs, BASIC_INT, &start), coerce(rhs, BASIC_INT, &start))}}};
+	}
+	case Tok_LessEquals: {
+		getToken(&parse->pos);
+		lhs = rvalue(lhs, parse);
+		Value rhs = rvalue(parseExprAddition(parse), parse);
+		return (Value) {BASIC_INT, {{genLessThanOrEquals(&parse->ir, coerce(lhs, BASIC_INT, &start), coerce(rhs, BASIC_INT, &start))}}};
+	}
+	case Tok_Greater: {
+		getToken(&parse->pos);
+		lhs = rvalue(lhs, parse);
+		Value rhs = rvalue(parseExprAddition(parse), parse);
+		return (Value) {BASIC_INT, {{genLessThan(&parse->ir, coerce(rhs, BASIC_INT, &start), coerce(lhs, BASIC_INT, &start))}}};
+	}
+	case Tok_GreaterEquals: {
+		getToken(&parse->pos);
+		lhs = rvalue(lhs, parse);
+		Value rhs = rvalue(parseExprAddition(parse), parse);
+		return (Value) {BASIC_INT, {{genLessThanOrEquals(&parse->ir, coerce(rhs, BASIC_INT, &start), coerce(lhs, BASIC_INT, &start))}}};
+	}
+	default:
+		return lhs;
+	}
+}
+
+static Value parseExprAddition (Parse *parse) {
 	const char **pos = &parse->pos;
 
 	Value lhs = parseExprMultiplication(parse);
+	Parse start = *parse;
 	Token t = peekToken(*pos);
 	if (t.kind != Tok_Plus && t.kind != Tok_Minus)
 		return lhs;
@@ -316,14 +531,34 @@ Value parseExprAddition (Parse *parse) {
 	getToken(pos);
 	Value rhs = rvalue(parseExprMultiplication(parse), parse);
 
+
 	// TODO Type checking
-	if (t.kind == Tok_Plus)
-		return (Value) {BASIC_INT, {{genAdd(&parse->ir, lhs.ir, rhs.ir)}}};
-	else
-		return (Value) {BASIC_INT, {{genSub(&parse->ir, lhs.ir, rhs.ir)}}};
+	if (t.kind == Tok_Plus) {
+		if (lhs.typ.kind == Kind_Pointer || rhs.typ.kind == Kind_Pointer) {
+			return pointerAdd(&parse->ir, lhs, rhs, &start);
+		} else {
+			return (Value) {BASIC_INT, {{genAdd(&parse->ir, coerce(lhs, BASIC_INT, &start), coerce(rhs, BASIC_INT, &start))}}};
+		}
+	} else {
+		if (lhs.typ.kind == Kind_Pointer) {
+			IrRef stride = genImmediateInt(&parse->ir, typeSize(*lhs.typ.pointer));
+
+			if (rhs.typ.kind == Kind_Pointer) {
+				IrRef diff = genSub(&parse->ir, lhs.ir, rhs.ir);
+				return (Value) {BASIC_INT, {{genDiv(&parse->ir, diff, stride)}}};
+			} else {
+				IrRef idx = genMul(&parse->ir, coerce(rhs, BASIC_INT, &start), stride);
+				return (Value) {lhs.typ, {{genSub(&parse->ir, lhs.ir, idx)}}};
+			}
+		} else {
+			if (rhs.typ.kind == Kind_Pointer)
+				parseerror(&start, "cannot subtract pointer from %s", printType(parse->arena, rhs.typ));
+			return (Value) {BASIC_INT, {{genSub(&parse->ir, coerce(lhs, BASIC_INT, &start), coerce(rhs, BASIC_INT, &start))}}};
+		}
+	}
 }
 
-Value parseExprMultiplication (Parse *parse) {
+static Value parseExprMultiplication (Parse *parse) {
 	const char **pos = &parse->pos;
 
 	Value lhs = parseExprLeftUnary(parse);
@@ -340,7 +575,7 @@ Value parseExprMultiplication (Parse *parse) {
 		return (Value) {BASIC_INT, {{genDiv(&parse->ir, lhs.ir, rhs.ir)}}};
 }
 
-Value parseExprLeftUnary (Parse *parse) {
+static Value parseExprLeftUnary (Parse *parse) {
 	/* TODO
 	++
 	--
@@ -354,51 +589,86 @@ Value parseExprLeftUnary (Parse *parse) {
 	&
 	_Alignof
 	*/
-	return parseExprRightUnary(parse);
+	switch (peekToken(parse->pos).kind) {
+	case Tok_Asterisk:
+		getToken(&parse->pos);
+		return dereference(&parse->ir, parseExprLeftUnary(parse));
+	case Tok_Ampersand:
+		getToken(&parse->pos);
+		const char *start = parse->pos;
+		Value v = parseExprLeftUnary(parse);
+		// TODO Structs and unions will be handeled byref even if they
+		// are not lvalues; mark this somehow.
+		if (v.typ.kind == Kind_Function) {
+			v.ir = genFunctionRef(&parse->ir, v.function);
+			v.typ.kind = Kind_FunctionPtr;
+		} else {
+			if (!v.byref)
+				comperror(parse->code, start, "cannot take address of rvalue of type %s", printType(parse->arena, v.typ));
+			Type *pointee = ALLOC(parse->arena, Type);
+			*pointee = v.typ;
+			v.typ = (Type) {Kind_Pointer, .pointer = pointee};
+		}
+		v.byref = false;
+		return v;
+	default:
+		return parseExprRightUnary(parse);
+	}
 }
 
-Value parseExprRightUnary (Parse *parse) {
+static Value parseExprRightUnary (Parse *parse) {
 	Value v = parseExprBase(parse);
-	Token t = peekToken(parse->pos);
 
-	if (t.kind == Tok_OpenParen) {
-		getToken(&parse->pos);
-		Value func = rvalue(v, parse);
-		if (func.typ.kind != Kind_FunctionPtr)
-			comperror(parse->code, parse->pos, "expected a function type, got an expression of type %s", printType(parse->arena, func.typ));
+	while (true) {
+		Token t = peekToken(parse->pos);
+		if (t.kind == Tok_OpenParen) {
+			getToken(&parse->pos);
+			Value func = rvalue(v, parse);
+			if (func.typ.kind != Kind_FunctionPtr)
+				comperror(parse->code, parse->pos, "expected a function type, got an expression of type %s", printType(parse->arena, func.typ));
 
-		IrRefList arguments = {0};
-		DeclList params = func.typ.function.parameters;
-		if (peekToken(parse->pos).kind != Tok_CloseParen) {
-			do {
-				Value arg = parseExpression(parse);
-				arg = rvalue(arg, parse);
-				if (arguments.len == params.len)
-					parseerror(parse, "too many arguments to function call");
-				PUSH_A(parse->arena, arguments, coerce(arg, params.ptr[arguments.len].type, parse));
+			IrRefList arguments = {0};
+			DeclList params = func.typ.function.parameters;
+			if (peekToken(parse->pos).kind != Tok_CloseParen) {
+				do {
+					Parse start = *parse;
+					Value arg = parseExprAssignment(parse);
+					arg = rvalue(arg, parse);
+					if (arguments.len == params.len)
+						parseerror(parse, "too many arguments to function call");
+					PUSH_A(parse->arena, arguments, coerce(arg, params.ptr[arguments.len].type, &start));
 
-				t = getToken(&parse->pos);
-			} while (t.kind == Tok_Comma);
+					t = getToken(&parse->pos);
+				} while (t.kind == Tok_Comma);
+			}
+
+			if (arguments.len < params.len)
+				parseerror(parse, "too few arguments to function call");
+			else if (arguments.len > params.len)
+				parseerror(parse, "too many arguments to function call");
+
+			if (t.kind != Tok_CloseParen)
+				unexpectedToken(parse->code, parse->pos, t, "closing paren");
+
+			ValuesSpan args = {arguments.len, arguments.ptr};
+			v = (Value) {
+				*func.typ.function.rettype,
+				{{genCall(&parse->ir, func.ir, args)}}
+			};
+		} else if (t.kind == Tok_OpenBracket) {
+			getToken(&parse->pos);
+			v = rvalue(v, parse);
+			Parse start = *parse;
+			Value index = rvalue(parseExpression(parse), &start);
+			v = dereference(&parse->ir, pointerAdd(&parse->ir, v, index, &start));
+		} else {
+			break;
 		}
-
-		if (arguments.len < params.len)
-			parseerror(parse, "too few arguments to function call");
-		else if (arguments.len > params.len)
-			parseerror(parse, "too many arguments to function call");
-
-		if (t.kind != Tok_CloseParen)
-			unexpectedToken(parse->code, parse->pos, t, "closing paren");
-
-		ValuesSpan args = {arguments.len, arguments.ptr};
-		return (Value) {
-			*func.typ.function.rettype,
-			{{genCall(&parse->ir, func.ir, args)}}
-		};
 	}
 	return v;
 }
 
-Value parseExprBase (Parse *parse) {
+static Value parseExprBase (Parse *parse) {
 	Token t = getToken(&parse->pos);
 	switch (t.kind) {
 	case Tok_OpenParen: {
@@ -416,7 +686,7 @@ Value parseExprBase (Parse *parse) {
 		if (sym == NULL)
 			parseerror(parse, "undefined identifier");
 		if (sym->kind != Sym_Value)
-			parseerror(parse, "expected value, got type");
+			parseerror(parse, "expected value, found type");
 		return sym->value;
 	}
 	default:
@@ -424,22 +694,29 @@ Value parseExprBase (Parse *parse) {
 	}
 }
 
-Type parseType (const char *code, const char **pos) {
-	Token t = getToken(pos);
-	if (t.kind != Tok_Identifier || !eql("int", t.val.identifier))
-		comperror(code, *pos, "unknown type");
-	return BASIC_INT;
+static Type parseTypeBase (const char *code, const char **pos) {
+	Type type;
+	const char *start = *pos;
+	if (!tryParseTypeBase(pos, &type))
+		comperror(code, start, "invalid type");
+	return type;
 }
+
+static bool tryParseTypeBase(const char **p, Type *type) {
+	const char *pos = *p;
+	Token t = getToken(&pos);
+	if (t.kind != Tok_Identifier || !eql("int", t.val.identifier))
+		return false;
+	*type = BASIC_INT;
+	*p = pos;
+	return true;
+}
+
 
 u8 parseQualifiers (const char *code, const char **pos) {
 	(void) code;
 	(void) pos;
 	return 0;
-}
-Type parseTypeSpecifiersQualifiers (const char *code, const char **pos) {
-	Type base = parseType (code, pos);
-	// TODO extern etc.
-	return base;
 }
 
 Declaration parseDeclaration (Arena *arena, const char *code, const char **pos, Type base_type) {
@@ -489,7 +766,7 @@ Declaration parseDeclaration (Arena *arena, const char *code, const char **pos, 
 
 			if (peekToken(*pos).kind != Tok_CloseParen) {
 				do {
-					Type param_type = parseType(code, pos);
+					Type param_type = parseTypeBase(code, pos);
 					PUSH(func->parameters, parseDeclaration(arena, code, pos, param_type));
 					t = getToken(pos);
 				} while (t.kind == Tok_Comma);
@@ -507,40 +784,32 @@ Declaration parseDeclaration (Arena *arena, const char *code, const char **pos, 
 	return decl;
 }
 
-bool fnTypeEqual(FunctionType a, FunctionType b) {
-	if (!typeEqual(*a.rettype, *b.rettype))
-		return false;
-	if (a.parameters.len != b.parameters.len)
-		return false;
 
-	for (u32 u = 0; u < a.parameters.len; u++)
-		if (!typeEqual(a.parameters.ptr[u].type, b.parameters.ptr[u].type))
-			return false;
-	return true;
-}
-
-bool typeEqual(Type a, Type b) {
-	if (a.kind != b.kind)
-		return false;
-
-	switch (a.kind) {
-	case Kind_Function:
-	case Kind_FunctionPtr:
-		return fnTypeEqual(a.function, b.function);
-	case Kind_Pointer:
-		return typeEqual(*a.pointer, *b.pointer);
-	case Kind_Basic:
-		return a.basic == b.basic;
-	default:
-		printf("could not compare types, assuming equal\n");
-		return true;
+static Value pointerAdd(IrBuild *ir, Value lhs, Value rhs, Parse *op_parse) {
+	assert(lhs.typ.kind == Kind_Pointer || rhs.typ.kind == Kind_Pointer);
+	if (lhs.typ.kind == Kind_Pointer && rhs.typ.kind == Kind_Pointer)
+		parseerror(op_parse, "cannot add two pointers");
+	Value ptr;
+	IrRef integer;
+	if (lhs.typ.kind == Kind_Pointer) {
+		ptr = lhs;
+		integer = coerce(rhs, BASIC_INT, op_parse);
+	} else {
+		integer = coerce(lhs, BASIC_INT, op_parse);
+		ptr = rhs;
 	}
+	IrRef stride = genImmediateInt(ir, typeSize(*ptr.typ.pointer));
+	IrRef diff = genMul(ir, stride, integer);
+	return (Value) {ptr.typ, {{genAdd(ir, ptr.ir, diff)}}};
 }
 
-IrRef lvalue(Value v) {
-	if (v.typ.kind == Kind_Function || !v.byref)
-		return IR_REF_NONE;
-	return v.ir;
+static Value dereference(IrBuild *ir, Value v) {
+	assert(v.typ.kind == Kind_Pointer);
+	v.typ = *v.typ.pointer;
+	if (v.byref)
+		v.ir = genLoad(ir, v.ir);
+	v.byref = true;
+	return v;
 }
 
 Value rvalue(Value v, Parse *parse) {
@@ -556,154 +825,9 @@ Value rvalue(Value v, Parse *parse) {
 
 IrRef coerce(Value v, Type t, Parse *p) {
 	if (!typeEqual(v.typ, t)) {
-		parseerror(p, "could not convert type %s to type %s.", printType(p->arena, v.typ), printType(p->arena, t));
+		comperror(p->code, p->pos, "could not convert type %s to type %s.", printType(p->arena, v.typ), printType(p->arena, t));
 	}
 	return v.ir;
 }
 
-
-void printto(char **insert, const char *end, char *fmt, ...) {
-	if (*insert >= end)
-		return;
-	va_list args;
-    va_start(args, fmt);
-    int count = vsnprintf(*insert, end-*insert, fmt, args);
-    va_end(args);
-    if (count < 0) {
-    	perror(NULL);
-    	exit(1);
-    }
-    *insert += count;
-}
-
-#define MAX_TYPE_STRING_LENGTH 1024
-
-char *printDeclaration(Arena *arena, Type t, String name) {
-	char *string = aalloc(arena, MAX_TYPE_STRING_LENGTH);
-	char *pos = string;
-	char *end = string + MAX_TYPE_STRING_LENGTH;
-
-	printTypeBase(t, &pos, end);
-	printto(&pos, end, " ");
-	printTypeHead(t, &pos, end);
-	if (name.len > 0 && pos + name.len + 1 < end) {
-		memcpy(pos, name.ptr, name.len);
-		pos += name.len;
-	}
-	printTypeTail(t, &pos, end);
-
-	return string;
-}
-char *printType(Arena *arena, Type t) {
-	char *string = aalloc(arena, MAX_TYPE_STRING_LENGTH);
-	char *pos = string;
-	char *end = string + MAX_TYPE_STRING_LENGTH;
-
-	printTypeBase(t, &pos, end);
-	if (t.kind != Kind_Basic && t.kind != Kind_Void && t.kind != Kind_Struct && t.kind != Kind_Struct) {
-		printto(&pos, end, " ");
-		printTypeHead(t, &pos, end);
-		printTypeTail(t, &pos, end);
-	}
-
-	return string;
-}
-
-void printTypeBase(Type t, char **pos, char *end) {
-	switch (t.kind) {
-	case Kind_Pointer:
-		printTypeBase(*t.pointer, pos, end); break;
-	case Kind_Array:
-		printTypeBase(*t.array.inner, pos, end); break;
-	case Kind_Function:
-	case Kind_FunctionPtr:
-		printTypeBase(*t.function.rettype, pos, end); break;
-	case Kind_Void:
-		printto(pos, end, "void");
-		break;
-	case Kind_Basic:
-		switch (t.basic) {
-		case Basic_int:
-			printto(pos, end, "int");
-			break;
-		}
-		break;
-	case Kind_Struct:
-		printto(pos, end, "struct {???}");
-		break;
-	case Kind_Enum:
-		printto(pos, end, "enum {???}");
-		break;
-	}
-}
-
-void printTypeHead(Type t, char **pos, char *end) {
-	// Is this quite right?
-	if (t.storage == Storage_Extern)
-		printto(pos, end, "static ");
-	if (t.storage == Storage_Static)
-		printto(pos, end, "static ");
-
-	if (t.qualifiers & Qualifier_Const)
-		printto(pos, end, "const ");
-	if (t.qualifiers & Qualifier_Atomic)
-		printto(pos, end, "atomic ");
-	if (t.qualifiers & Qualifier_Volatile)
-		printto(pos, end, "volatile ");
-	if (t.qualifiers & Qualifier_Restrict)
-		printto(pos, end, "restrict ");
-
-	switch (t.kind) {
-	case Kind_Pointer:
-		printTypeHead(*t.pointer, pos, end);
-		if (t.pointer->kind == Kind_Function || t.pointer->kind == Kind_Pointer)
-			printto(pos, end, "(");
-		printto(pos, end, "*");
-		break;
-	case Kind_Array:
-		printTypeHead(*t.array.inner, pos, end);
-		break;
-	case Kind_Function:
-	case Kind_FunctionPtr:
-		printTypeHead(*t.function.rettype, pos, end);
-		break;
-	default: {}
-	}
-}
-
-void printTypeTail(Type t, char **pos, char *end) {
-	switch (t.kind) {
-	case Kind_Pointer:
-		if (t.pointer->kind == Kind_Function || t.pointer->kind == Kind_Pointer)
-			printto(pos, end, ")");
-		printTypeTail(*t.pointer, pos, end);
-		break;
-	case Kind_Array:
-		printto(pos, end, "[%lu]", (unsigned long) t.array.count);
-		printTypeTail(*t.array.inner, pos, end);
-		break;
-	case Kind_Function:
-	case Kind_FunctionPtr:
-		printto(pos, end, "(");
-		for (size_t i = 0; i < t.function.parameters.len; i++) {
-			printTypeBase(t.function.parameters.ptr[i].type, pos, end);
-			String name = t.function.parameters.ptr[i].name;
-			if (name.len > 0 && *pos + name.len + 1 < end) {
-				printto(pos, end, " ");
-				printTypeHead(t.function.parameters.ptr[i].type, pos, end);
-				memcpy(*pos, name.ptr, name.len);
-				*pos += name.len;
-			} else {
-				printTypeHead(t.function.parameters.ptr[i].type, pos, end);
-			}
-			printTypeTail(t.function.parameters.ptr[i].type, pos, end);
-			if (i + 1 < t.function.parameters.len)
-				printto(pos, end, ", ");
-		}
-		printto(pos, end, ")");
-		printTypeTail(*t.function.rettype, pos, end);
-		break;
-	default: {}
-	}
-}
 

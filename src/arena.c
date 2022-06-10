@@ -1,6 +1,7 @@
 #include "arena.h"
 
 #include <stdio.h>
+#include <stdalign.h>
 
 #define BLOCK_HEADER sizeof(void*)
 
@@ -20,6 +21,8 @@ Arena create_arena(size_t block_size) {
 
 void *aalloc(Arena* arena, size_t size) {
 	assert(size <= arena->block_size);
+	size_t alignment = alignof(max_align_t);
+	size = (size + alignment - 1) / alignment * alignment;
 
 	if (arena->last_used + size >= arena->block_size) {
 		ArenaBlock *new = malloc(arena->block_size + BLOCK_HEADER);

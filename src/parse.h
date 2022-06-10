@@ -15,7 +15,7 @@ typedef struct {
 	union {
 		struct {
 			IrRef ir;
-			// If true, ir is a pointer to the value.
+			// If true, ir is a pointer to the value. All lvalues are byref, as well as rvalues of structure or union type.
 			bool byref;
 		};
 		// FIXME Type of the function is overdetermined!
@@ -39,11 +39,5 @@ typedef struct Symbol {
 extern StringMap symbols;
 void parseFile(Arena *arena, const char *code);
 
-
-char *printDeclaration(Arena *a, Type t, String name);
-char *printType(Arena *a, Type t);
-void printTypeBase(Type t, char **insert, char *end);
-void printTypeHead(Type t, char **insert, char *end);
-void printTypeTail(Type t, char **insert, char *end);
 
 

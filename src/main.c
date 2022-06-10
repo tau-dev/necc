@@ -1,12 +1,8 @@
-// #define _DEFAULT_SOURCE
-// #define _POSIX_C_SOURCE 200809L
 #include "main.h"
 
 #include <stdio.h>
 #include <stdbool.h>
 #include <limits.h>
-#include <sys/mman.h>
-#include <unistd.h>
 
 #include "parse.h"
 #include "arena.h"
@@ -56,24 +52,6 @@ int main (int argc, char **args) {
 			free(s->value.function->ir.ptr);
 		}
 	}
-
-	char *memory = mmap(NULL, 4096, PROT_READ | PROT_WRITE | PROT_EXEC,
-				MAP_PRIVATE | MAP_ANONYMOUS, /*fd*/ -1, /*offset*/ 0);
-
-	unsigned char ident[4] = {
-		0x48,	// REX.W
-		0x8b,    // MOV register/register
-		0xc7,	// %rdi -> %rax
-		0xc3,	// RET
-	};
-	memcpy(memory, ident, 4);
-
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wpedantic"
-	func identity = ((func) memory);
-#pragma GCC diagnostic pop
-
-	printf("%ld\n", identity(42));
 
 	fclose(dest);
 	free(code);

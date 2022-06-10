@@ -5,6 +5,7 @@
 
 #include "main.h"
 #include "util.h"
+#include "arena.h"
 
 #define IR_REF_NONE ((u32) -1)
 
@@ -31,11 +32,19 @@ typedef enum {
 	Ir_Call,
 	Ir_Phi,
 	Ir_Parameter,
+	Ir_StackAlloc,
 	Ir_Load,
+	Ir_Store,
 	Ir_Add,
 	Ir_Sub,
 	Ir_Mul,
 	Ir_Div,
+	Ir_BitAnd,
+	Ir_BitOr,
+	Ir_BitNot,
+	Ir_BitXor,
+	Ir_LessThan,
+	Ir_LessThanOrEquals,
 } InstKind;
 
 // typedef SPAN(PhiNode) PhiNodes;
@@ -57,7 +66,7 @@ typedef struct Inst {
 } Inst;
 
 typedef struct {
-	IrRef test;
+	IrRef condition;
 	Block *on_true;
 	Block *on_false;
 } Branch;
@@ -81,21 +90,24 @@ typedef struct {
 
 
 typedef struct Block {
-	String label;
-	u32 id;
+	String label; // null-terminated
 	IrRef first_inst;
+	IrRef last_inst; // Used for unoptimized output, irrelevant when scheduler applies
 	IrRefList mem_instructions; // Loads and stores
 	IrRefList side_effecting_instructions; // Calls and stores
 	Exit exit;
+	bool visited;
 } Block;
 
 
 typedef struct IrBuild {
+	u32 block_count;
 	IrList ir;
 	Block *insertion_block;
 } IrBuild;
 //=================
 
+// TODO The IR really is untyped, this belongs somewhere else.
 
 typedef struct Type Type;
 typedef struct Declaration Declaration;
@@ -104,6 +116,7 @@ typedef LIST(Declaration) DeclList;
 
 typedef enum {
 	Basic_int,
+	Basic_char,
 } BasicType;
 
 typedef enum {
@@ -167,5 +180,14 @@ typedef struct Declaration {
 	String name;
 	Type type;
 } Declaration;
+
+bool typeEqual(Type a, Type b);
+bool fnTypeEqual(FunctionType a, FunctionType b);
+u32 typeSize(Type t);
+char *printDeclaration(Arena *a, Type t, String name);
+char *printType(Arena *a, Type t);
+void printTypeBase(Type t, char **insert, char *end);
+void printTypeHead(Type t, char **insert, char *end);
+void printTypeTail(Type t, char **insert, char *end);
 
 #define BASIC_INT ((Type) {Kind_Basic, .basic = Basic_int})
