@@ -61,7 +61,7 @@ typedef struct Inst {
 		struct {
 			IrRef lhs;
 			IrRef rhs;
-		} bin;
+		} binop;
 	};
 } Inst;
 
@@ -169,8 +169,8 @@ typedef struct Type {
 } Type;
 
 struct Function {
-	FunctionType type;
 	String name;
+	FunctionType type;
 	Block *entry;
 	IrList ir;
 	StringMap labels; // Maps labels to Blocks

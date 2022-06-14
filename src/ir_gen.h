@@ -17,7 +17,7 @@ IrRef genImmediateInt(IrBuild *ir, long long i);
 IrRef genImmediateReal(IrBuild *ir, double r);
 IrRef genCall(IrBuild *ir, IrRef func, ValuesSpan args);
 IrRef genFunctionRef(IrBuild *ir, Function *func);
-IrRef genLoad(IrBuild *ir, IrRef ref);
+IrRef genLoad(IrBuild *ir, IrRef ref, u32 size);
 IrRef genStore(IrBuild *ir, IrRef dest, IrRef value);
 
 void genReturnVal(IrBuild *ir, IrRef val);

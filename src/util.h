@@ -60,6 +60,7 @@ typedef SPAN(const char) String;
 #define i64 int64_t
 
 u64 strHash(String);
+void printString(String s);
 
 typedef struct {
 	u8 *headers;

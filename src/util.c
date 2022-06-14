@@ -1,5 +1,6 @@
 #include "util.h"
 #include "wyhash.h"
+#include "stdio.h"
 
 #define SLOT_UNUSED 0
 #define SLOT_TOMBSTONE 128
@@ -9,6 +10,10 @@
 
 bool eql (const char* a, String b) {
 	return strlen(a) == b.len && memcmp(a, b.ptr, b.len) == 0;
+}
+
+void printString(String s) {
+	fwrite(s.ptr, 1, s.len, stdout);
 }
 
 u64 strHash (String str) {

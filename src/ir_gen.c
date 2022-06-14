@@ -38,7 +38,7 @@ void genJump (IrBuild *ir, Block *dest) {
 
 Block *genNewBlock (Arena *arena, IrBuild *ir) {
 	SPAN(char) name = ALLOCN(arena, char, 24);
-	snprintf(name.ptr, name.len, "[block %d]", ir->block_count);
+	snprintf(name.ptr, name.len, "__%d", ir->block_count);
 	ir->block_count++;
 	return genNewBlockLabeled(arena, ir, (String) {strlen(name.ptr), name.ptr});
 }
@@ -56,18 +56,24 @@ Block *genNewBlockLabeled (Arena *arena, IrBuild *ir, String label) {
 
 
 IrRef genAdd (IrBuild *ir, IrRef a, IrRef b) {
-	Inst i = {Ir_Add, .bin = {a, b}};
+	Inst i = {Ir_Add, .binop = {a, b}};
 	Inst *inst = ir->ir.ptr;
 
 	if (inst[a].kind == Ir_Constant && inst[b].kind == Ir_Constant) {
 		i.kind = Ir_Constant;
 		i.constant = inst[a].constant + inst[b].constant;
 	}
+	// constant is always on the rhs
+	if (inst[a].kind == Ir_Constant) {
+		IrRef tmp = i.binop.lhs;
+		i.binop.lhs = i.binop.rhs;
+		i.binop.rhs = tmp;
+	}
 	return append(ir, i);
 }
 
 IrRef genSub (IrBuild *ir, IrRef a, IrRef b) {
-	Inst i = {Ir_Sub, .bin = {a, b}};
+	Inst i = {Ir_Sub, .binop = {a, b}};
 	Inst *inst = ir->ir.ptr;
 
 	if (inst[a].kind == Ir_Constant && inst[b].kind == Ir_Constant) {
@@ -79,18 +85,24 @@ IrRef genSub (IrBuild *ir, IrRef a, IrRef b) {
 
 
 IrRef genMul (IrBuild *ir, IrRef a, IrRef b) {
-	Inst i = {Ir_Mul, .bin = {a, b}};
+	Inst i = {Ir_Mul, .binop = {a, b}};
 	Inst *inst = ir->ir.ptr;
 
 	if (inst[a].kind == Ir_Constant && inst[b].kind == Ir_Constant) {
 		i.kind = Ir_Constant;
 		i.constant = inst[a].constant * inst[b].constant;
 	}
+	// constant is always on the rhs
+	if (inst[a].kind == Ir_Constant) {
+		IrRef tmp = i.binop.lhs;
+		i.binop.lhs = i.binop.rhs;
+		i.binop.rhs = tmp;
+	}
 	return append(ir, i);
 }
 
 IrRef genDiv (IrBuild *ir, IrRef a, IrRef b) {
-	Inst i = {Ir_Div, .bin = {a, b}};
+	Inst i = {Ir_Div, .binop = {a, b}};
 	Inst *inst = ir->ir.ptr;
 
 	if (inst[a].kind == Ir_Constant && inst[b].kind == Ir_Constant) {
@@ -103,7 +115,7 @@ IrRef genDiv (IrBuild *ir, IrRef a, IrRef b) {
 }
 
 IrRef genOr (IrBuild *ir, IrRef a, IrRef b) {
-	Inst i = {Ir_BitOr, .bin = {a, b}};
+	Inst i = {Ir_BitOr, .binop = {a, b}};
 	Inst *inst = ir->ir.ptr;
 
 	if (inst[a].kind == Ir_Constant && inst[b].kind == Ir_Constant) {
@@ -112,11 +124,17 @@ IrRef genOr (IrBuild *ir, IrRef a, IrRef b) {
 // 			comperror();
 		i.constant = inst[a].constant | inst[b].constant;
 	}
+	// constant is always on the rhs
+	if (inst[a].kind == Ir_Constant) {
+		IrRef tmp = i.binop.lhs;
+		i.binop.lhs = i.binop.rhs;
+		i.binop.rhs = tmp;
+	}
 	return append(ir, i);
 }
 
 IrRef genXor (IrBuild *ir, IrRef a, IrRef b) {
-	Inst i = {Ir_BitXor, .bin = {a, b}};
+	Inst i = {Ir_BitXor, .binop = {a, b}};
 	Inst *inst = ir->ir.ptr;
 
 	if (inst[a].kind == Ir_Constant && inst[b].kind == Ir_Constant) {
@@ -125,11 +143,17 @@ IrRef genXor (IrBuild *ir, IrRef a, IrRef b) {
 // 			comperror();
 		i.constant = inst[a].constant ^ inst[b].constant;
 	}
+	// constant is always on the rhs
+	if (inst[a].kind == Ir_Constant) {
+		IrRef tmp = i.binop.lhs;
+		i.binop.lhs = i.binop.rhs;
+		i.binop.rhs = tmp;
+	}
 	return append(ir, i);
 }
 
 IrRef genAnd (IrBuild *ir, IrRef a, IrRef b) {
-	Inst i = {Ir_BitAnd, .bin = {a, b}};
+	Inst i = {Ir_BitAnd, .binop = {a, b}};
 	Inst *inst = ir->ir.ptr;
 
 	if (inst[a].kind == Ir_Constant && inst[b].kind == Ir_Constant) {
@@ -138,11 +162,17 @@ IrRef genAnd (IrBuild *ir, IrRef a, IrRef b) {
 // 			comperror();
 		i.constant = inst[a].constant & inst[b].constant;
 	}
+	// constant is always on the rhs
+	if (inst[a].kind == Ir_Constant) {
+		IrRef tmp = i.binop.lhs;
+		i.binop.lhs = i.binop.rhs;
+		i.binop.rhs = tmp;
+	}
 	return append(ir, i);
 }
 
 IrRef genLessThan(IrBuild *ir, IrRef a, IrRef b) {
-	Inst i = {Ir_LessThan, .bin = {a, b}};
+	Inst i = {Ir_LessThan, .binop = {a, b}};
 	Inst *inst = ir->ir.ptr;
 
 	if (inst[a].kind == Ir_Constant && inst[b].kind == Ir_Constant) {
@@ -153,7 +183,7 @@ IrRef genLessThan(IrBuild *ir, IrRef a, IrRef b) {
 }
 
 IrRef genLessThanOrEquals(IrBuild *ir, IrRef a, IrRef b) {
-	Inst i = {Ir_LessThanOrEquals, .bin = {a, b}};
+	Inst i = {Ir_LessThanOrEquals, .binop = {a, b}};
 	Inst *inst = ir->ir.ptr;
 
 	if (inst[a].kind == Ir_Constant && inst[b].kind == Ir_Constant) {
@@ -185,21 +215,17 @@ IrRef genFunctionRef (IrBuild *ir, Function *func) {
 	return append(ir, (Inst) {Ir_Function, .funcref = func});
 }
 
-IrRef genLoad (IrBuild *ir, IrRef ref) {
-	IrRef load = append(ir, (Inst) {Ir_Load, .unop = ref});
+IrRef genLoad (IrBuild *ir, IrRef ref, u32 size) {
+	IrRef load = append(ir, (Inst) {Ir_Load, .binop = {ref, size}});
 	PUSH (ir->insertion_block->mem_instructions, load);
 	return load;
 }
 
 IrRef genStore (IrBuild *ir, IrRef dest, IrRef value) {
-	IrRef store = append(ir, (Inst) {Ir_Store, .bin = {dest, value}});
+	IrRef store = append(ir, (Inst) {Ir_Store, .binop = {dest, value}});
 	PUSH (ir->insertion_block->mem_instructions, store);
 	PUSH (ir->insertion_block->side_effecting_instructions, store);
 	return store;
-}
-
-void printString(String s) {
-	fwrite(s.ptr, 1, s.len, stdout);
 }
 
 static void printBlock (Block *blk, IrList ir) {
@@ -216,7 +242,7 @@ static void printBlock (Block *blk, IrList ir) {
 		switch (inst.kind) {
 		case Ir_Function:
 			printf("func ");
-			fwrite(inst.funcref->name.ptr, 1, inst.funcref->name.len, stdout);
+			printString(inst.funcref->name);
 			break;
 		case Ir_Constant:
 			printf("const 0x%lx (%lu)", (unsigned long) inst.constant, (unsigned long) inst.constant);
@@ -243,43 +269,43 @@ static void printBlock (Block *blk, IrList ir) {
 			printf("param %lu", (unsigned long) inst.unop);
 			break;
 		case Ir_StackAlloc:
-			printf("alloc %lu", (unsigned long) inst.unop);
+			printf("stack %lu", (unsigned long) inst.unop);
 			break;
 		case Ir_Load:
 			printf("load %lu", (unsigned long) inst.unop);
 			break;
 		case Ir_Store:
-			printf("store %lu <- %lu", (unsigned long) inst.bin.lhs, (unsigned long) inst.bin.rhs);
+			printf("store %lu <- %lu", (unsigned long) inst.binop.lhs, (unsigned long) inst.binop.rhs);
 			break;
 		case Ir_Add:
-			printf("add %lu %lu", (unsigned long) inst.bin.lhs, (unsigned long) inst.bin.rhs);
+			printf("add %lu %lu", (unsigned long) inst.binop.lhs, (unsigned long) inst.binop.rhs);
 			break;
 		case Ir_Sub:
-			printf("sub %lu %lu", (unsigned long) inst.bin.lhs, (unsigned long) inst.bin.rhs);
+			printf("sub %lu %lu", (unsigned long) inst.binop.lhs, (unsigned long) inst.binop.rhs);
 			break;
 		case Ir_Mul:
-			printf("mul %lu %lu", (unsigned long) inst.bin.lhs, (unsigned long) inst.bin.rhs);
+			printf("mul %lu %lu", (unsigned long) inst.binop.lhs, (unsigned long) inst.binop.rhs);
 			break;
 		case Ir_Div:
-			printf("div %lu %lu", (unsigned long) inst.bin.lhs, (unsigned long) inst.bin.rhs);
+			printf("div %lu %lu", (unsigned long) inst.binop.lhs, (unsigned long) inst.binop.rhs);
 			break;
 		case Ir_BitAnd:
-			printf("and %lu %lu", (unsigned long) inst.bin.lhs, (unsigned long) inst.bin.rhs);
+			printf("and %lu %lu", (unsigned long) inst.binop.lhs, (unsigned long) inst.binop.rhs);
 			break;
 		case Ir_BitOr:
-			printf("or %lu %lu", (unsigned long) inst.bin.lhs, (unsigned long) inst.bin.rhs);
+			printf("or %lu %lu", (unsigned long) inst.binop.lhs, (unsigned long) inst.binop.rhs);
 			break;
 		case Ir_BitNot:
 			printf("not %lu", (unsigned long) inst.unop);
 			break;
 		case Ir_BitXor:
-			printf("xor %lu %lu", (unsigned long) inst.bin.lhs, (unsigned long) inst.bin.rhs);
+			printf("xor %lu %lu", (unsigned long) inst.binop.lhs, (unsigned long) inst.binop.rhs);
 			break;
 		case Ir_LessThan:
-			printf("cmp %lu < %lu", (unsigned long) inst.bin.lhs, (unsigned long) inst.bin.rhs);
+			printf("cmp %lu < %lu", (unsigned long) inst.binop.lhs, (unsigned long) inst.binop.rhs);
 			break;
 		case Ir_LessThanOrEquals:
-			printf("cmp %lu <= %lu", (unsigned long) inst.bin.lhs, (unsigned long) inst.bin.rhs);
+			printf("cmp %lu <= %lu", (unsigned long) inst.binop.lhs, (unsigned long) inst.binop.rhs);
 			break;
 		}
 		printf("\n");

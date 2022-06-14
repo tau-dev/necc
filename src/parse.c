@@ -137,7 +137,7 @@ void parseFile (Arena *arena, const char *code) {
 			} else {
 				sym->kind = Sym_Value;
 				sym->value.function = ALLOC (arena, Function);
-				*sym->value.function = (Function) {decl.type.function, .name = decl.name};
+				*sym->value.function = (Function) {decl.name, decl.type.function};
 				sym->value.typ = decl.type;
 			}
 
@@ -224,19 +224,22 @@ void parseFunction (Parse *parse) {
 	u32 count = func->type.parameters.len;
 
 	func->entry = ALLOC(parse->arena, Block);
-	func->entry = genNewBlockLabeled(parse->arena, &parse->ir, STRING("[entry]"));
+	func->entry = genNewBlockLabeled(parse->arena, &parse->ir, STRING("__entry"));
 	parse->current_scope = (Scope) {0};
 
 	for (u32 i = 0; i < count; i++) {
 		Declaration param = func->type.parameters.ptr[i];
 		Symbol *sym = defSymbol(parse, param.name);
 		sym->kind = Sym_Value;
-		sym->value = (Value) {param.type, {{genParameter(&parse->ir, param.type), true}}};
+		IrRef slot = genStackAlloc(&parse->ir, param.type);
+		sym->value = (Value) {param.type, {{slot, true}}};
+		IrRef paramval = genParameter(&parse->ir, param.type);
+		genStore(&parse->ir, slot, paramval);
 	}
 
 	parseCompound(parse);
 
-	// TODO Warning if this is reachable.
+	// TODO Warning if this is reachable and return type is not void.
 	genReturnVal(&parse->ir, IR_REF_NONE);
 
 	popScope(parse->current_scope);
@@ -805,9 +808,9 @@ static Value pointerAdd(IrBuild *ir, Value lhs, Value rhs, Parse *op_parse) {
 
 static Value dereference(IrBuild *ir, Value v) {
 	assert(v.typ.kind == Kind_Pointer);
-	v.typ = *v.typ.pointer;
 	if (v.byref)
-		v.ir = genLoad(ir, v.ir);
+		v.ir = genLoad(ir, v.ir, typeSize(v.typ));
+	v.typ = *v.typ.pointer;
 	v.byref = true;
 	return v;
 }
@@ -817,7 +820,7 @@ Value rvalue(Value v, Parse *parse) {
 		v.ir = genFunctionRef(&parse->ir, v.function);
 		v.typ.kind = Kind_FunctionPtr;
 	} else if (v.byref) {
-		v.ir = genLoad(&parse->ir, v.ir);
+		v.ir = genLoad(&parse->ir, v.ir, typeSize(v.typ));
 		v.byref = false;
 	}
 	return v;
