@@ -275,7 +275,7 @@ static void printBlock (Block *blk, IrList ir) {
 			printf("load %lu", (unsigned long) inst.unop);
 			break;
 		case Ir_Store:
-			printf("store %lu <- %lu", (unsigned long) inst.binop.lhs, (unsigned long) inst.binop.rhs);
+			printf("store [%lu] <- %lu", (unsigned long) inst.binop.lhs, (unsigned long) inst.binop.rhs);
 			break;
 		case Ir_Add:
 			printf("add %lu %lu", (unsigned long) inst.binop.lhs, (unsigned long) inst.binop.rhs);

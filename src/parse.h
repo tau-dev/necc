@@ -3,6 +3,7 @@
 // #include "ast.h"
 #include "arena.h"
 #include "ir.h"
+#include "lex.h"
 
 
 typedef enum {
@@ -37,7 +38,7 @@ typedef struct Symbol {
 } Symbol;
 
 extern StringMap symbols;
-void parseFile(Arena *arena, const char *code);
+void parse(Arena *arena, Tokenization tokens);
 
 
 

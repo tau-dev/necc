@@ -1,6 +1,7 @@
 #include "util.h"
 #include "wyhash.h"
 #include "stdio.h"
+#include "ansii.h"
 
 #define SLOT_UNUSED 0
 #define SLOT_TOMBSTONE 128
@@ -12,13 +13,95 @@ bool eql (const char* a, String b) {
 	return strlen(a) == b.len && memcmp(a, b.ptr, b.len) == 0;
 }
 
-void printString(String s) {
+bool startsWith (const char* a, String b) {
+	return memcmp(a, b.ptr, b.len) == 0;
+}
+
+String zString (const char *s) {
+	return (String) {strlen(s), s};
+}
+
+static void printErr (SourceFile source, u32 offset, const char *msg, ...) {
+    va_list args;
+    va_start(args, msg);
+    vprintErr(source, offset, msg, args);
+    va_end(args);
+}
+
+String readAllAlloc (String filename) {
+	char *filename_z = malloc(filename.len + 1);
+	if (filename_z) {
+		memcpy(filename_z, filename.ptr, filename.len);
+		filename_z[filename.len] = 0;
+		FILE *f = fopen(filename_z, "r");
+		if (f) {
+			if (fseek(f, 0, SEEK_END) == 0) {
+				long count = ftell(f);
+				if (count >= 0 && fseek(f, 0, SEEK_SET) == 0) {
+					char *data = malloc(count+1);
+					if (data) {
+						size_t got = fread(data, 1, count, f);
+						const char *nullbyte = memchr(data, 0, got);
+						if (nullbyte) {
+							SourceFile source = { filename, {got, data} };
+							printErr(source, nullbyte - data, "file should not contain a null byte");
+						} else if (got == (size_t)count) {
+							data[count] = 0;
+							free(filename_z);
+							fclose(f);
+							return (String) {count, data};
+						}
+						free(data);
+					}
+				}
+			}
+			fclose(f);
+		}
+		free(filename_z);
+	}
+	return (String) {0};
+}
+
+void printString (String s) {
 	fwrite(s.ptr, 1, s.len, stdout);
 }
 
 u64 strHash (String str) {
 	return wyhash(str.ptr, str.len, 1337, _wyp);
 }
+
+typedef struct {
+	u32 line;
+	u32 col;
+} SourceLocation;
+
+SourceLocation findSourcePos(const char *source, const char *pos) {
+	u32 line = 1;
+	u32 col = 1;
+	while (source < pos) {
+		if (*source == '\n') {
+			line++;
+			col = 1;
+		} else {
+			col++;
+		}
+		source++;
+	}
+	return (SourceLocation) {line, col};
+}
+
+void vprintErr (SourceFile source, u32 offset, const char *msg, va_list vlist) {
+	SourceLocation loc = findSourcePos(
+			source.content.ptr, source.content.ptr + offset);
+
+	fwrite(source.name.ptr, source.name.len, 1, stderr);
+	fprintf(stderr, ":%lu:%lu: " RED "error: " RESET,
+			(unsigned long) loc.line, (unsigned long) loc.col);
+
+    vfprintf(stderr, msg, vlist);
+    printf(".\n");
+}
+
 
 
 static u32 find (StringMap *map, u64 hash, String str) {
@@ -142,3 +225,9 @@ void *mapRemove (StringMap *map, String str) {
 }
 
 
+void mapFree (StringMap *map) {
+	free(map->headers);
+	map->headers = NULL;
+	free(map->content);
+	map->content = NULL;
+}

@@ -5,6 +5,7 @@
 #include <string.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include <stdarg.h>
 
 
 #define SPAN(type) struct { size_t len; type *ptr; }
@@ -47,7 +48,7 @@ typedef SPAN(const char) String;
 
 
 
-#define CHECK(a, msg) if (!(a)) {puts("error: " msg); exit(EXIT_FAILURE); }
+#define CHECK(a, msg) do { if (!(a)) {puts("error: " msg); exit(EXIT_FAILURE); } } while(0)
 
 #define uchar uint8_t
 #define u8 uint8_t
@@ -63,10 +64,15 @@ u64 strHash(String);
 void printString(String s);
 
 typedef struct {
+	String name; // non-owning
+	String content;
+} SourceFile;
+
+typedef struct {
 	u8 *headers;
 
 	// Array of pointers to structs whose first item must be the
-	// key String.
+	// key String. (Upcast allowed by 6.7.2.1-13)
 	void **content;
 	u32 used;
 	u32 capacity;
@@ -76,7 +82,12 @@ typedef struct {
 void **mapGetOrCreate(StringMap *, String);
 void *mapGet(StringMap *, String);
 void *mapRemove(StringMap *, String);
+void mapFree(StringMap *);
 
 bool eql(const char *, String);
+bool startsWith(const char *, String);
+String zString(const char *);
+String readAllAlloc (String filename);
 
+void vprintErr(SourceFile, u32, const char *, va_list);
 

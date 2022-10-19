@@ -50,10 +50,12 @@ typedef enum {
 	Tok_Key_Do,
 	Tok_Key_For,
 	Tok_Key_Return,
-	Tok_Key_Define,
 	Tok_Key_Typedef,
 	Tok_Key_First = Tok_Key_If,
 	Tok_Key_Last = Tok_Key_Typedef,
+
+	Tok_PreprocDirective,
+	Tok_PreprocConcatenate,
 
 	Tok_EOF,
 } TokenKind;
@@ -76,8 +78,21 @@ typedef struct {
 typedef struct Lexer Lexer;
 
 
+typedef struct {
+	u32 source_file_offset;
+	u16 source_file_ref;
+	u16 macro_file_ref;
+	u32 macro_file_offset;
+} TokenPosition;
+
+// All members allocated with malloc
+typedef struct {
+	LIST(SourceFile) files;
+	Token *tokens;
+	TokenPosition *positions;
+	u32 tokens_count;
+} Tokenization;
+
 typedef LIST(Token) Token_List;
-Token getToken(const char **code);
-Token peekToken(const char *code);
-Token_List lex(const char *code);
+Tokenization lex(const char *filename);
 

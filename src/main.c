@@ -9,24 +9,6 @@
 #include "ir_gen.h"
 
 
-char *readAll (const char *filename) {
-	FILE *f = fopen(filename, "rb");
-	CHECK(f, "Failed to open file.")
-	fseek(f, 0, SEEK_END);
-
-	long fsize = ftell(f);
-	CHECK(fsize > 0 && fsize != LONG_MAX, "Failed to open file.")
-	fseek(f, 0, SEEK_SET);
-
-	char *content = malloc(fsize + 1);
-	CHECK(content, "Out of memory on reading file.")
-
-	CHECK(fread(content, 1, fsize, f) == (size_t) fsize, "Failed to read file.")
-	fclose(f);
-
-	content[fsize] = 0;
-	return content;
-}
 
 void emitX64AsmSimple(Arena *arena, Function *func, String name);
 
@@ -45,14 +27,14 @@ int main (int argc, char **args) {
 		}
 	}
 	if (input == NULL) {
-		printf("please supply file name");
+		print("Please supply a file name.\n");
 		return 1;
 	}
 
-	char *code = readAll(input);
 	Arena arena = create_arena(16 * 1024);
 
-	parseFile(&arena, code);
+	Tokenization tokens = lex(input);
+	parse(&arena, tokens);
 
 	FILE *dest = fopen("a.out", "w");
 	if (!emit_ir)
@@ -79,8 +61,12 @@ int main (int argc, char **args) {
 		}
 	}
 
+#ifndef NDEBUG
+	free(tokens.tokens);
+	free(tokens.positions);
+	free(tokens.files.ptr);
 	fclose(dest);
-	free(code);
+#endif
 	return 0;
 }
 

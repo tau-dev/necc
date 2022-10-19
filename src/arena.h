@@ -16,5 +16,5 @@ Arena create_arena(size_t block_size);
 void *aalloc(Arena*, size_t size);
 void free_arena(Arena*);
 
-#define ALLOC(arena, type) (type*) aalloc((arena), sizeof (type))
+#define ALLOC(arena, type) ((type*) aalloc((arena), sizeof (type)))
 #define ALLOCN(arena, type, count) { .len = (count), .ptr = aalloc((arena), (count) * sizeof (type)) }
