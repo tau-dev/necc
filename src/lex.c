@@ -28,6 +28,7 @@ struct { char *name; TokenKind key; } names[KEYWORDS] = {
 	{"for", Tok_Key_For},
 	{"return", Tok_Key_Return},
 	{"typedef", Tok_Key_Typedef},
+	{"sizeof", Tok_Key_Sizeof},
 };
 
 Token fromWord (String word) {
@@ -218,6 +219,11 @@ typedef struct {
 	bool being_replaced;
 } Macro;
 
+// typedef struct {
+// 	Macro *m;
+// 	SPAN(SPAN(MacroToken)) parameters;
+// } MacroExpansion;
+
 static void freeMacro(Macro *m);
 static SpaceClass tryGobbleSpace(SourceFile source, const char **p);
 
@@ -240,6 +246,7 @@ Tokenization lex (const char *filename) {
 	StringMap macros = {0};
 	StringMap macro_parameters = {0};
 	LIST(Inclusion) includes_stack = {0};
+// 	LIST(MacroReplacement) replacement_stack = {0};
 
 	const char *pos = source.content.ptr;
 

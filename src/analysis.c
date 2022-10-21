@@ -13,13 +13,13 @@ void calcLifetimes(IrList ir, ValuesSpan lastuses) {
 		case Ir_BitOr:
 		case Ir_BitXor:
 		case Ir_BitAnd:
-		case Ir_Store:
-		case Ir_Load:
 		case Ir_LessThan:
 		case Ir_LessThanOrEquals:
+		case Ir_Store:
 			uses[inst.binop.lhs] = i;
-			uses[inst.binop.lhs] = i;
+			uses[inst.binop.rhs] = i;
 			break;
+		case Ir_Load:
 		case Ir_StackAlloc:
 		case Ir_BitNot:
 			uses[inst.unop] = i;

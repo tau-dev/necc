@@ -1,230 +1,169 @@
 #include "ir_gen.h"
+#define unreachable assert(0)
 #define HAS_EXITED(ir) ((ir)->insertion_block->exit.kind != Exit_None)
 
-IrRef append (IrBuild *ir, Inst inst) {
-	PUSH (ir->ir, inst);
-	return ir->ir.len - 1;
+IrRef append (IrBuild *build, Inst inst) {
+	PUSH (build->ir, inst);
+	return build->ir.len - 1;
 }
 
-IrRef genParameter (IrBuild *ir, Type t) {
-	return append(ir, (Inst) {Ir_Parameter, .unop = typeSize(t)});
+IrRef genParameter (IrBuild *build, Size size) {
+	return append(build, (Inst) {Ir_Parameter, .unop = size});
 }
 
-IrRef genStackAlloc (IrBuild *ir, Type t) {
-	return append(ir, (Inst) {Ir_StackAlloc, .unop = typeSize(t)});
+IrRef genStackAlloc (IrBuild *build, Size size) {
+	return append(build, (Inst) {Ir_StackAlloc, .unop = size});
 }
 
-void genReturnVal (IrBuild *ir, IrRef val) {
-	ir->insertion_block->last_inst = ir->ir.len - 1;
-	ir->insertion_block->exit = (Exit) {Exit_Return, .ret = val};
+void genReturnVal (IrBuild *build, IrRef val) {
+	build->insertion_block->last_inst = build->ir.len - 1;
+	build->insertion_block->exit = (Exit) {Exit_Return, .ret = val};
 }
 
-void genBranch (IrBuild *ir, IrRef condition) {
-	ir->insertion_block->last_inst = ir->ir.len - 1;
-	ir->insertion_block->exit = (Exit) {
+void genBranch (IrBuild *build, IrRef condition) {
+	build->insertion_block->last_inst = build->ir.len - 1;
+	build->insertion_block->exit = (Exit) {
 		Exit_Branch,
 		.branch = {condition}
 	};
 }
 
-void genJump (IrBuild *ir, Block *dest) {
-	ir->insertion_block->last_inst = ir->ir.len - 1;
-	ir->insertion_block->exit = (Exit) {
+void genJump (IrBuild *build, Block *dest) {
+	build->insertion_block->last_inst = build->ir.len - 1;
+	build->insertion_block->exit = (Exit) {
 		Exit_Unconditional,
 		.unconditional = dest
 	};
 }
 
 
-Block *genNewBlock (Arena *arena, IrBuild *ir) {
+Block *genNewBlock (Arena *arena, IrBuild *build) {
 	SPAN(char) name = ALLOCN(arena, char, 24);
-	snprintf(name.ptr, name.len, "__%d", ir->block_count);
-	ir->block_count++;
-	return genNewBlockLabeled(arena, ir, (String) {strlen(name.ptr), name.ptr});
+	snprintf(name.ptr, name.len, "__%d", build->block_count);
+	build->block_count++;
+	return genNewBlockLabeled(arena, build, (String) {strlen(name.ptr), name.ptr});
 }
 
-Block *genNewBlockLabeled (Arena *arena, IrBuild *ir, String label) {
+Block *genNewBlockLabeled (Arena *arena, IrBuild *build, String label) {
 	Block *new_block = ALLOC(arena, Block);
 	*new_block = (Block) {
 		.label = label,
-		.first_inst = ir->ir.len
+		.first_inst = build->ir.len
 	};
-	ir->insertion_block = new_block;
+	build->insertion_block = new_block;
 	return new_block;
 }
 
 
 
-IrRef genAdd (IrBuild *ir, IrRef a, IrRef b) {
-	Inst i = {Ir_Add, .binop = {a, b}};
-	Inst *inst = ir->ir.ptr;
+static IrRef genBinOp (IrBuild *build, InstKind op, IrRef a, IrRef b) {
+	Inst *inst = build->ir.ptr;
+	assert(inst[a].size == inst[b].size);
+	Inst i = {op, inst[a].size, .binop = {a, b}};
 
+	bool commutative = op == Ir_Add || op == Ir_Mul || op == Ir_BitAnd || op == Ir_BitOr || op == Ir_BitXor;
 	if (inst[a].kind == Ir_Constant && inst[b].kind == Ir_Constant) {
 		i.kind = Ir_Constant;
-		i.constant = inst[a].constant + inst[b].constant;
-	}
-	// constant is always on the rhs
-	if (inst[a].kind == Ir_Constant) {
+		switch (op) {
+		case Ir_Add:
+			i.constant = inst[a].constant + inst[b].constant; break;
+		case Ir_Sub:
+			i.constant = inst[a].constant - inst[b].constant; break;
+		case Ir_Mul:
+			i.constant = inst[a].constant * inst[b].constant; break;
+		case Ir_Div:
+			i.constant = inst[a].constant / inst[b].constant; break;
+		case Ir_BitAnd:
+			i.constant = inst[a].constant & inst[b].constant; break;
+		case Ir_BitOr:
+			i.constant = inst[a].constant | inst[b].constant; break;
+		case Ir_BitXor:
+			i.constant = inst[a].constant ^ inst[b].constant; break;
+		case Ir_LessThan:
+			i.constant = inst[a].constant < inst[b].constant; break;
+		case Ir_LessThanOrEquals:
+			i.constant = inst[a].constant <= inst[b].constant; break;
+		default:
+			unreachable;
+		}
+	} else if (commutative && inst[a].kind == Ir_Constant) {
 		IrRef tmp = i.binop.lhs;
 		i.binop.lhs = i.binop.rhs;
 		i.binop.rhs = tmp;
 	}
-	return append(ir, i);
+	return append(build, i);
 }
 
-IrRef genSub (IrBuild *ir, IrRef a, IrRef b) {
-	Inst i = {Ir_Sub, .binop = {a, b}};
-	Inst *inst = ir->ir.ptr;
+IrRef genAdd (IrBuild *build, IrRef a, IrRef b) {
+	return genBinOp(build, Ir_Add, a, b);
+}
 
-	if (inst[a].kind == Ir_Constant && inst[b].kind == Ir_Constant) {
-		i.kind = Ir_Constant;
-		i.constant = inst[a].constant - inst[b].constant;
-	}
-	return append(ir, i);
+IrRef genSub (IrBuild *build, IrRef a, IrRef b) {
+	return genBinOp(build, Ir_Sub, a, b);
 }
 
 
-IrRef genMul (IrBuild *ir, IrRef a, IrRef b) {
-	Inst i = {Ir_Mul, .binop = {a, b}};
-	Inst *inst = ir->ir.ptr;
-
-	if (inst[a].kind == Ir_Constant && inst[b].kind == Ir_Constant) {
-		i.kind = Ir_Constant;
-		i.constant = inst[a].constant * inst[b].constant;
-	}
-	// constant is always on the rhs
-	if (inst[a].kind == Ir_Constant) {
-		IrRef tmp = i.binop.lhs;
-		i.binop.lhs = i.binop.rhs;
-		i.binop.rhs = tmp;
-	}
-	return append(ir, i);
+IrRef genMul (IrBuild *build, IrRef a, IrRef b) {
+	return genBinOp(build, Ir_Mul, a, b);
 }
 
-IrRef genDiv (IrBuild *ir, IrRef a, IrRef b) {
-	Inst i = {Ir_Div, .binop = {a, b}};
-	Inst *inst = ir->ir.ptr;
-
-	if (inst[a].kind == Ir_Constant && inst[b].kind == Ir_Constant) {
-		i.kind = Ir_Constant;
-// 		if (inst[b].constant == 0)
-// 			comperror();
-		i.constant = inst[a].constant / inst[b].constant;
-	}
-	return append(ir, i);
+IrRef genDiv (IrBuild *build, IrRef a, IrRef b) {
+	return genBinOp(build, Ir_Div, a, b);
 }
 
-IrRef genOr (IrBuild *ir, IrRef a, IrRef b) {
-	Inst i = {Ir_BitOr, .binop = {a, b}};
-	Inst *inst = ir->ir.ptr;
-
-	if (inst[a].kind == Ir_Constant && inst[b].kind == Ir_Constant) {
-		i.kind = Ir_Constant;
-// 		if (inst[b].constant == 0)
-// 			comperror();
-		i.constant = inst[a].constant | inst[b].constant;
-	}
-	// constant is always on the rhs
-	if (inst[a].kind == Ir_Constant) {
-		IrRef tmp = i.binop.lhs;
-		i.binop.lhs = i.binop.rhs;
-		i.binop.rhs = tmp;
-	}
-	return append(ir, i);
+IrRef genOr (IrBuild *build, IrRef a, IrRef b) {
+	return genBinOp(build, Ir_BitOr, a, b);
 }
 
-IrRef genXor (IrBuild *ir, IrRef a, IrRef b) {
-	Inst i = {Ir_BitXor, .binop = {a, b}};
-	Inst *inst = ir->ir.ptr;
-
-	if (inst[a].kind == Ir_Constant && inst[b].kind == Ir_Constant) {
-		i.kind = Ir_Constant;
-// 		if (inst[b].constant == 0)
-// 			comperror();
-		i.constant = inst[a].constant ^ inst[b].constant;
-	}
-	// constant is always on the rhs
-	if (inst[a].kind == Ir_Constant) {
-		IrRef tmp = i.binop.lhs;
-		i.binop.lhs = i.binop.rhs;
-		i.binop.rhs = tmp;
-	}
-	return append(ir, i);
+IrRef genXor (IrBuild *build, IrRef a, IrRef b) {
+	return genBinOp(build, Ir_BitXor, a, b);
 }
 
-IrRef genAnd (IrBuild *ir, IrRef a, IrRef b) {
-	Inst i = {Ir_BitAnd, .binop = {a, b}};
-	Inst *inst = ir->ir.ptr;
-
-	if (inst[a].kind == Ir_Constant && inst[b].kind == Ir_Constant) {
-		i.kind = Ir_Constant;
-// 		if (inst[b].constant == 0)
-// 			comperror();
-		i.constant = inst[a].constant & inst[b].constant;
-	}
-	// constant is always on the rhs
-	if (inst[a].kind == Ir_Constant) {
-		IrRef tmp = i.binop.lhs;
-		i.binop.lhs = i.binop.rhs;
-		i.binop.rhs = tmp;
-	}
-	return append(ir, i);
+IrRef genAnd (IrBuild *build, IrRef a, IrRef b) {
+	return genBinOp(build, Ir_BitAnd, a, b);
 }
 
-IrRef genLessThan(IrBuild *ir, IrRef a, IrRef b) {
-	Inst i = {Ir_LessThan, .binop = {a, b}};
-	Inst *inst = ir->ir.ptr;
-
-	if (inst[a].kind == Ir_Constant && inst[b].kind == Ir_Constant) {
-		i.kind = Ir_Constant;
-		i.constant = inst[a].constant < inst[b].constant;
-	}
-	return append(ir, i);
+IrRef genLessThan(IrBuild *build, IrRef a, IrRef b) {
+	return genBinOp(build, Ir_LessThan, a, b);
 }
 
-IrRef genLessThanOrEquals(IrBuild *ir, IrRef a, IrRef b) {
-	Inst i = {Ir_LessThanOrEquals, .binop = {a, b}};
-	Inst *inst = ir->ir.ptr;
-
-	if (inst[a].kind == Ir_Constant && inst[b].kind == Ir_Constant) {
-		i.kind = Ir_Constant;
-		i.constant = inst[a].constant <= inst[b].constant;
-	}
-	return append(ir, i);
+IrRef genLessThanOrEquals(IrBuild *build, IrRef a, IrRef b) {
+	return genBinOp(build, Ir_LessThanOrEquals, a, b);
 }
 
-
-IrRef genImmediateInt (IrBuild *ir, long long i) {
-	return append(ir, (Inst) {Ir_Constant, {i}});
+IrRef genImmediateInt (IrBuild *build, long long i, Size size) {
+	return append(build, (Inst) {Ir_Constant, size, {i}});
 }
 
-IrRef genImmediateReal (IrBuild *ir, double r) {
+IrRef genImmediateReal (IrBuild *build, double r) {
 	(void) r;
-	(void) ir;
+	(void) build;
 	return 0; // TODO
 }
 
 
-IrRef genCall (IrBuild *ir, IrRef func, ValuesSpan args) {
-	IrRef call = append(ir, (Inst) {Ir_Call, .call = {func, args}});
-	PUSH (ir->insertion_block->side_effecting_instructions, call);
+IrRef genCall (IrBuild *build, IrRef func, ValuesSpan args) {
+	IrRef call = append(build, (Inst) {Ir_Call, .call = {func, args}});
+	PUSH (build->insertion_block->side_effecting_instructions, call);
 	return call;
 }
 
-IrRef genFunctionRef (IrBuild *ir, Function *func) {
-	return append(ir, (Inst) {Ir_Function, .funcref = func});
+IrRef genFunctionRef (IrBuild *build, Function *func) {
+	return append(build, (Inst) {Ir_Function, .funcref = func});
 }
 
-IrRef genLoad (IrBuild *ir, IrRef ref, u32 size) {
-	IrRef load = append(ir, (Inst) {Ir_Load, .binop = {ref, size}});
-	PUSH (ir->insertion_block->mem_instructions, load);
+IrRef genLoad (IrBuild *build, IrRef ref, Size size) {
+	IrRef load = append(build, (Inst) {Ir_Load, size, .unop = ref});
+	PUSH (build->insertion_block->mem_instructions, load);
 	return load;
 }
 
-IrRef genStore (IrBuild *ir, IrRef dest, IrRef value) {
-	IrRef store = append(ir, (Inst) {Ir_Store, .binop = {dest, value}});
-	PUSH (ir->insertion_block->mem_instructions, store);
-	PUSH (ir->insertion_block->side_effecting_instructions, store);
+IrRef genStore (IrBuild *build, IrRef dest, IrRef value) {
+	Inst val = build->ir.ptr[value];
+	// TODO Assert dest->size == target pointer size
+	IrRef store = append(build, (Inst) {Ir_Store, val.size, .binop = {dest, value}});
+	PUSH (build->insertion_block->mem_instructions, store);
+	PUSH (build->insertion_block->side_effecting_instructions, store);
 	return store;
 }
 
@@ -275,7 +214,7 @@ static void printBlock (Block *blk, IrList ir) {
 			printf("load %lu", (unsigned long) inst.unop);
 			break;
 		case Ir_Store:
-			printf("store [%lu] <- %lu", (unsigned long) inst.binop.lhs, (unsigned long) inst.binop.rhs);
+			printf("store [%lu] %lu", (unsigned long) inst.binop.lhs, (unsigned long) inst.binop.rhs);
 			break;
 		case Ir_Add:
 			printf("add %lu %lu", (unsigned long) inst.binop.lhs, (unsigned long) inst.binop.rhs);

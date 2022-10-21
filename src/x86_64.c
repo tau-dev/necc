@@ -3,13 +3,6 @@
 #define unreachable assert(0)
 #define ON_STACK 255
 
-typedef enum {
-	BYTE,
-	WORD,
-	DWORD,
-	QWORD,
-} Size;
-
 typedef struct {
 	u8 reg;
 	u8 size;
@@ -148,7 +141,7 @@ static void emitBlock(Codegen *c, Block *block) {
 
 		switch (inst.kind) {
 		case Ir_Add: {
-			Storage slot = regalloc(freed, next_used_registers, QWORD, i);
+			Storage slot = regalloc(freed, next_used_registers, I64, i);
 			const char *lhs = valueName(c, inst.binop.lhs);
 			const char *rhs = valueName(c, inst.binop.rhs);
 			const char *dest = storageName(c, slot);
@@ -156,7 +149,7 @@ static void emitBlock(Codegen *c, Block *block) {
 			c->storage.ptr[i] = slot;
 		} break;
 		case Ir_Sub: {
-			Storage slot = regalloc(freed, next_used_registers, QWORD, i);
+			Storage slot = regalloc(freed, next_used_registers, I64, i);
 			const char *lhs = valueName(c, inst.binop.lhs);
 			const char *rhs = valueName(c, inst.binop.rhs);
 			const char *dest = storageName(c, slot);
@@ -164,7 +157,7 @@ static void emitBlock(Codegen *c, Block *block) {
 			c->storage.ptr[i] = slot;
 		} break;
 		case Ir_Mul: {
-			Storage slot = regalloc(freed, next_used_registers, QWORD, i);
+			Storage slot = regalloc(freed, next_used_registers, I64, i);
 			const char *lhs = valueName(c, inst.binop.lhs);
 			const char *rhs = valueName(c, inst.binop.rhs);
 			const char *dest = storageName(c, slot);
@@ -172,11 +165,11 @@ static void emitBlock(Codegen *c, Block *block) {
 			c->storage.ptr[i] = slot;
 		} break;
 		case Ir_Div: {
-			Storage slot = regalloc(freed, next_used_registers, QWORD, i);
+			Storage slot = regalloc(freed, next_used_registers, I64, i);
 			const char *lhs = valueName(c, inst.binop.lhs);
 			const char *rhs = valueName(c, inst.binop.rhs);
 			if (c->ir.ptr[inst.binop.rhs].kind == Ir_Constant) {
-				Storage tmp = regalloc(-1, next_used_registers, QWORD, i);
+				Storage tmp = regalloc(-1, next_used_registers, I64, i);
 				assert(tmp.reg != ON_STACK);
 				const char *imm_reg = storageName(c, tmp);
 				print("mov %s, %s\n ", imm_reg, rhs);
@@ -195,7 +188,7 @@ static void emitBlock(Codegen *c, Block *block) {
 			print("TODO codegen xor");
 		} break;
 		case Ir_BitAnd: {
-			Storage slot = regalloc(freed, next_used_registers, QWORD, i);
+			Storage slot = regalloc(freed, next_used_registers, I64, i);
 			const char *lhs = valueName(c, inst.binop.lhs);
 			const char *rhs = valueName(c, inst.binop.rhs);
 			const char *dest = storageName(c, slot);
@@ -206,7 +199,7 @@ static void emitBlock(Codegen *c, Block *block) {
 			print("TODO codegen not");
 		} break;
 		case Ir_LessThan: {
-			Storage slot = regalloc(freed, next_used_registers, QWORD, i);
+			Storage slot = regalloc(freed, next_used_registers, I64, i);
 			const char *lhs = valueName(c, inst.binop.lhs);
 			const char *rhs = valueName(c, inst.binop.rhs);
 
@@ -214,14 +207,14 @@ static void emitBlock(Codegen *c, Block *block) {
 			c->storage.ptr[i] = slot;
 		} break;
 		case Ir_LessThanOrEquals: {
-			Storage slot = regalloc(freed, next_used_registers, QWORD, i);
+			Storage slot = regalloc(freed, next_used_registers, I64, i);
 			const char *lhs = valueName(c, inst.binop.lhs);
 			const char *rhs = valueName(c, inst.binop.rhs);
 			print("cmp %s, %s\n setl al\n movzx %s, al	; less than or equals", lhs, rhs, storageName(c, slot));
 			c->storage.ptr[i] = slot;
 		} break;
 		case Ir_StackAlloc: {
-			Storage slot = regalloc(freed, next_used_registers, QWORD, i);
+			Storage slot = regalloc(freed, next_used_registers, I64, i);
 			print("lea %s, [rsp+%d]	; alloc", storageName(c, slot), c->storage.ptr[i].stack_offset);
 			c->storage.ptr[i] = slot;
 		} break;
@@ -238,7 +231,7 @@ static void emitBlock(Codegen *c, Block *block) {
 			if (c->storage.ptr[i].reg == ON_STACK) {
 				print("TODO stack spillage");
 			} else {
-				Storage slot = regalloc(freed, next_used_registers, QWORD, i);
+				Storage slot = regalloc(freed, next_used_registers, I64, i);
 				print("mov %s, [%s]	; load", storageName(c, slot), valueName(c, inst.unop));
 				c->storage.ptr[i] = slot;
 			}
@@ -250,7 +243,7 @@ static void emitBlock(Codegen *c, Block *block) {
 				print("mov rbx, rdx");
 				reg = 1;
 			}
-			c->storage.ptr[i] = (Storage) {reg, QWORD};
+			c->storage.ptr[i] = (Storage) {reg, I64};
 			next_used_registers[reg] = i;
 			parameters_found++;
 		} break;
@@ -268,16 +261,16 @@ static void emitBlock(Codegen *c, Block *block) {
 				IrRef inst = c->used_registers[reg];
 				if (inst == IR_REF_NONE)
 					continue;
-				c->storage.ptr[inst] = (Storage){ON_STACK, QWORD, stack_param_allocated};
-				print("mov [rsp-%d], %s\n ", (int) stack_param_allocated, register_names[reg][QWORD]);
+				c->storage.ptr[inst] = (Storage){ON_STACK, I64, stack_param_allocated};
+				print("mov [rsp-%d], %s\n ", (int) stack_param_allocated, register_names[reg][I64]);
 				stack_param_allocated += 8;
 			}
-			Storage slot = regalloc(freed, next_used_registers, QWORD, i);
+			Storage slot = regalloc(freed, next_used_registers, I64, i);
 			ValuesSpan params = inst.call.parameters;
 
 			for (u32 p = 0; p < params.len; p++) {
 				u8 r = parameter_regs[p];
-				print("mov %s, %s\n ", register_names[r][QWORD], valueName(c, params.ptr[p]));
+				print("mov %s, %s\n ", register_names[r][I64], valueName(c, params.ptr[p]));
 			}
 			print("call %s\n ", valueName(c, inst.call.function_ptr));
 
@@ -286,8 +279,8 @@ static void emitBlock(Codegen *c, Block *block) {
 				IrRef inst = c->used_registers[reg];
 				if (inst == IR_REF_NONE)
 					continue;
-				print("mov %s, [rsp-%d]\n ", register_names[reg][QWORD], (int) c->storage.ptr[inst].stack_offset);
-				c->storage.ptr[inst] = (Storage){reg, QWORD};
+				print("mov %s, [rsp-%d]\n ", register_names[reg][I64], (int) c->storage.ptr[inst].stack_offset);
+				c->storage.ptr[inst] = (Storage){reg, I64};
 				stack_param_allocated -= 8;
 			}
 			print("mov %s, rax", storageName(c, slot));

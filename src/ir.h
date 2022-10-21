@@ -35,6 +35,12 @@ typedef enum {
 	Ir_StackAlloc,
 	Ir_Load,
 	Ir_Store,
+
+	Ir_Truncate,
+	Ir_SignExtend,
+	Ir_IntToFloat,
+	Ir_FloatToInt,
+
 	Ir_Add,
 	Ir_Sub,
 	Ir_Mul,
@@ -47,10 +53,19 @@ typedef enum {
 	Ir_LessThanOrEquals,
 } InstKind;
 
+typedef enum {
+	I8,
+	I16,
+	I32,
+	I64,
+	I128,
+} Size;
+
 // typedef SPAN(PhiNode) PhiNodes;
 
 typedef struct Inst {
-	InstKind kind;
+	u8 kind;
+	u8 size;
 
 	union {
 		u64 constant;
@@ -107,7 +122,7 @@ typedef struct IrBuild {
 } IrBuild;
 //=================
 
-// TODO The IR really is untyped, this belongs somewhere else.
+// TODO The IR is untyped, this really belongs somewhere else.
 
 typedef struct Type Type;
 typedef struct Declaration Declaration;
@@ -115,8 +130,14 @@ typedef struct Declaration Declaration;
 typedef LIST(Declaration) DeclList;
 
 typedef enum {
-	Basic_int,
-	Basic_char,
+	Int_bool,
+	Int_char,
+	Int_suchar, // signed or unsigned (plain char is neither!)
+	Int_short,
+	Int_int,
+	Int_long,
+	Int_longlong,
+	Int_unsigned = 8,
 } BasicType;
 
 typedef enum {
@@ -181,13 +202,22 @@ typedef struct Declaration {
 	Type type;
 } Declaration;
 
+typedef struct {
+	Type ptrdiff;
+	Type intptr;
+	int typesizes[Int_unsigned];
+} Target;
+
 bool typeEqual(Type a, Type b);
 bool fnTypeEqual(FunctionType a, FunctionType b);
-u32 typeSize(Type t);
+u32 typeSize(Type t, const Target *target);
 char *printDeclaration(Arena *a, Type t, String name);
 char *printType(Arena *a, Type t);
 void printTypeBase(Type t, char **insert, char *end);
 void printTypeHead(Type t, char **insert, char *end);
 void printTypeTail(Type t, char **insert, char *end);
 
-#define BASIC_INT ((Type) {Kind_Basic, .basic = Basic_int})
+#define BASIC_VOID ((Type) {Kind_Void})
+#define BASIC_INT ((Type) {Kind_Basic, .basic = Int_int})
+#define INT_SIZE I32
+

@@ -24,6 +24,7 @@ typedef struct {
 	Scope current_scope;
 	const Tokenization *tokens;
 	const Token *pos;
+	const Target *target;
 } Parse;
 
 
@@ -93,12 +94,12 @@ static Type parseTypeBase (const Tokenization *tokens, const Token **tok);
 static bool tryParseTypeBase (const Token **pos, Type *dest);
 static void parseFunction(Parse *parse);
 static Value rvalue(Value v, Parse *parse);
-static Value dereference(IrBuild *ir, Value v);
+static Value dereference (Parse *parse, Value v);
 static IrRef coerce(Value v, Type t, Parse *p);
 static Value pointerAdd(IrBuild *, Value lhs, Value rhs, Parse *op_parse);
 
 
-void parse (Arena *arena, Tokenization tokens) {
+void parse (Arena *arena, Tokenization tokens, Target target) {
 	(void) arena;
 	const Token *t = tokens.tokens;
 
@@ -158,6 +159,7 @@ void parse (Arena *arena, Tokenization tokens) {
 					.current_function = func,
 					.tokens = &tokens,
 					.pos = t,
+					.target = &target,
 				};
 				parseFunction(&parse);
 				func->ir = parse.ir.ir;
@@ -172,7 +174,7 @@ void parse (Arena *arena, Tokenization tokens) {
 }
 
 
-Symbol *defSymbol(Parse *parse, String name) {
+Symbol *defSymbol (Parse *parse, String name) {
 	PUSH_A(parse->arena, parse->current_scope, name);
 	Symbol *sym = malloc(sizeof(Symbol));
 	*sym = (Symbol) {name};
@@ -182,7 +184,7 @@ Symbol *defSymbol(Parse *parse, String name) {
 	return sym;
 }
 
-void removeScope(Scope names) {
+void removeScope (Scope names) {
 	for (u32 i = 0; i < names.len; i++) {
 		void **slot = mapGetOrCreate(&symbols, names.ptr[i]);
 		Symbol *s = *slot;
@@ -191,7 +193,7 @@ void removeScope(Scope names) {
 	}
 }
 
-void popScope(Parse *parse, Scope replacement) {
+void popScope (Parse *parse, Scope replacement) {
 	removeScope(parse->current_scope);
 	parse->current_scope = replacement;
 }
@@ -223,9 +225,9 @@ void parseFunction (Parse *parse) {
 		Declaration param = func->type.parameters.ptr[i];
 		Symbol *sym = defSymbol(parse, param.name);
 		sym->kind = Sym_Value;
-		IrRef slot = genStackAlloc(&parse->ir, param.type);
+		IrRef slot = genStackAlloc(&parse->ir, typeSize(param.type, parse->target));
 		sym->value = (Value) {param.type, {{slot, true}}};
-		IrRef paramval = genParameter(&parse->ir, param.type);
+		IrRef paramval = genParameter(&parse->ir, typeSize(param.type, parse->target));
 		genStore(&parse->ir, slot, paramval);
 	}
 
@@ -256,7 +258,7 @@ static void parseCompound (Parse *parse) {
 			return;
 		} else if (t.kind == Tok_EOF) {
 			parse->pos = block_begin;
-			parseerror(parse, "unclosed " BOLD "{" RESET);
+			parseerror(parse, "unclosed %s", tokenName(Tok_OpenBrace));
 		} else {
 			parseStatement(parse);
 		}
@@ -309,7 +311,7 @@ static void parseStatement (Parse *parse) {
 		case Tok_OpenBrace:
 			parseCompound(parse);
 			return;
-		case Tok_Key_Return:
+		case Tok_Key_Return: {
 			parse->pos++;
 			// TODO Check against function return type
 			if (parse->pos->kind == Tok_Semicolon) {
@@ -326,17 +328,38 @@ static void parseStatement (Parse *parse) {
 			// Unreferenced dummy block for further instructions, will be ignored
 			genNewBlock(parse->arena, &parse->ir);
 			expect(parse, Tok_Semicolon);
-			return;
-
-		case Tok_Key_If:
+		} return;
+		case Tok_Key_While: {
 			parse->pos++;
+
+			genJump(&parse->ir, NULL);
+			Block *before = parse->ir.insertion_block;
+			Block *head = genNewBlock(parse->arena, &parse->ir);
+			before->exit.unconditional = head;
+
 			expect(parse, Tok_OpenParen);
 			Parse start = *parse;
+			Value condition = rvalue(parseExpression(parse), &start);
+			expect(parse, Tok_CloseParen);
+			genBranch(&parse->ir, coerce(condition, BASIC_INT, &start));
 
+			Block *body = genNewBlock(parse->arena, &parse->ir);
+			head->exit.branch.on_true = body;
+			parseStatement(parse);
+			genJump(&parse->ir, NULL);
+
+			Block *join = genNewBlock(parse->arena, &parse->ir);
+			head->exit.branch.on_false = join;
+			body->exit.unconditional = join;
+		} return;
+		case Tok_Key_If: {
+			parse->pos++;
+
+			expect(parse, Tok_OpenParen);
 			Value condition = rvalue(parseExpression(parse), parse);
 			expect(parse, Tok_CloseParen);
+			genBranch(&parse->ir, coerce(condition, BASIC_INT, parse));
 
-			genBranch(&parse->ir, coerce(condition, BASIC_INT, &start));
 			Block *head = parse->ir.insertion_block;
 			head->exit.branch.on_true = genNewBlock(parse->arena, &parse->ir);
 			parseStatement(parse);
@@ -354,8 +377,8 @@ static void parseStatement (Parse *parse) {
 				head->exit.branch.on_false = join;
 			}
 			parse->ir.insertion_block = join;
-			break;
-		case Tok_Key_Goto:
+		} return;
+		case Tok_Key_Goto: {
 			parse->pos++;
 			String label = expect(parse, Tok_Identifier).val.identifier;
 			expect(parse, Tok_Semicolon);
@@ -363,7 +386,7 @@ static void parseStatement (Parse *parse) {
 			genJump(&parse->ir, getLabeledBlock(parse, label));
 			// Unreferenced dummy block for further instructions, will be ignored
 			genNewBlock(parse->arena, &parse->ir);
-			return;
+		} return;
 		case Tok_Semicolon:
 			return;
 		default:;
@@ -377,12 +400,11 @@ static void parseStatement (Parse *parse) {
 					Declaration decl = parseDeclaration(parse->arena, parse->tokens, &parse->pos, base_type);
 					Symbol *sym = defSymbol(parse, decl.name);
 					sym->kind = Sym_Value;
-					sym->value = (Value) {decl.type, {{genStackAlloc(&parse->ir, decl.type), true}}};
+					sym->value = (Value) {decl.type, {{genStackAlloc(&parse->ir, typeSize(decl.type, parse->target)), true}}};
 
 					if (parse->pos->kind == Tok_Equals) {
 						parse->pos++;
-						Parse start = *parse;
-						IrRef val = coerce(rvalue(parseExprAssignment(parse), parse), decl.type, &start);
+						IrRef val = coerce(rvalue(parseExprAssignment(parse), parse), decl.type, parse);
 						genStore(&parse->ir, sym->value.ir, val);
 					}
 				} while (tryEat(parse, Tok_Comma));
@@ -430,7 +452,7 @@ static Value parseExprAssignment (Parse *parse) {
 
 // TODO All of these should associate left-to-right instead of
 // right-to-left; most of them are commutative tho.
-static Value parseExprBitOr(Parse *parse) {
+static Value parseExprBitOr (Parse *parse) {
 	Value lhs = parseExprBitXor(parse);
 	if (tryEat(parse, Tok_Pipe)) {
 		Parse start = *parse;
@@ -441,7 +463,7 @@ static Value parseExprBitOr(Parse *parse) {
 	return lhs;
 }
 
-static Value parseExprBitXor(Parse *parse) {
+static Value parseExprBitXor (Parse *parse) {
 	Value lhs = parseExprBitAnd(parse);
 	if (tryEat(parse, Tok_Hat)) {
 		Parse start = *parse;
@@ -452,7 +474,7 @@ static Value parseExprBitXor(Parse *parse) {
 	return lhs;
 }
 
-static Value parseExprBitAnd(Parse *parse) {
+static Value parseExprBitAnd (Parse *parse) {
 	Value lhs = parseExprGreaterLess(parse);
 	if (tryEat(parse, Tok_Ampersand)) {
 		Parse start = *parse;
@@ -463,7 +485,7 @@ static Value parseExprBitAnd(Parse *parse) {
 	return lhs;
 }
 
-static Value parseExprGreaterLess(Parse *parse) {
+static Value parseExprGreaterLess (Parse *parse) {
 	Value lhs = parseExprAddition(parse);
 	Parse start = *parse;
 	switch (parse->pos->kind) {
@@ -516,7 +538,9 @@ static Value parseExprAddition (Parse *parse) {
 		}
 	} else {
 		if (lhs.typ.kind == Kind_Pointer) {
-			IrRef stride = genImmediateInt(&parse->ir, typeSize(*lhs.typ.pointer));
+			IrRef stride = genImmediateInt(&parse->ir,
+					typeSize(*lhs.typ.pointer, parse->target),
+				typeSize(parse->target->ptrdiff, parse->target));
 
 			if (rhs.typ.kind == Kind_Pointer) {
 				IrRef diff = genSub(&parse->ir, lhs.ir, rhs.ir);
@@ -565,7 +589,7 @@ static Value parseExprLeftUnary (Parse *parse) {
 	switch (parse->pos->kind) {
 	case Tok_Asterisk:
 		parse->pos++;
-		return dereference(&parse->ir, parseExprLeftUnary(parse));
+		return dereference(parse, parseExprLeftUnary(parse));
 	case Tok_Ampersand:
 		parse->pos++;
 		Value v = parseExprLeftUnary(parse);
@@ -624,9 +648,9 @@ static Value parseExprRightUnary (Parse *parse) {
 		} else if (tryEat(parse, Tok_OpenBracket)) {
 			v = rvalue(v, parse);
 			Parse start = *parse;
-			Value index = rvalue(parseExpression(parse), parse);
+			Value index = rvalue(parseExpression(parse), &start);
 			expect(parse, Tok_CloseBracket);
-			v = dereference(&parse->ir, pointerAdd(&parse->ir, v, index, &start));
+			v = dereference(parse, pointerAdd(&parse->ir, v, index, &start));
 		} else {
 			break;
 		}
@@ -644,7 +668,7 @@ static Value parseExprBase (Parse *parse) {
 		return v;
 	}
 	case Tok_Integer:
-		return (Value) {BASIC_INT, {{genImmediateInt(&parse->ir, t.val.integer)}}};
+		return (Value) {BASIC_INT, {{genImmediateInt(&parse->ir, t.val.integer, typeSize(BASIC_INT, parse->target))}}};
 // 	case Tok_Real:
 // 		return (Value) {{Kind_Basic, {Basic_double}}, genImmediateReal(t.val.real)};
 	case Tok_Identifier: {
@@ -654,6 +678,17 @@ static Value parseExprBase (Parse *parse) {
 		if (sym->kind != Sym_Value)
 			parseerror(parse, "expected value, found type");
 		return sym->value;
+	}
+	case Tok_Key_Sizeof: {
+		Type typ;
+		if (!tryParseTypeBase(&parse->pos, &typ)) {
+			Block *current = parse->ir.insertion_block;
+			// Emit the expression into a block which is then discarded. Pretty hacky.
+			genNewBlock(parse->arena, &parse->ir);
+			typ = parseExprBase(parse).typ;
+			parse->ir.insertion_block = current;
+		}
+		return (Value) {BASIC_INT, {{genImmediateInt(&parse->ir, typeSize(typ, parse->target), typeSize(BASIC_INT, parse->target))}}};
 	}
 	default:
 		parseerror(parse, "expected an expression");
@@ -676,14 +711,13 @@ static bool tryParseTypeBase (const Token **tok, Type *type) {
 	return true;
 }
 
-
 u8 parseQualifiers (const Tokenization *tokens, const Token **tok) {
 	(void) tokens;
 	(void) tok;
 	return 0;
 }
 
-static Declaration parseDeclaration(Arena *arena, const Tokenization *tokens, const Token **pos, Type base_type) {
+static Declaration parseDeclaration (Arena *arena, const Tokenization *tokens, const Token **pos, Type base_type) {
 	Declaration decl = {.type = base_type};
 	const Token *t = *pos;
 
@@ -754,7 +788,7 @@ static Declaration parseDeclaration(Arena *arena, const Tokenization *tokens, co
 }
 
 
-static Value pointerAdd(IrBuild *ir, Value lhs, Value rhs, Parse *op_parse) {
+static Value pointerAdd (IrBuild *ir, Value lhs, Value rhs, Parse *op_parse) {
 	assert(lhs.typ.kind == Kind_Pointer || rhs.typ.kind == Kind_Pointer);
 	if (lhs.typ.kind == Kind_Pointer && rhs.typ.kind == Kind_Pointer)
 		parseerror(op_parse, "cannot add two pointers");
@@ -762,37 +796,39 @@ static Value pointerAdd(IrBuild *ir, Value lhs, Value rhs, Parse *op_parse) {
 	IrRef integer;
 	if (lhs.typ.kind == Kind_Pointer) {
 		ptr = lhs;
-		integer = coerce(rhs, BASIC_INT, op_parse);
+		integer = coerce(rhs, op_parse->target->ptrdiff, op_parse);
 	} else {
-		integer = coerce(lhs, BASIC_INT, op_parse);
+		integer = coerce(lhs, op_parse->target->ptrdiff, op_parse);
 		ptr = rhs;
 	}
-	IrRef stride = genImmediateInt(ir, typeSize(*ptr.typ.pointer));
+	IrRef stride = genImmediateInt(ir,
+			typeSize(*ptr.typ.pointer, op_parse->target),
+		typeSize(op_parse->target->ptrdiff, op_parse->target));
 	IrRef diff = genMul(ir, stride, integer);
 	return (Value) {ptr.typ, {{genAdd(ir, ptr.ir, diff)}}};
 }
 
-static Value dereference(IrBuild *ir, Value v) {
+static Value dereference (Parse *parse, Value v) {
 	assert(v.typ.kind == Kind_Pointer);
 	if (v.byref)
-		v.ir = genLoad(ir, v.ir, typeSize(v.typ));
+		v.ir = genLoad(&parse->ir, v.ir, typeSize(v.typ, parse->target));
 	v.typ = *v.typ.pointer;
 	v.byref = true;
 	return v;
 }
 
-Value rvalue(Value v, Parse *parse) {
+Value rvalue (Value v, Parse *parse) {
 	if (v.typ.kind == Kind_Function) {
 		v.ir = genFunctionRef(&parse->ir, v.function);
 		v.typ.kind = Kind_FunctionPtr;
 	} else if (v.byref) {
-		v.ir = genLoad(&parse->ir, v.ir, typeSize(v.typ));
+		v.ir = genLoad(&parse->ir, v.ir, typeSize(v.typ, parse->target));
 		v.byref = false;
 	}
 	return v;
 }
 
-IrRef coerce(Value v, Type t, Parse *p) {
+IrRef coerce (Value v, Type t, Parse *p) {
 	if (!typeEqual(v.typ, t)) {
 		parseerror(p, "could not convert type %s to type %s",
 			printType(p->arena, v.typ), printType(p->arena, t));

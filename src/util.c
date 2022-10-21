@@ -102,8 +102,6 @@ void vprintErr (SourceFile source, u32 offset, const char *msg, va_list vlist) {
     printf(".\n");
 }
 
-
-
 static u32 find (StringMap *map, u64 hash, String str) {
 	if (map->used == 0)
 		return FOUND_NONE;

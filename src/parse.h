@@ -38,7 +38,7 @@ typedef struct Symbol {
 } Symbol;
 
 extern StringMap symbols;
-void parse(Arena *arena, Tokenization tokens);
+void parse(Arena *arena, Tokenization tokens, Target target);
 
 
 

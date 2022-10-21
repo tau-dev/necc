@@ -33,8 +33,22 @@ int main (int argc, char **args) {
 
 	Arena arena = create_arena(16 * 1024);
 
+	Target target_x64_linux_gcc = {
+		.ptrdiff = {Kind_Basic, .basic = Int_long},
+		.intptr = {Kind_Basic, .basic = Int_long},
+		.typesizes = {
+			[Int_bool] = I8,
+			[Int_char] = I8,
+			[Int_suchar] = I8,
+			[Int_short] = I16,
+			[Int_int] = I32,
+			[Int_long] = I64,
+			[Int_longlong] = I64,
+		},
+	};
+
 	Tokenization tokens = lex(input);
-	parse(&arena, tokens);
+	parse(&arena, tokens, target_x64_linux_gcc);
 
 	FILE *dest = fopen("a.out", "w");
 	if (!emit_ir)

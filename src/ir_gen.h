@@ -1,8 +1,8 @@
 #include "ir.h"
 #include "parse.h"
 
-IrRef genParameter(IrBuild *ir, Type t);
-IrRef genStackAlloc(IrBuild *ir, Type t);
+IrRef genParameter(IrBuild *ir, Size size);
+IrRef genStackAlloc(IrBuild *ir, Size size);
 // IrRef genReturn(IrBuild *ir);
 IrRef genAdd(IrBuild *ir, IrRef a, IrRef b);
 IrRef genSub(IrBuild *ir, IrRef a, IrRef b);
@@ -13,7 +13,7 @@ IrRef genXor(IrBuild *ir, IrRef a, IrRef b);
 IrRef genAnd(IrBuild *ir, IrRef a, IrRef b);
 IrRef genLessThan(IrBuild *ir, IrRef a, IrRef b);
 IrRef genLessThanOrEquals(IrBuild *ir, IrRef a, IrRef b);
-IrRef genImmediateInt(IrBuild *ir, long long i);
+IrRef genImmediateInt(IrBuild *ir, long long i, Size size);
 IrRef genImmediateReal(IrBuild *ir, double r);
 IrRef genCall(IrBuild *ir, IrRef func, ValuesSpan args);
 IrRef genFunctionRef(IrBuild *ir, Function *func);

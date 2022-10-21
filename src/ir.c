@@ -5,18 +5,14 @@
 
 // TODO The IR really is untyped, this belongs somewhere else.
 
-u32 typeSize (Type t) {
+// TODO This is really target-dependent
+Size typeSize (Type t, const Target *target) {
 	switch (t.kind) {
 	case Kind_Basic:
-		switch (t.basic) {
-		case Basic_int:
-			return 4;
-		case Basic_char:
-			return 1;
-		}
-		break;
+		assert(t.basic != (Int_char | Int_unsigned) && t.basic != (Int_bool | Int_unsigned));
+		return target->typesizes[t.basic & ~Int_unsigned];
 	case Kind_Pointer:
-		return 8;
+		return I64;
 	default: {}
 	}
 	return 0;
@@ -112,16 +108,31 @@ void printTypeBase(Type t, char **pos, char *end) {
 	case Kind_Void:
 		printto(pos, end, "void");
 		break;
-	case Kind_Basic:
-		switch (t.basic) {
-		case Basic_int:
-			printto(pos, end, "int");
-			break;
-		case Basic_char:
-			printto(pos, end, "char");
-			break;
+	case Kind_Basic: {
+		BasicType basic = t.basic;
+		if (basic | Int_unsigned) {
+			printto(pos, end, "unsigned ");
+			basic &= ~Int_unsigned;
+		} else if (basic == Int_suchar) {
+			printto(pos, end, "signed ");
 		}
-		break;
+		switch (t.basic) {
+		case Int_bool:
+			printto(pos, end, "_Bool"); break;
+		case Int_char:
+		case Int_suchar:
+			printto(pos, end, "char"); break;
+		case Int_short:
+			printto(pos, end, "short"); break;
+		case Int_int:
+			printto(pos, end, "int"); break;
+		case Int_long:
+			printto(pos, end, "long"); break;
+		case Int_longlong:
+			printto(pos, end, "long long"); break;
+		default: assert(!"illegal type value");
+		}
+	} break;
 	case Kind_Struct:
 		printto(pos, end, "struct {???}");
 		break;

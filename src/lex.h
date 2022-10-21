@@ -51,8 +51,9 @@ typedef enum {
 	Tok_Key_For,
 	Tok_Key_Return,
 	Tok_Key_Typedef,
+	Tok_Key_Sizeof,
 	Tok_Key_First = Tok_Key_If,
-	Tok_Key_Last = Tok_Key_Typedef,
+	Tok_Key_Last = Tok_Key_Sizeof,
 
 	Tok_PreprocDirective,
 	Tok_PreprocConcatenate,
