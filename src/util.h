@@ -66,6 +66,7 @@ void printString(String s);
 typedef struct {
 	String name; // non-owning
 	String content;
+	u32 idx;
 } SourceFile;
 
 typedef struct {
@@ -87,7 +88,7 @@ void mapFree(StringMap *);
 bool eql(const char *, String);
 bool startsWith(const char *, String);
 String zString(const char *);
-String readAllAlloc (String filename);
+SourceFile *readAllAlloc (String source, String filename);
 
 void vprintErr(SourceFile, u32, const char *, va_list);
 

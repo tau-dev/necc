@@ -28,28 +28,34 @@ static void printErr (SourceFile source, u32 offset, const char *msg, ...) {
     va_end(args);
 }
 
-String readAllAlloc (String filename) {
-	char *filename_z = malloc(filename.len + 1);
+SourceFile *readAllAlloc (String path, String filename) {
+	char *filename_z = malloc(path.len + filename.len + 1);
 	if (filename_z) {
-		memcpy(filename_z, filename.ptr, filename.len);
-		filename_z[filename.len] = 0;
+		memcpy(filename_z, path.ptr, path.len);
+		memcpy(filename_z + path.len, filename.ptr, filename.len);
+		filename_z[path.len + filename.len] = 0;
 		FILE *f = fopen(filename_z, "r");
 		if (f) {
 			if (fseek(f, 0, SEEK_END) == 0) {
 				long count = ftell(f);
 				if (count >= 0 && fseek(f, 0, SEEK_SET) == 0) {
-					char *data = malloc(count+1);
+					char *data = malloc(sizeof(SourceFile) + count+1);
+					char *content = data + sizeof(SourceFile);
 					if (data) {
-						size_t got = fread(data, 1, count, f);
-						const char *nullbyte = memchr(data, 0, got);
+						size_t got = fread(content, 1, count, f);
+						const char *nullbyte = memchr(content, 0, got);
 						if (nullbyte) {
-							SourceFile source = { filename, {got, data} };
-							printErr(source, nullbyte - data, "file should not contain a null byte");
+							SourceFile source = { filename, {got, content} };
+							printErr(source, nullbyte - content, "file should not contain a null byte");
 						} else if (got == (size_t)count) {
-							data[count] = 0;
+							content[count] = 0;
 							free(filename_z);
 							fclose(f);
-							return (String) {count, data};
+							SourceFile *result = (SourceFile*) data;
+							result->name = filename;
+							result->content = (String) {count, content};
+							result->idx = 0;
+							return result;
 						}
 						free(data);
 					}
@@ -59,7 +65,7 @@ String readAllAlloc (String filename) {
 		}
 		free(filename_z);
 	}
-	return (String) {0};
+	return NULL;
 }
 
 void printString (String s) {

@@ -33,6 +33,18 @@ int main (int argc, char **args) {
 
 	Arena arena = create_arena(16 * 1024);
 
+	String sys_paths[] = {
+		zString("/home/tau/foreign/lang/musl-1.2.3/include/"),
+	};
+	String user_paths[] = {
+		zString("./"),
+	};
+	Paths paths = {
+		.sys_include_dirs = {1, sys_paths},
+		.user_include_dirs = {1, user_paths},
+	};
+	Tokenization tokens = lex(input, paths);
+
 	Target target_x64_linux_gcc = {
 		.ptrdiff = {Kind_Basic, .basic = Int_long},
 		.intptr = {Kind_Basic, .basic = Int_long},
@@ -46,8 +58,6 @@ int main (int argc, char **args) {
 			[Int_longlong] = I64,
 		},
 	};
-
-	Tokenization tokens = lex(input);
 	parse(&arena, tokens, target_x64_linux_gcc);
 
 	FILE *dest = fopen("a.out", "w");

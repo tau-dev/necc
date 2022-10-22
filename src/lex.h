@@ -23,7 +23,9 @@ typedef enum {
 	Tok_Arrow,
 	Tok_Plus,
 	Tok_PlusEquals,
+	Tok_DoublePlus,
 	Tok_Minus,
+	Tok_DoubleMinus,
 	Tok_MinusEquals,
 	Tok_Asterisk,
 	Tok_AsteriskEquals,
@@ -88,12 +90,17 @@ typedef struct {
 
 // All members allocated with malloc
 typedef struct {
-	LIST(SourceFile) files;
+	LIST(SourceFile*) files;
 	Token *tokens;
 	TokenPosition *positions;
 	u32 tokens_count;
 } Tokenization;
 
+typedef struct {
+	SPAN(String) sys_include_dirs;
+	SPAN(String) user_include_dirs;
+} Paths;
+
 typedef LIST(Token) Token_List;
-Tokenization lex(const char *filename);
+Tokenization lex(const char *filename, Paths paths);
 

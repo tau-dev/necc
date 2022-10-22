@@ -98,6 +98,9 @@ Token getToken (const char **p) {
 		if (pos[1] == '=') {
 			pos++;
 			tok.kind = Tok_PlusEquals;
+		} else if (pos[1] == '+') {
+			pos++;
+			tok.kind = Tok_DoublePlus;
 		} else {
 			tok.kind = Tok_Plus;
 		}
@@ -107,7 +110,11 @@ Token getToken (const char **p) {
 			pos++;
 			tok.kind = Tok_Arrow;
 		} else if (pos[1] == '=') {
+			pos++;
 			tok.kind = Tok_MinusEquals;
+		} else if (pos[1] == '-') {
+			pos++;
+			tok.kind = Tok_DoubleMinus;
 		} else {
 			tok.kind = Tok_Minus;
 		}
@@ -164,6 +171,16 @@ Token getToken (const char **p) {
 			tok = (Token) { Tok_PreprocDirective, { .identifier = {pos - start, start} } };
 		}
 		break;
+	case '\"': {
+		pos++;
+		const char *begin = pos;
+		while (*pos != '\"') {
+			if (*pos == '\\') pos++;
+			pos++;
+		}
+		// TODO Error reporting
+		tok = (Token) { Tok_String, { .string = {pos - begin, begin} } };
+	} break;
 	default:
 		if (isAlpha(pos[0])) {
 			const char *start = pos;
@@ -172,7 +189,7 @@ Token getToken (const char **p) {
 
 			tok = fromWord((String) {pos - start, start});
 			pos--;
-		} else if (isDigit(pos[0])) {
+		} else if (isDigit(pos[0]) || pos[0] == '.') {
 			const char *start = pos;
 
 			while (isDigit(*pos))
@@ -227,7 +244,7 @@ typedef struct {
 static void freeMacro(Macro *m);
 static SpaceClass tryGobbleSpace(SourceFile source, const char **p);
 
-Tokenization lex (const char *filename) {
+Tokenization lex (const char *filename, Paths paths) {
 	typedef struct {
 		u16 file;
 		const char *pos;
@@ -236,13 +253,15 @@ Tokenization lex (const char *filename) {
 	Arena macro_arena = create_arena(2048);
 	Tokenization t = {0};
 
-	SourceFile source = { zString(filename), readAllAlloc(zString(filename)) };
-	if (source.content.ptr == NULL) {
+	SourceFile *initial_source = readAllAlloc(zString(""), zString(filename));
+	if (initial_source == NULL) {
 		fprintf(stderr, RED "error: " RESET "could not open file \"%s\"\n", filename);
 		exit(1);
 	}
-	PUSH(t.files, source);
+	PUSH(t.files, initial_source);
+	SourceFile source = *initial_source;
 
+	StringMap sources = {0};
 	StringMap macros = {0};
 	StringMap macro_parameters = {0};
 	LIST(Inclusion) includes_stack = {0};
@@ -251,7 +270,6 @@ Tokenization lex (const char *filename) {
 	const char *pos = source.content.ptr;
 
 	u32 tokens_capactity = 0;
-	u16 current_source_ref = 0;
 	u32 i = 0;
 
 	while (*pos) {
@@ -263,12 +281,11 @@ Tokenization lex (const char *filename) {
 			line_begin = tryGobbleSpace(source, &pos) == Space_Linebreak || file_begin;
 			begin = pos;
 			tok = getToken(&pos);
-			if (tok.kind != Tok_EOF || current_source_ref == 0)
+			if (tok.kind != Tok_EOF || source.idx == 0)
 				break;
 			Inclusion inc = POP(includes_stack);
-			current_source_ref = inc.file;
 			pos = inc.pos;
-			source = t.files.ptr[current_source_ref];
+			source = *t.files.ptr[inc.file];
 		}
 
 		u32 source_pos = begin - source.content.ptr;
@@ -289,14 +306,14 @@ Tokenization lex (const char *filename) {
 						lexerror(source, pos, "macro identifier may only contain alphanumeric characters");
 					pos++;
 				}
-				String name = {pos - start, pos};
+				String name = {pos - start, start};
 				void **entry = mapGetOrCreate(&macros, name);
 				if (*entry != NULL)
 					printf("redefinition!\n");
 
 				Macro *mac = ALLOC(&macro_arena, Macro);
 				*entry = &mac->name;
-				*mac = (Macro) {name, current_source_ref};
+				*mac = (Macro) {name, source.idx};
 
 				u32 parameters = 0;
 				if (pos[0] == '(') {
@@ -373,15 +390,30 @@ Tokenization lex (const char *filename) {
 				}
 
 				String includefilename = {pos - begin, begin};
-				// TODO Deduplicate inclusions
-				SourceFile new_source = { includefilename, readAllAlloc(includefilename) };
-				if (new_source.content.ptr == NULL)
-					lexerror(source, begin, "could not open include file");
+
+				SourceFile *new_source = NULL;
+				void **already_loaded = mapGetOrCreate(&sources, includefilename);
+				if (*already_loaded) {
+					new_source = *already_loaded;
+				} else {
+					if (delimiter == '\"') {
+						for (u32 i = 0; i < paths.user_include_dirs.len && new_source == NULL; i++) {
+							new_source = readAllAlloc(paths.user_include_dirs.ptr[i], includefilename);
+						}
+					}
+					for (u32 i = 0; i < paths.sys_include_dirs.len && new_source == NULL; i++) {
+						new_source = readAllAlloc(paths.sys_include_dirs.ptr[i], includefilename);
+					}
+					if (new_source == NULL)
+						lexerror(source, begin, "could not open include file \"%.*s\"", (int)includefilename.len, includefilename.ptr);
+					new_source->idx = t.files.len;
+					PUSH(t.files, new_source);
+					*already_loaded = new_source;
+				}
 				pos++;
-				PUSH(includes_stack, ((Inclusion) {current_source_ref, pos}));
-				source = new_source;
-				PUSH(t.files, source);
-				current_source_ref = t.files.len - 1;
+				PUSH(includes_stack, ((Inclusion) {source.idx, pos}));
+
+				source = *new_source;
 				pos = source.content.ptr;
 			} else {
 				lexerror(source, pos, "unknown preprocessor directive");
@@ -408,7 +440,7 @@ Tokenization lex (const char *filename) {
 					t.tokens[i + r] = macro_tok.tok;
 					t.positions[i + r] = (TokenPosition) {
 						.source_file_offset = source_pos,
-						.source_file_ref = current_source_ref,
+						.source_file_ref = source.idx,
 						.macro_file_offset = macro_tok.source_pos,
 						.macro_file_ref = macro->source_ref,
 					};
@@ -424,10 +456,10 @@ Tokenization lex (const char *filename) {
 			t.positions = realloc(t.positions, sizeof(t.positions[0]) * tokens_capactity);
 		}
 		t.tokens[i] = tok;
-		t.positions[i] = (TokenPosition) {source_pos, current_source_ref};
+		t.positions[i] = (TokenPosition) {source_pos, source.idx};
 		i++;
 
-		if (tok.kind == Tok_EOF && current_source_ref == 0)
+		if (tok.kind == Tok_EOF && source.idx == 0)
 			break;
 	}
 
@@ -440,6 +472,7 @@ Tokenization lex (const char *filename) {
 	}
 	free_arena(&macro_arena);
 	mapFree(&macros);
+	mapFree(&sources);
 	return t;
 }
 
@@ -514,7 +547,7 @@ static SpaceClass tryGobbleSpace(SourceFile source, const char **p) {
 			if (!pos[0])
 				lexerror(source, begin, "comment must end before end of file");
 			pos += 2;
-		} {
+		} else {
 			if (!isSpace(pos[0])) {
 				if (pos == *p)
 					return Space_None;
