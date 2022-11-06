@@ -1,6 +1,9 @@
 #include "ir_gen.h"
-#define unreachable assert(0)
 #define HAS_EXITED(ir) ((ir)->insertion_block->exit.kind != Exit_None)
+
+
+// Some constant folding is performed here.
+// Some arithmetic simplifications require e.g. use-counts, and need to be performed in a separate step.
 
 IrRef append (IrBuild *build, Inst inst) {
 	PUSH (build->ir, inst);
@@ -11,7 +14,11 @@ IrRef genParameter (IrBuild *build, Size size) {
 	return append(build, (Inst) {Ir_Parameter, .unop = size});
 }
 
-IrRef genStackAlloc (IrBuild *build, Size size) {
+IrRef genStackAllocFixed (IrBuild *build, u32 size) {
+	IrRef r = genImmediateInt(build, size, I32);
+	return genStackAlloc(build, r);
+}
+IrRef genStackAlloc (IrBuild *build, IrRef size) {
 	return append(build, (Inst) {Ir_StackAlloc, .unop = size});
 }
 
@@ -87,9 +94,8 @@ static IrRef genBinOp (IrBuild *build, InstKind op, IrRef a, IrRef b) {
 			unreachable;
 		}
 	} else if (commutative && inst[a].kind == Ir_Constant) {
-		IrRef tmp = i.binop.lhs;
-		i.binop.lhs = i.binop.rhs;
-		i.binop.rhs = tmp;
+		i.binop.lhs = b;
+		i.binop.rhs = a;
 	}
 	return append(build, i);
 }
@@ -123,12 +129,71 @@ IrRef genAnd (IrBuild *build, IrRef a, IrRef b) {
 	return genBinOp(build, Ir_BitAnd, a, b);
 }
 
-IrRef genLessThan(IrBuild *build, IrRef a, IrRef b) {
-	return genBinOp(build, Ir_LessThan, a, b);
+
+IrRef genBitNot (IrBuild *build, IrRef a) {
+	Inst *inst = build->ir.ptr;
+	Inst i = {Ir_BitNot, inst[a].size, .unop = a};
+	if (inst[a].kind == Ir_Constant) {
+		i.kind = Ir_Constant;
+		i.constant = ~inst[a].constant;
+	}
+	return append(build, i);
 }
 
-IrRef genLessThanOrEquals(IrBuild *build, IrRef a, IrRef b) {
-	return genBinOp(build, Ir_LessThanOrEquals, a, b);
+IrRef genNot(IrBuild *build, IrRef a) {
+	Inst *inst = build->ir.ptr;
+	Inst i = {Ir_Equals, inst[a].size};
+
+	if (inst[a].kind == Ir_Constant) {
+		i.kind = Ir_Constant;
+		i.constant = !inst[a].constant;
+	}
+
+	return append(build, i);
+}
+
+IrRef genEquals(IrBuild *build, IrRef a, IrRef b, Size size) {
+	Inst *inst = build->ir.ptr;
+	assert(inst[a].size == inst[b].size);
+	Inst i = {Ir_Equals, size, .binop = {a, b}};
+
+	if (inst[a].kind == Ir_Constant) {
+		if (inst[b].kind == Ir_Constant) {
+			i.kind = Ir_Constant;
+			i.constant = inst[a].constant == inst[b].constant;
+		} else {
+			i.binop.lhs = b;
+			i.binop.rhs = a;
+		}
+	}
+
+	return append(build, i);
+}
+
+IrRef genLessThan(IrBuild *build, IrRef a, IrRef b, Size size) {
+	Inst *inst = build->ir.ptr;
+	assert(inst[a].size == inst[b].size);
+	Inst i = {Ir_LessThan, size, .binop = {a, b}};
+
+	if (inst[a].kind == Ir_Constant && inst[b].kind == Ir_Constant) {
+		i.kind = Ir_Constant;
+		i.constant = inst[a].constant < inst[b].constant;
+	}
+
+	return append(build, i);
+}
+
+IrRef genLessThanOrEquals(IrBuild *build, IrRef a, IrRef b, Size size) {
+	Inst *inst = build->ir.ptr;
+	assert(inst[a].size == inst[b].size);
+	Inst i = {Ir_LessThanOrEquals, size, .binop = {a, b}};
+
+	if (inst[a].kind == Ir_Constant && inst[b].kind == Ir_Constant) {
+		i.kind = Ir_Constant;
+		i.constant = inst[a].constant <= inst[b].constant;
+	}
+
+	return append(build, i);
 }
 
 IrRef genImmediateInt (IrBuild *build, long long i, Size size) {
@@ -141,6 +206,26 @@ IrRef genImmediateReal (IrBuild *build, double r) {
 	return 0; // TODO
 }
 
+IrRef genTrunc (IrBuild *build, IrRef source, Size target) {
+	Inst *inst = build->ir.ptr;
+	assert(inst[source].size > target);
+
+	return append(build, (Inst) {Ir_Truncate, target, {source}});
+}
+
+IrRef genSignExt (IrBuild *build, IrRef source, Size target) {
+	Inst *inst = build->ir.ptr;
+	assert(inst[source].size < target);
+
+	return append(build, (Inst) {Ir_SignExtend, target, {source}});
+}
+
+IrRef genZeroExt (IrBuild *build, IrRef source, Size target) {
+	Inst *inst = build->ir.ptr;
+	assert(inst[source].size < target);
+
+	return append(build, (Inst) {Ir_ZeroExtend, target, {source}});
+}
 
 IrRef genCall (IrBuild *build, IrRef func, ValuesSpan args) {
 	IrRef call = append(build, (Inst) {Ir_Call, .call = {func, args}});

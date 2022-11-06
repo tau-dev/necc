@@ -1,4 +1,5 @@
 #include "util.h"
+#include "types.h"
 
 
 typedef enum {
@@ -17,7 +18,11 @@ typedef enum {
 	Tok_Semicolon,
 	Tok_Comma,
 	Tok_Colon,
+	Tok_Dot,
+	Tok_TripleDot,
 
+	Tok_Bang,
+	Tok_BangEquals,
 	Tok_Equals,
 	Tok_DoubleEquals,
 	Tok_Arrow,
@@ -52,10 +57,42 @@ typedef enum {
 	Tok_Key_Do,
 	Tok_Key_For,
 	Tok_Key_Return,
-	Tok_Key_Typedef,
+	Tok_Key_Break,
+	Tok_Key_Default,
 	Tok_Key_Sizeof,
+	Tok_Key_Alignof,
+	Tok_Key_Alignas,
+	Tok_Key_Typeof,
+	Tok_Key_TypeofUnqual,
+	Tok_Key_Generic,
+
+	Tok_Key_Struct,
+	Tok_Key_Enum,
+	Tok_Key_Union,
+	Tok_Key_Bool,
+	Tok_Key_Char,
+	Tok_Key_Int,
+	Tok_Key_Void,
+	Tok_Key_Float,
+	Tok_Key_Double,
+
+	Tok_Key_Long,
+	Tok_Key_Short,
+	Tok_Key_Signed,
+	Tok_Key_Unsigned,
+	Tok_Key_Const,
+	Tok_Key_Volatile,
+	Tok_Key_Restrict,
+	Tok_Key_Atomic,
+
+	Tok_Key_Typedef,
+	Tok_Key_Auto,
+	Tok_Key_Register,
+	Tok_Key_Static,
+	Tok_Key_Extern,
+	Tok_Key_Threadlocal,
 	Tok_Key_First = Tok_Key_If,
-	Tok_Key_Last = Tok_Key_Sizeof,
+	Tok_Key_Last = Tok_Key_Threadlocal,
 
 	Tok_PreprocDirective,
 	Tok_PreprocConcatenate,
@@ -70,9 +107,11 @@ typedef struct {
 	TokenKind kind;
 
 	union {
+		struct {
+			long long integer;
+			BasicType int_type;
+		};
 		String identifier;
-// 		KeywordKind keyword;
-		long long integer;
 		double real;
 		String string;
 	} val;
@@ -93,7 +132,8 @@ typedef struct {
 	LIST(SourceFile*) files;
 	Token *tokens;
 	TokenPosition *positions;
-	u32 tokens_count;
+	u32 count;
+	u32 capacity;
 } Tokenization;
 
 typedef struct {
@@ -102,5 +142,4 @@ typedef struct {
 } Paths;
 
 typedef LIST(Token) Token_List;
-Tokenization lex(const char *filename, Paths paths);
-
+Tokenization lex(const char *filename, Paths paths, Target *version);

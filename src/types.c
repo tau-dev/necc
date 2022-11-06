@@ -1,11 +1,23 @@
-#include "ir.h"
+#include "types.h"
+#include "ansii.h"
+// #include <stdarg.h>
 
-#include <stdarg.h>
+const char *version_names[Version_Lax + 1] = {
+	[Version_C89] = "C89",
+	[Version_C99] = "C99",
+
+	// lol. The compiler does not care to distinguish between C11 and
+	// C17; semantics always follow C17 (therefore the enum name),
+	// but the version name is emitted for "requires version $x"-style
+	// messages, and all relevant features are already present in C11.
+	[Version_C17] = "C11",
+	[Version_C23] = "C23",
+	[Version_GNU] = "GNU extensions",
+	[Version_MSVC] = "MSVC extensions",
+	[Version_Lax] = "lax version checking",
+};
 
 
-// TODO The IR really is untyped, this belongs somewhere else.
-
-// TODO This is really target-dependent
 Size typeSize (Type t, const Target *target) {
 	switch (t.kind) {
 	case Kind_Basic:
@@ -13,13 +25,43 @@ Size typeSize (Type t, const Target *target) {
 		return target->typesizes[t.basic & ~Int_unsigned];
 	case Kind_Pointer:
 		return I64;
-	default: {}
+	default: assert(0);
 	}
-	return 0;
+}
+
+u32 typeSizeBytes (Type t, const Target *target) {
+	switch (t.kind) {
+	case Kind_Struct: {
+		StructMember last = t.structure.ptr[t.structure.len - 1];
+		u32 max_alignment = 1;
+		for (u32 i = 0; i < t.structure.len; i++) {
+			u32 align = typeAlignment(t.structure.ptr[i].type, target);
+			if (align > max_alignment)
+				max_alignment = align;
+		}
+		u32 tightsize = last.offset + typeSizeBytes(last.type, target);
+		return ((tightsize + max_alignment - 1) / max_alignment) * max_alignment;
+	}
+	default:
+		return 1 << typeSize(t, target);
+	}
 }
 
 
-bool fnTypeEqual(FunctionType a, FunctionType b) {
+u32 typeAlignment (Type t, const Target *target) {
+	u32 size = typeSizeBytes(t, target);
+	return size < 8 ? size : 8;
+}
+
+u32 addMemberOffset (u32 *offset, Type t, const Target *target) {
+	u32 alignment = typeAlignment(t, target);
+	u32 aligned = ((*offset + alignment - 1) / alignment) * alignment;
+	*offset = aligned + typeSizeBytes(t, target);
+	return aligned;
+}
+
+
+bool fnTypeEqual (FunctionType a, FunctionType b) {
 	if (!typeEqual(*a.rettype, *b.rettype))
 		return false;
 	if (a.parameters.len != b.parameters.len)
@@ -31,7 +73,7 @@ bool fnTypeEqual(FunctionType a, FunctionType b) {
 	return true;
 }
 
-bool typeEqual(Type a, Type b) {
+bool typeEqual (Type a, Type b) {
 	if (a.kind != b.kind)
 		return false;
 
@@ -49,7 +91,7 @@ bool typeEqual(Type a, Type b) {
 	}
 }
 
-void printto(char **insert, const char *end, char *fmt, ...) {
+void printto (char **insert, const char *end, char *fmt, ...) {
 	if (*insert >= end)
 		return;
 	va_list args;
@@ -65,7 +107,7 @@ void printto(char **insert, const char *end, char *fmt, ...) {
 
 #define MAX_TYPE_STRING_LENGTH 1024
 
-char *printDeclaration(Arena *arena, Type t, String name) {
+char *printDeclaration (Arena *arena, Type t, String name) {
 	char *string = aalloc(arena, MAX_TYPE_STRING_LENGTH);
 	char *pos = string;
 	char *end = string + MAX_TYPE_STRING_LENGTH;
@@ -81,22 +123,33 @@ char *printDeclaration(Arena *arena, Type t, String name) {
 
 	return string;
 }
-char *printType(Arena *arena, Type t) {
-	char *string = aalloc(arena, MAX_TYPE_STRING_LENGTH);
-	char *pos = string;
-	char *end = string + MAX_TYPE_STRING_LENGTH;
 
-	printTypeBase(t, &pos, end);
+static void printComplete (char **pos, const char *end, Type t) {
+	printTypeBase(t, pos, end);
 	if (t.kind != Kind_Basic && t.kind != Kind_Void && t.kind != Kind_Struct && t.kind != Kind_Struct) {
-		printto(&pos, end, " ");
-		printTypeHead(t, &pos, end);
-		printTypeTail(t, &pos, end);
+		printto(pos, end, " ");
+		printTypeHead(t, pos, end);
+		printTypeTail(t, pos, end);
 	}
+}
 
+char *printType (Arena *arena, Type t) {
+	char *string = aalloc(arena, MAX_TYPE_STRING_LENGTH);
+	printComplete(&string, string + MAX_TYPE_STRING_LENGTH, t);
+	return string;
+
+}
+
+char *printTypeHighlighted (Arena *arena, Type t) {
+	char *string = aalloc(arena, MAX_TYPE_STRING_LENGTH);
+	const char *end = string + MAX_TYPE_STRING_LENGTH;
+	printto(&string, end, BOLD);
+	printComplete(&string, end - strlen(RESET), t);
+	printto(&string, end, RESET);
 	return string;
 }
 
-void printTypeBase(Type t, char **pos, char *end) {
+void printTypeBase(Type t, char **pos, const char *end) {
 	switch (t.kind) {
 	case Kind_Pointer:
 		printTypeBase(*t.pointer, pos, end); break;
@@ -110,13 +163,13 @@ void printTypeBase(Type t, char **pos, char *end) {
 		break;
 	case Kind_Basic: {
 		BasicType basic = t.basic;
-		if (basic | Int_unsigned) {
+		if (basic & Int_unsigned) {
 			printto(pos, end, "unsigned ");
 			basic &= ~Int_unsigned;
 		} else if (basic == Int_suchar) {
 			printto(pos, end, "signed ");
 		}
-		switch (t.basic) {
+		switch (basic) {
 		case Int_bool:
 			printto(pos, end, "_Bool"); break;
 		case Int_char:
@@ -142,13 +195,7 @@ void printTypeBase(Type t, char **pos, char *end) {
 	}
 }
 
-void printTypeHead(Type t, char **pos, char *end) {
-	// Is this quite right?
-	if (t.storage == Storage_Extern)
-		printto(pos, end, "static ");
-	if (t.storage == Storage_Static)
-		printto(pos, end, "static ");
-
+void printTypeHead (Type t, char **pos, const char *end) {
 	if (t.qualifiers & Qualifier_Const)
 		printto(pos, end, "const ");
 	if (t.qualifiers & Qualifier_Atomic)
@@ -176,7 +223,7 @@ void printTypeHead(Type t, char **pos, char *end) {
 	}
 }
 
-void printTypeTail(Type t, char **pos, char *end) {
+void printTypeTail (Type t, char **pos, const char *end) {
 	switch (t.kind) {
 	case Kind_Pointer:
 		if (t.pointer->kind == Kind_Function || t.pointer->kind == Kind_Pointer)
@@ -211,4 +258,5 @@ void printTypeTail(Type t, char **pos, char *end) {
 	default: {}
 	}
 }
+
 

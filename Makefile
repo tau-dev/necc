@@ -2,8 +2,9 @@ C_TESTS = $(wildcard tests/*.c)
 C_SRCS = $(wildcard src/*.c)
 C_HDRS = $(wildcard src/*.h)
 
-C_FLAGS = -D_DEFAULT_SOURCE -lunwind -lm -std=c11 -Werror -Wall -Wextra -Wno-unused-command-line-argument -pedantic -Wpedantic -Wno-missing-field-initializers
+C_FLAGS = -D_DEFAULT_SOURCE -lm -std=c11 -Werror -Wall -Wextra -Wno-unused-command-line-argument -pedantic -Wpedantic -Wno-missing-field-initializers
 C_DBG_FLAGS = -g -O0 -fsanitize=address -fsanitize=undefined
+#C_DBG_FLAGS = -g -O0
 C_REL_FLAGS = -O3 -fstrict-aliasing -flto -DNDEBUG -w
 
 OBJS = $(patsubst src/%.c,bin/%.o,$(C_SRCS))

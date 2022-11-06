@@ -1,6 +1,6 @@
 #include "analysis.h"
+#include "types.h"
 
-#define unreachable assert(0)
 #define ON_STACK 255
 
 typedef struct {
@@ -248,7 +248,7 @@ static void emitBlock(Codegen *c, Block *block) {
 			parameters_found++;
 		} break;
 		case Ir_Phi: {
-			print("TODO codegen phi");
+			assert(!"TODO codegen phi");
 		} break;
 		case Ir_Function:
 		case Ir_Constant:

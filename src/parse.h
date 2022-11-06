@@ -7,29 +7,39 @@
 
 
 typedef enum {
-	Sym_Type,
-	Sym_Value,
-} SymbolKind;
+	Ref_RValue,
+	Ref_RValue_Struct, // TODO Support this
+	Ref_LValue_Register,
+	Ref_LValue,
+} ReferenceClass;
 
+// PERFOMANCE Reduce size
 typedef struct {
 	Type typ;
+
 	union {
 		struct {
 			IrRef ir;
-			// If true, ir is a pointer to the value. All lvalues are byref, as well as rvalues of structure or union type.
-			bool byref;
+			// ReferenceClass. ir holds the direct value only for
+			// Reference_RValue, pointer to the actual value otherwise.
+			u8 byref;
 		};
-		// FIXME Type of the function is overdetermined!
+		// STYLE Type of the function is overdetermined!
 		Function *function;
 	};
 } Value;
 
-typedef struct Symbol Symbol;
+typedef enum {
+	Sym_Type,
+	Sym_Value,
+} SymbolKind;
 
+typedef struct Symbol Symbol;
 typedef struct Symbol {
 	String name;
 	Symbol *shadowed;
 	SymbolKind kind;
+	u8 storage;
 
 	union {
 		Value value;

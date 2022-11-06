@@ -108,7 +108,7 @@ void vprintErr (SourceFile source, u32 offset, const char *msg, va_list vlist) {
     printf(".\n");
 }
 
-static u32 find (StringMap *map, u64 hash, String str) {
+static u32 find (const StringMap *map, u64 hash, String str) {
 	if (map->used == 0)
 		return FOUND_NONE;
 
@@ -209,7 +209,7 @@ void **mapGetOrCreate (StringMap *map, String str) {
 		return insertNew(map, hash);
 }
 
-void *mapGet (StringMap *map, String str) {
+void *mapGet (const StringMap *map, String str) {
 	u32 i = find(map, strHash(str), str);
 	if (i == FOUND_NONE)
 		return NULL;
@@ -234,4 +234,6 @@ void mapFree (StringMap *map) {
 	map->headers = NULL;
 	free(map->content);
 	map->content = NULL;
+	map->used = 0;
+	map->capacity = 0;
 }

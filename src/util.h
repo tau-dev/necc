@@ -7,12 +7,16 @@
 #include <stdbool.h>
 #include <stdarg.h>
 
+#include "main.h"
+
 
 #define SPAN(type) struct { size_t len; type *ptr; }
 typedef SPAN(const char) String;
 #define SPAN_EQL(a, b) (sizeof(*(a).ptr) == sizeof(*(b).ptr) && (a).len == (b).len && memcmp((a).ptr, (b).ptr, sizeof(*(a).ptr) * (a).len) == 0)
 #define STRING(text) (String) { .len = strlen(text), .ptr = text }
 #define STRING_EMPTY (String) { .len = 0, .ptr = NULL }
+#define ARRAY_SPAN(arr) {sizeof(arr)/sizeof((arr)[0]), (arr)}
+
 
 #define LIST(type) struct { size_t capacity; size_t len; type *ptr; }
 // TODO Catch OOM
@@ -47,8 +51,8 @@ typedef SPAN(const char) String;
 
 
 
-
-#define CHECK(a, msg) do { if (!(a)) {puts("error: " msg); exit(EXIT_FAILURE); } } while(0)
+// #define CHECK(a, msg) do { if (!(a)) {puts("error: " msg); exit(EXIT_FAILURE); } } while(0)
+#define unreachable (assert(!"reached unreachable code"))
 
 #define uchar uint8_t
 #define u8 uint8_t
@@ -81,7 +85,7 @@ typedef struct {
 
 
 void **mapGetOrCreate(StringMap *, String);
-void *mapGet(StringMap *, String);
+void *mapGet(const StringMap *, String);
 void *mapRemove(StringMap *, String);
 void mapFree(StringMap *);
 
