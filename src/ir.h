@@ -25,12 +25,13 @@ typedef struct {
 
 
 typedef enum {
-	Ir_Function,
+	Ir_Reloc,
 	Ir_Constant,
 	Ir_Call,
 	Ir_Phi,
 	Ir_Parameter,
 	Ir_StackAlloc,
+	Ir_StackDealloc,
 	Ir_Load,
 	Ir_Store,
 
@@ -68,12 +69,17 @@ typedef struct Inst {
 	u8 kind;
 	u8 size;
 
+	// TODO Remove unnamed members for C99-compatibility
 	union {
 		u64 constant;
 		Call call;
 		LIST(IrRef) phi;
-		Function *funcref;
+
 		IrRef unop;
+		struct {
+			u32 id;
+			i64 offset;
+		} reloc;
 		struct {
 			IrRef lhs;
 			IrRef rhs;
@@ -122,8 +128,10 @@ typedef struct Block {
 
 
 typedef struct IrBuild {
-	u32 block_count;
 	IrList ir;
+	Block *entry;
+
+	u32 block_count;
 	Block *insertion_block;
 } IrBuild;
 

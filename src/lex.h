@@ -1,3 +1,4 @@
+#pragma once
 #include "util.h"
 #include "types.h"
 
@@ -100,8 +101,10 @@ typedef enum {
 	Tok_EOF,
 } TokenKind;
 
-
 const char *tokenName(TokenKind k);
+// Dynamically allocates.
+// [currently unused]
+const char *tokenNameHighlighted(TokenKind k);
 
 typedef struct {
 	TokenKind kind;
@@ -116,8 +119,6 @@ typedef struct {
 		String string;
 	} val;
 } Token;
-
-typedef struct Lexer Lexer;
 
 
 typedef struct {

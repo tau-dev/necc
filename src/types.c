@@ -1,20 +1,25 @@
 #include "types.h"
 #include "ansii.h"
+#include "util.h"
 // #include <stdarg.h>
+
+
+// Used in the phrasings "supported with $version" and "target uses $version".
 
 const char *version_names[Version_Lax + 1] = {
 	[Version_C89] = "C89",
 	[Version_C99] = "C99",
-
 	// lol. The compiler does not care to distinguish between C11 and
-	// C17; semantics always follow C17 (therefore the enum name),
-	// but the version name is emitted for "requires version $x"-style
-	// messages, and all relevant features are already present in C11.
+	// C17; semantics always follow C17 (therefore the enum name;
+	// __STDC_VERSION__ is 201710L), but all relevant features are
+	// already present in C11.
 	[Version_C17] = "C11",
 	[Version_C23] = "C23",
+
 	[Version_GNU] = "GNU extensions",
 	[Version_MSVC] = "MSVC extensions",
-	[Version_Lax] = "lax version checking",
+
+	[Version_Lax] = "lax conformance checks",
 };
 
 
@@ -24,18 +29,20 @@ Size typeSize (Type t, const Target *target) {
 		assert(t.basic != (Int_char | Int_unsigned) && t.basic != (Int_bool | Int_unsigned));
 		return target->typesizes[t.basic & ~Int_unsigned];
 	case Kind_Pointer:
+	case Kind_FunctionPtr:
 		return I64;
 	default: assert(0);
 	}
 }
 
+// result of 0 means incomplete type.
 u32 typeSizeBytes (Type t, const Target *target) {
 	switch (t.kind) {
 	case Kind_Struct: {
-		StructMember last = t.structure.ptr[t.structure.len - 1];
+		StructMember last = t.struct_members.ptr[t.struct_members.len - 1];
 		u32 max_alignment = 1;
-		for (u32 i = 0; i < t.structure.len; i++) {
-			u32 align = typeAlignment(t.structure.ptr[i].type, target);
+		for (u32 i = 0; i < t.struct_members.len; i++) {
+			u32 align = typeAlignment(t.struct_members.ptr[i].type, target);
 			if (align > max_alignment)
 				max_alignment = align;
 		}
@@ -61,53 +68,72 @@ u32 addMemberOffset (u32 *offset, Type t, const Target *target) {
 }
 
 
-bool fnTypeEqual (FunctionType a, FunctionType b) {
-	if (!typeEqual(*a.rettype, *b.rettype))
+bool fnTypeCompatible (FunctionType a, FunctionType b) {
+	if (!typeCompatible(*a.rettype, *b.rettype))
 		return false;
 	if (a.parameters.len != b.parameters.len)
 		return false;
 
 	for (u32 u = 0; u < a.parameters.len; u++)
-		if (!typeEqual(a.parameters.ptr[u].type, b.parameters.ptr[u].type))
+		if (!typeCompatible(a.parameters.ptr[u].type, b.parameters.ptr[u].type))
 			return false;
 	return true;
 }
 
-bool typeEqual (Type a, Type b) {
-	if (a.kind != b.kind)
-		return false;
+bool typeCompatible (Type a, Type b) {
+	if (a.kind != b.kind) {
+		if (b.kind == Kind_Enum) {
+			Type tmp = a;
+			a = b;
+			b = tmp;
+		}
+		return a.kind == Kind_Enum && b.kind == Kind_Basic && b.basic == Int_int;
+	}
 
 	switch (a.kind) {
 	case Kind_Function:
 	case Kind_FunctionPtr:
-		return fnTypeEqual(a.function, b.function);
+		return fnTypeCompatible(a.function, b.function);
 	case Kind_Pointer:
-		return typeEqual(*a.pointer, *b.pointer);
+		return typeCompatible(*a.pointer, *b.pointer);
 	case Kind_Basic:
 		return a.basic == b.basic;
+	case Kind_Enum:
+		// TODO
+		return true;
+	case Kind_Union:
+		if (a.union_members.len != b.union_members.len)
+			return false;
+		for (u32 i = 0; i < a.union_members.len; i++) {
+			if (!SPAN_EQL(a.union_members.ptr[i].name, b.union_members.ptr[i].name))
+				return false;
+			// FIXME Possible infinite recursion?
+			if (!typeCompatible(a.union_members.ptr[i].type, a.union_members.ptr[i].type))
+				return false;
+		}
+		return true;
+	case Kind_Struct:
+		// TODO Check name tags.
+		if (a.struct_members.len != b.struct_members.len)
+			return false;
+		for (u32 i = 0; i < a.struct_members.len; i++) {
+			if (!SPAN_EQL(a.struct_members.ptr[i].name, b.struct_members.ptr[i].name))
+				return false;
+			// FIXME Possible infinite recursion?
+			if (!typeCompatible(a.struct_members.ptr[i].type, a.struct_members.ptr[i].type))
+				return false;
+		}
+		return true;
 	default:
 		printf("could not compare types, assuming equal\n");
 		return true;
 	}
 }
 
-void printto (char **insert, const char *end, char *fmt, ...) {
-	if (*insert >= end)
-		return;
-	va_list args;
-    va_start(args, fmt);
-    int count = vsnprintf(*insert, end-*insert, fmt, args);
-    va_end(args);
-    if (count < 0) {
-    	perror(NULL);
-    	exit(1);
-    }
-    *insert += count;
-}
 
 #define MAX_TYPE_STRING_LENGTH 1024
 
-char *printDeclaration (Arena *arena, Type t, String name) {
+char *printDeclarator (Arena *arena, Type t, String name) {
 	char *string = aalloc(arena, MAX_TYPE_STRING_LENGTH);
 	char *pos = string;
 	char *end = string + MAX_TYPE_STRING_LENGTH;
@@ -126,26 +152,35 @@ char *printDeclaration (Arena *arena, Type t, String name) {
 
 static void printComplete (char **pos, const char *end, Type t) {
 	printTypeBase(t, pos, end);
-	if (t.kind != Kind_Basic && t.kind != Kind_Void && t.kind != Kind_Struct && t.kind != Kind_Struct) {
+	switch (t.kind) {
+	case Kind_Basic:
+	case Kind_Void:
+	case Kind_Struct:
+	case Kind_Union:
+		break;
+	default:
 		printto(pos, end, " ");
 		printTypeHead(t, pos, end);
 		printTypeTail(t, pos, end);
+		break;
 	}
 }
 
 char *printType (Arena *arena, Type t) {
 	char *string = aalloc(arena, MAX_TYPE_STRING_LENGTH);
-	printComplete(&string, string + MAX_TYPE_STRING_LENGTH, t);
+	char *pos = string;
+	printComplete(&pos, string + MAX_TYPE_STRING_LENGTH, t);
 	return string;
 
 }
 
 char *printTypeHighlighted (Arena *arena, Type t) {
 	char *string = aalloc(arena, MAX_TYPE_STRING_LENGTH);
+	char *pos = string;
 	const char *end = string + MAX_TYPE_STRING_LENGTH;
-	printto(&string, end, BOLD);
-	printComplete(&string, end - strlen(RESET), t);
-	printto(&string, end, RESET);
+	printto(&pos, end, BOLD);
+	printComplete(&pos, end - strlen(RESET), t);
+	printto(&pos, end, RESET);
 	return string;
 }
 
@@ -196,6 +231,28 @@ void printTypeBase(Type t, char **pos, const char *end) {
 }
 
 void printTypeHead (Type t, char **pos, const char *end) {
+
+	switch (t.kind) {
+	case Kind_Pointer:
+		printTypeHead(*t.pointer, pos, end);
+		if (t.pointer->kind == Kind_Array || t.pointer->kind == Kind_FunctionPtr)
+			printto(pos, end, "(");
+		printto(pos, end, "*");
+		break;
+	case Kind_FunctionPtr:
+		t.kind = Kind_Function;
+		printTypeHead(t, pos, end);
+		printto(pos, end, "(*");
+		break;
+	case Kind_Array:
+		printTypeHead(*t.array.inner, pos, end);
+		break;
+	case Kind_Function:
+		printTypeHead(*t.function.rettype, pos, end);
+		break;
+	default: {}
+	}
+
 	if (t.qualifiers & Qualifier_Const)
 		printto(pos, end, "const ");
 	if (t.qualifiers & Qualifier_Atomic)
@@ -204,38 +261,25 @@ void printTypeHead (Type t, char **pos, const char *end) {
 		printto(pos, end, "volatile ");
 	if (t.qualifiers & Qualifier_Restrict)
 		printto(pos, end, "restrict ");
-
-	switch (t.kind) {
-	case Kind_Pointer:
-		printTypeHead(*t.pointer, pos, end);
-		if (t.pointer->kind == Kind_Function || t.pointer->kind == Kind_Pointer)
-			printto(pos, end, "(");
-		printto(pos, end, "*");
-		break;
-	case Kind_Array:
-		printTypeHead(*t.array.inner, pos, end);
-		break;
-	case Kind_Function:
-	case Kind_FunctionPtr:
-		printTypeHead(*t.function.rettype, pos, end);
-		break;
-	default: {}
-	}
 }
 
 void printTypeTail (Type t, char **pos, const char *end) {
 	switch (t.kind) {
 	case Kind_Pointer:
-		if (t.pointer->kind == Kind_Function || t.pointer->kind == Kind_Pointer)
+		if (t.pointer->kind == Kind_Array || t.pointer->kind == Kind_FunctionPtr)
 			printto(pos, end, ")");
 		printTypeTail(*t.pointer, pos, end);
 		break;
+	case Kind_FunctionPtr:
+		printto(pos, end, ")");
+		t.kind = Kind_Function;
+		printTypeTail(t, pos, end);
+		break;
 	case Kind_Array:
-		printto(pos, end, "[%lu]", (unsigned long) t.array.count);
+		printto(pos, end, "[%llu]", (unsigned long long) t.array.count);
 		printTypeTail(*t.array.inner, pos, end);
 		break;
 	case Kind_Function:
-	case Kind_FunctionPtr:
 		printto(pos, end, "(");
 		for (size_t i = 0; i < t.function.parameters.len; i++) {
 			printTypeBase(t.function.parameters.ptr[i].type, pos, end);

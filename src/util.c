@@ -21,10 +21,11 @@ String zString (const char *s) {
 	return (String) {strlen(s), s};
 }
 
-static void printErr (SourceFile source, u32 offset, const char *msg, ...) {
+static void printError (SourceFile source, u32 offset, const char *msg, ...) {
+    printErr(source, offset);
     va_list args;
     va_start(args, msg);
-    vprintErr(source, offset, msg, args);
+    vfprintf(stderr, msg, args);
     va_end(args);
 }
 
@@ -46,7 +47,7 @@ SourceFile *readAllAlloc (String path, String filename) {
 						const char *nullbyte = memchr(content, 0, got);
 						if (nullbyte) {
 							SourceFile source = { filename, {got, content} };
-							printErr(source, nullbyte - content, "file should not contain a null byte");
+							printError(source, nullbyte - content, "file should not contain a null byte");
 						} else if (got == (size_t)count) {
 							content[count] = 0;
 							free(filename_z);
@@ -81,7 +82,7 @@ typedef struct {
 	u32 col;
 } SourceLocation;
 
-SourceLocation findSourcePos(const char *source, const char *pos) {
+SourceLocation findSourcePos (const char *source, const char *pos) {
 	u32 line = 1;
 	u32 col = 1;
 	while (source < pos) {
@@ -96,17 +97,47 @@ SourceLocation findSourcePos(const char *source, const char *pos) {
 	return (SourceLocation) {line, col};
 }
 
-void vprintErr (SourceFile source, u32 offset, const char *msg, va_list vlist) {
+void printMsg (Log level, SourceFile source, u32 offset) {
 	SourceLocation loc = findSourcePos(
 			source.content.ptr, source.content.ptr + offset);
 
-	fwrite(source.name.ptr, source.name.len, 1, stderr);
-	fprintf(stderr, ":%lu:%lu: " RED "error: " RESET,
-			(unsigned long) loc.line, (unsigned long) loc.col);
+	fprintf(stderr, "%.*s:%lu:%lu:\t", STRING_PRINTAGE(source.name),
+		(unsigned long) loc.line, (unsigned long) loc.col);
 
-    vfprintf(stderr, msg, vlist);
-    printf(".\n");
+	const char *const messages[] = {
+		[Log_Err]  = RED "error:   " RESET,
+		[Log_Warn] = YELLOW "warning: " RESET,
+		[Log_Info] = CYAN "info:    " RESET,
+	};
+	fprintf(stderr, messages[level & ~Log_Fatal]);
 }
+
+void printErr (SourceFile source, u32 offset) {
+	printMsg(Log_Err, source, offset);
+}
+void printWarn (SourceFile source, u32 offset) {
+	printMsg(Log_Warn, source, offset);
+}
+void printInfo (SourceFile source, u32 offset) {
+	printMsg(Log_Info, source, offset);
+}
+
+
+void printto (char **insert, const char *end, char *fmt, ...) {
+	if (*insert >= end)
+		return;
+	va_list args;
+    va_start(args, fmt);
+    int count = vsnprintf(*insert, end-*insert, fmt, args);
+    va_end(args);
+    if (count < 0) {
+    	perror(NULL);
+    	exit(1);
+    }
+    *insert += count;
+}
+
+
 
 static u32 find (const StringMap *map, u64 hash, String str) {
 	if (map->used == 0)

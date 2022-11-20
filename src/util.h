@@ -6,16 +6,18 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <stdarg.h>
-
-#include "main.h"
+#include <stdio.h>
 
 
 #define SPAN(type) struct { size_t len; type *ptr; }
 typedef SPAN(const char) String;
 #define SPAN_EQL(a, b) (sizeof(*(a).ptr) == sizeof(*(b).ptr) && (a).len == (b).len && memcmp((a).ptr, (b).ptr, sizeof(*(a).ptr) * (a).len) == 0)
-#define STRING(text) (String) { .len = strlen(text), .ptr = text }
-#define STRING_EMPTY (String) { .len = 0, .ptr = NULL }
+// #define STRING(text) (String) { .len = strlen(text), .ptr = text }
+#define STRING_EMPTY ((String) {0})
 #define ARRAY_SPAN(arr) {sizeof(arr)/sizeof((arr)[0]), (arr)}
+
+// Generate arguments for printf("%.*s", ...);
+#define STRING_PRINTAGE(str) ((int) (str).len), ((str).ptr)
 
 
 #define LIST(type) struct { size_t capacity; size_t len; type *ptr; }
@@ -84,6 +86,9 @@ typedef struct {
 } StringMap;
 
 
+
+void printto (char **insert, const char *end, char *fmt, ...);
+
 void **mapGetOrCreate(StringMap *, String);
 void *mapGet(const StringMap *, String);
 void *mapRemove(StringMap *, String);
@@ -94,5 +99,16 @@ bool startsWith(const char *, String);
 String zString(const char *);
 SourceFile *readAllAlloc (String source, String filename);
 
-void vprintErr(SourceFile, u32, const char *, va_list);
+
+typedef enum {
+	Log_Err,
+	Log_Warn,
+	Log_Info,
+	Log_Fatal = 0x1000,
+} Log;
+
+void printMsg(Log, SourceFile, u32);
+void printErr(SourceFile, u32);
+void printWarn(SourceFile, u32);
+void printInfo(SourceFile, u32);
 

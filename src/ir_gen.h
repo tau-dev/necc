@@ -1,3 +1,5 @@
+#pragma once
+
 #include "ir.h"
 #include "parse.h"
 
@@ -23,15 +25,16 @@ IrRef genTrunc(IrBuild *ir, IrRef source, Size target);
 IrRef genSignExt(IrBuild *ir, IrRef source, Size target);
 IrRef genZeroExt(IrBuild *ir, IrRef source, Size target);
 IrRef genCall(IrBuild *ir, IrRef func, ValuesSpan args);
-IrRef genFunctionRef(IrBuild *ir, Function *func);
+IrRef genGlobal(IrBuild *ir, u32 id);
 IrRef genLoad(IrBuild *ir, IrRef ref, u32 size);
 IrRef genStore(IrBuild *ir, IrRef dest, IrRef value);
 
 void genReturnVal(IrBuild *ir, IrRef val);
 void genBranch(IrBuild *ir, IrRef condition);
 void genJump(IrBuild *ir, Block *blk);
-Block *genNewBlockLabeled(Arena *arena, IrBuild *ir, String label);
-Block *genNewBlock(Arena *arena, IrBuild *ir);
+Block *newBlock(Arena *arena, String label);
+void startBlock(IrBuild *ir, Block *blk);
+Block *startNewBlock (IrBuild *build, Arena *arena, String label);
 
-void printIr(Function *func);
+void printBlock(Block *entry, IrList ir);
 

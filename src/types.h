@@ -1,3 +1,5 @@
+#pragma once
+
 #include "ir.h"
 
 typedef struct Type Type;
@@ -21,11 +23,15 @@ typedef enum {
 	Kind_Basic,
 	Kind_Struct,
 	Kind_Union,
-	Kind_Function, // Only used for function declarations.
-	Kind_FunctionPtr,
 	Kind_Pointer,
 	Kind_Enum,
 	Kind_Array,
+	// Decays to Kind_FunctionPtr by rvalue() conversion. Handled
+	// specially (for error messages) in lvalue usage.
+	Kind_Function,
+	// Same representation as a Function, avoiding a heap allocation
+	// over a Pointer to Function, as Functions almost always decay.
+	Kind_FunctionPtr,
 } TypeKind;
 
 enum {
@@ -55,6 +61,8 @@ typedef struct {
 	IrRef count;
 } ArrayType;
 
+
+// TODO struct and union also have a name tag and storage duration!
 typedef struct StructMember StructMember;
 
 typedef SPAN(StructMember) StructType;
@@ -67,18 +75,17 @@ typedef struct Type {
 		BasicType basic;
 		FunctionType function;
 		Type *pointer;
-		StructType structure;
+		StructType struct_members;
+		DeclList union_members;
 		ArrayType array;
 		// TODO union, enum, ??
 	};
 } Type;
 
 struct Function {
-	String name;
 	FunctionType type;
 	Block *entry;
 	IrList ir;
-	StringMap labels; // Maps labels to Blocks
 };
 
 typedef struct StructMember {
@@ -123,13 +130,13 @@ typedef struct {
 	Version version;
 } Target;
 
-bool typeEqual(Type a, Type b);
+bool typeCompatible(Type a, Type b);
 bool fnTypeEqual(FunctionType a, FunctionType b);
 Size typeSize(Type t, const Target *target);
 u32 typeSizeBytes(Type t, const Target *target);
 u32 typeAlignment(Type t, const Target *target);
 u32 addMemberOffset(u32 *offset, Type t, const Target *target);
-char *printDeclaration(Arena *a, Type t, String name);
+char *printDeclarator(Arena *a, Type t, String name);
 char *printType(Arena *a, Type t);
 char *printTypeHighlighted(Arena *a, Type t);
 void printTypeBase(Type t, char **insert, const char *end);

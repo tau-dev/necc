@@ -1,5 +1,3 @@
-#include "main.h"
-
 #include <stdio.h>
 #include <stdbool.h>
 #include <limits.h>
@@ -9,8 +7,9 @@
 #include "ir_gen.h"
 
 
+Module module = {0};
 
-void emitX64AsmSimple(Arena *arena, Function *func, String name);
+void emitX64AsmSimple(Arena *arena, Module module);
 
 int main (int argc, char **args) {
 	bool emit_ir = false;
@@ -58,48 +57,59 @@ int main (int argc, char **args) {
 		}
 	}
 	if (input == NULL) {
-		print("Please supply a file name.\n");
+		printf("Please supply a file name.\n");
 		return 1;
 	}
 
 	Arena arena = create_arena(16 * 1024);
 
 
-
 	Tokenization tokens = lex(input, paths, &target_x64_linux_gcc);
-	parse(&arena, tokens, target_x64_linux_gcc);
 
-	FILE *dest = fopen("a.out", "w");
-	if (!emit_ir)
-		print("use64\nformat ELF64\n\n");
+	parse(&arena, tokens, target_x64_linux_gcc, &module);
 
+// 	FILE *dest = fopen("a.out", "w");
+	if (emit_ir) {
+		for (u32 i = 0; i < module.len; i++) {
+			StaticValue val = module.ptr[i];
+			if (val.is_public)
+				puts("public ");
 
-	for (u32 i = 0; i < symbols.capacity; i++) {
-		Symbol *s = symbols.content[i];
-		if (s == NULL)
-			continue;
-		if (s->kind == Sym_Value && s->value.typ.kind == Kind_Function && s->value.function) {
-			if (emit_ir) {
-				printf("%s:\n", printDeclaration(&arena, s->value.typ, s->name));
-				printIr(s->value.function);
-				free(s->value.function->ir.ptr);
+			if (val.def_state != Def_Defined) {
+				printf("extern %.*s\n", STRING_PRINTAGE(val.name));
+			} else if (val.def_kind == Static_Function) {
+				printf("%s:\n", printDeclarator(&arena, val.type, val.name));
+				printBlock(val.function_entry, val.function_ir);
 			} else {
-				printf("public ");
-				printString(s->name);
-				printf("\n");
-				printString(s->name);
-				printf(":\n");
-				emitX64AsmSimple(&arena, s->value.function, s->name);
+				if (val.type.qualifiers & Static_Variable)
+					puts("variable ");
+				else
+					puts("constant ");
+				printf("%d:\n%.*s\n", (int) i, STRING_PRINTAGE(val.value_data));
 			}
 		}
+	} else {
+		emitX64AsmSimple(&arena, module);
 	}
+
 
 #ifndef NDEBUG
 	free(tokens.tokens);
 	free(tokens.positions);
 	free(tokens.files.ptr);
-	fclose(dest);
+// 	fclose(dest);
 #endif
 	return 0;
 }
+
+
+
+
+
+
+
+
+
+
+
 

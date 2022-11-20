@@ -41,26 +41,25 @@ void genJump (IrBuild *build, Block *dest) {
 		Exit_Unconditional,
 		.unconditional = dest
 	};
+	startBlock(build, dest);
 }
 
-
-Block *genNewBlock (Arena *arena, IrBuild *build) {
-	SPAN(char) name = ALLOCN(arena, char, 24);
-	snprintf(name.ptr, name.len, "__%d", build->block_count);
-	build->block_count++;
-	return genNewBlockLabeled(arena, build, (String) {strlen(name.ptr), name.ptr});
-}
-
-Block *genNewBlockLabeled (Arena *arena, IrBuild *build, String label) {
+Block *newBlock (Arena *arena, String label) {
 	Block *new_block = ALLOC(arena, Block);
-	*new_block = (Block) {
-		.label = label,
-		.first_inst = build->ir.len
-	};
-	build->insertion_block = new_block;
+	*new_block = (Block) { .label = label };
 	return new_block;
 }
 
+void startBlock (IrBuild *build, Block *block) {
+	block->first_inst = build->ir.len;
+	build->insertion_block = block;
+}
+
+Block *startNewBlock (IrBuild *build, Arena *arena, String label) {
+	Block *blk = newBlock(arena, label);
+	startBlock(build, blk);
+	return blk;
+}
 
 
 static IrRef genBinOp (IrBuild *build, InstKind op, IrRef a, IrRef b) {
@@ -96,6 +95,15 @@ static IrRef genBinOp (IrBuild *build, InstKind op, IrRef a, IrRef b) {
 	} else if (commutative && inst[a].kind == Ir_Constant) {
 		i.binop.lhs = b;
 		i.binop.rhs = a;
+	}
+	if ((op == Ir_Add || op == Ir_Sub) &&
+		inst[i.binop.lhs].kind == Ir_Reloc &&
+		inst[i.binop.rhs].kind == Ir_Constant)
+	{
+		i.kind = Ir_Reloc;
+		i64 delta = op == Ir_Add ? (i64)inst[i.binop.rhs].constant : -(i64)inst[i.binop.rhs].constant;
+		i.reloc.id = inst[i.binop.lhs].reloc.id;
+		i.reloc.offset = inst[i.binop.lhs].reloc.offset + delta;
 	}
 	return append(build, i);
 }
@@ -147,6 +155,12 @@ IrRef genNot(IrBuild *build, IrRef a) {
 	if (inst[a].kind == Ir_Constant) {
 		i.kind = Ir_Constant;
 		i.constant = !inst[a].constant;
+	} else if (inst[a].kind == Ir_Reloc) {
+		i.kind = Ir_Constant;
+		i.constant = 0;
+	} else {
+		i.binop.lhs = a;
+		i.binop.rhs = genImmediateInt(build, 0, inst[a].size);
 	}
 
 	return append(build, i);
@@ -164,6 +178,18 @@ IrRef genEquals(IrBuild *build, IrRef a, IrRef b, Size size) {
 		} else {
 			i.binop.lhs = b;
 			i.binop.rhs = a;
+		}
+	}
+
+	if (inst[a].kind == Ir_Reloc) {
+		if (inst[b].kind == Ir_Reloc) {
+			i.kind = Ir_Constant;
+			i.constant = inst[a].reloc.id == inst[b].reloc.id
+					&& inst[a].reloc.offset == inst[b].reloc.offset;
+		} else if (inst[b].kind == Ir_Constant && inst[b].constant == 0) {
+			// Relocs can never be zero.
+			i.kind = Ir_Constant;
+			i.constant = 1;
 		}
 	}
 
@@ -233,8 +259,8 @@ IrRef genCall (IrBuild *build, IrRef func, ValuesSpan args) {
 	return call;
 }
 
-IrRef genFunctionRef (IrBuild *build, Function *func) {
-	return append(build, (Inst) {Ir_Function, .funcref = func});
+IrRef genGlobal (IrBuild *build, u32 id) {
+	return append(build, (Inst) {Ir_Reloc, I64, .binop = {id}});
 }
 
 IrRef genLoad (IrBuild *build, IrRef ref, Size size) {
@@ -252,7 +278,7 @@ IrRef genStore (IrBuild *build, IrRef dest, IrRef value) {
 	return store;
 }
 
-static void printBlock (Block *blk, IrList ir) {
+void printBlock (Block *blk, IrList ir) {
 	if (blk->visited)
 		return;
 	blk->visited = true;
@@ -264,9 +290,8 @@ static void printBlock (Block *blk, IrList ir) {
 		printf(" %3lu = ", (unsigned long) i);
 		Inst inst = ir.ptr[i];
 		switch (inst.kind) {
-		case Ir_Function:
-			printf("func ");
-			printString(inst.funcref->name);
+		case Ir_Reloc:
+			printf("global %d %+lld", inst.reloc.id, (long long)inst.reloc.offset);
 			break;
 		case Ir_Constant:
 			printf("const 0x%lx (%lu)", (unsigned long) inst.constant, (unsigned long) inst.constant);
@@ -360,9 +385,5 @@ static void printBlock (Block *blk, IrList ir) {
 		break;
 	default: {}
 	}
-}
-
-void printIr (Function *func) {
-	printBlock(func->entry, func->ir);
 }
 

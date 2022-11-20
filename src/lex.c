@@ -94,9 +94,26 @@ Token fromWord (String word) {
 
 
 _Noreturn void lexerror (SourceFile source, const char *pos, const char *msg, ...) {
+    printErr(source, pos - source.content.ptr);
+
     va_list args;
     va_start(args, msg);
-    vprintErr(source, pos - source.content.ptr, msg, args);
+    vfprintf(stderr, msg, args);
+    va_end(args);
+    fprintf(stderr, ".\n");
+
+// #ifndef NDEBUG
+// 	PRINT_STACK_TRACE;
+// #endif
+	exit(1);
+}
+
+_Noreturn void lexwarning (SourceFile source, const char *pos, const char *msg, ...) {
+    printWarn(source, pos - source.content.ptr);
+
+    va_list args;
+    va_start(args, msg);
+    vfprintf(stderr, msg, args);
     va_end(args);
 // #ifndef NDEBUG
 // 	PRINT_STACK_TRACE;
@@ -408,7 +425,7 @@ Tokenization lex (const char *filename, Paths paths, Target *target) {
 				String name = {pos - start, start};
 				void **entry = mapGetOrCreate(&macros, name);
 				if (*entry != NULL)
-					fprintf(stderr, "redefining %.*s\n", (int) name.len, name.ptr);
+					fprintf(stderr, "redefining %.*s\n", STRING_PRINTAGE(name));
 
 				Macro *mac = ALLOC(&macro_arena, Macro);
 				*entry = mac;
@@ -472,7 +489,8 @@ Tokenization lex (const char *filename, Paths paths, Target *target) {
 					if (*pos == '\n')
 						break;
 
-					MacroToken t = {getToken(&pos), pos - source.content.ptr, 0, havespace};
+					u32 macro_pos = pos - source.content.ptr;
+					MacroToken t = {getToken(&pos), macro_pos, 0, havespace};
 					if (t.tok.kind == Tok_EOF)
 						lexerror(source, pos, "macro definition must end before end of source file");
 					if (parameters && t.tok.kind == Tok_Identifier) {
@@ -502,7 +520,7 @@ Tokenization lex (const char *filename, Paths paths, Target *target) {
 // 				if (prev)
 // 					free(prev->tokens.ptr); // TODO Allocate the tokens from the macro_arena too
 				else
-					fprintf(stderr, "%.*s was never defined\n", (int)tok.val.identifier.len, tok.val.identifier.ptr);
+					fprintf(stderr, "%.*s was never defined\n", STRING_PRINTAGE(tok.val.identifier));
 			} else if (eql("include", directive)) {
 				// TODO Preprocessor replacements on the arguments to #include (6.10.2.4)
 				char delimiter;
@@ -538,7 +556,7 @@ Tokenization lex (const char *filename, Paths paths, Target *target) {
 						new_source = readAllAlloc(paths.sys_include_dirs.ptr[i], includefilename);
 					}
 					if (new_source == NULL)
-						lexerror(source, begin, "could not open include file \"%.*s\"", (int)includefilename.len, includefilename.ptr);
+						lexerror(source, begin, "could not open include file \"%.*s\"", STRING_PRINTAGE(includefilename));
 					new_source->idx = t.files.len;
 					PUSH(t.files, new_source);
 					*already_loaded = new_source;
@@ -565,7 +583,7 @@ Tokenization lex (const char *filename, Paths paths, Target *target) {
 
 				bool got = mapGet(&macros, tok.val.identifier);
 				bool required = directive.ptr[2] != 'n';
-				if (got == required) {
+				if (got != required) {
 					if (tryGobbleSpace(source, &pos) != Space_Linebreak)
 						lexerror(source, pos, "#ifdef may not be followed by more than one identifier");
 
@@ -577,6 +595,14 @@ Tokenization lex (const char *filename, Paths paths, Target *target) {
 				// TODO Check correct nesting
 				skipToEndIf(source, &pos);
 			} else if (eql("endif", directive)) {
+				// TODO Check correct nesting
+			} else if (eql("error", directive)) {
+				lexerror(source, pos, "encountered #error directive");
+			} else if (eql("warning", directive)) {
+				// TODO Check C23
+				lexwarning(source, pos, "encountered #warning directive");
+				while (*pos && *pos != '\n')
+					pos++;
 			} else {
 				lexerror(source, directive.ptr, "unknown preprocessor directive");
 			}
@@ -898,10 +924,18 @@ static IfClass skipToElseIfOrEnd (SourceFile source, const char **p) {
 
 static bool gobbleSpaceToNewline (const char **p) {
 	bool got = false;
-	while (**p != '\n' && isSpace(**p)) {
+	const char *pos = *p;
+	while (*pos && *pos != '\n') {
+		if (!isSpace(*pos)) {
+			if (pos[0] == '\\' && pos[1] == '\n')
+				pos++;
+			else
+				break;
+		}
 		got = true;
-		(*p)++;
+		pos++;
 	}
+	*p = pos;
 	return got;
 }
 
@@ -1065,49 +1099,63 @@ const char *token_names[Tok_EOF+1] = {
 	[Tok_Real] = "floating point literal",
 	[Tok_String] = "string literal",
 
-	[Tok_OpenParen] = BOLD "(" RESET,
-	[Tok_CloseParen] = BOLD ")" RESET,
-	[Tok_OpenBrace] = BOLD "{" RESET,
-	[Tok_CloseBrace] = BOLD "}" RESET,
-	[Tok_OpenBracket] = BOLD "[" RESET,
-	[Tok_CloseBracket] = BOLD "]" RESET,
+	[Tok_OpenParen] = "(",
+	[Tok_CloseParen] = ")",
+	[Tok_OpenBrace] = "{",
+	[Tok_CloseBrace] = "}",
+	[Tok_OpenBracket] = "[",
+	[Tok_CloseBracket] = "]",
 
-	[Tok_Semicolon] = BOLD ";" RESET,
-	[Tok_Comma] = BOLD "," RESET,
-	[Tok_Colon] = BOLD ":" RESET,
-	[Tok_Dot] = BOLD "." RESET,
-	[Tok_TripleDot] = BOLD "..." RESET,
+	[Tok_Semicolon] = ";",
+	[Tok_Comma] = ",",
+	[Tok_Colon] = ":",
+	[Tok_Dot] = ".",
+	[Tok_TripleDot] = "...",
 
-	[Tok_Bang] = BOLD "!" RESET,
-	[Tok_BangEquals] = BOLD "!=" RESET,
-	[Tok_Equals] = BOLD "=" RESET,
-	[Tok_DoubleEquals] = BOLD "==" RESET,
-	[Tok_Arrow] = BOLD "->" RESET,
-	[Tok_Plus] = BOLD "+" RESET,
-	[Tok_PlusEquals] = BOLD "+=" RESET,
-	[Tok_Minus] = BOLD "-" RESET,
-	[Tok_MinusEquals] = BOLD "-=" RESET,
-	[Tok_Asterisk] = BOLD "*" RESET,
-	[Tok_AsteriskEquals] = BOLD "*=" RESET,
-	[Tok_Slash] = BOLD "/" RESET,
-	[Tok_SlashEquals] = BOLD "/=" RESET,
-	[Tok_Less] = BOLD "<" RESET,
-	[Tok_LessEquals] = BOLD "<=" RESET,
-	[Tok_DoubleLess] = BOLD "<<" RESET,
-	[Tok_Greater] = BOLD ">" RESET,
-	[Tok_GreaterEquals] = BOLD ">=" RESET,
-	[Tok_DoubleGreater] = BOLD ">>" RESET,
-	[Tok_Ampersand] = BOLD "&" RESET,
-	[Tok_DoubleAmpersand] = BOLD "&&" RESET,
-	[Tok_Pipe] = BOLD "|" RESET,
-	[Tok_DoublePipe] = BOLD "||" RESET,
-	[Tok_Hat] = BOLD "^" RESET,
-	[Tok_Tilde] = BOLD "~" RESET,
+	[Tok_Bang] = "!",
+	[Tok_BangEquals] = "!=",
+	[Tok_Equals] = "=",
+	[Tok_DoubleEquals] = "==",
+	[Tok_Arrow] = "->",
+	[Tok_Plus] = "+",
+	[Tok_PlusEquals] = "+=",
+	[Tok_Minus] = "-",
+	[Tok_MinusEquals] = "-=",
+	[Tok_Asterisk] = "*",
+	[Tok_AsteriskEquals] = "*=",
+	[Tok_Slash] = "/",
+	[Tok_SlashEquals] = "/=",
+	[Tok_Less] = "<",
+	[Tok_LessEquals] = "<=",
+	[Tok_DoubleLess] = "<<",
+	[Tok_Greater] = ">",
+	[Tok_GreaterEquals] = ">=",
+	[Tok_DoubleGreater] = ">>",
+	[Tok_Ampersand] = "&",
+	[Tok_DoubleAmpersand] = "&&",
+	[Tok_Pipe] = "|",
+	[Tok_DoublePipe] = "||",
+	[Tok_Hat] = "^",
+	[Tok_Tilde] = "~",
 
 	[Tok_EOF] = "end of file",
 };
 
-static char name[1024] = {0};
+static char name[256] = {0};
+static const char *const name_end = name + 256;
+
+const char *tokenNameHighlighted (TokenKind kind) {
+	switch (kind) {
+	case Tok_Identifier: return "identifier";
+	case Tok_Integer: return "integer literal";
+	case Tok_Real: return "floating point literal";
+	case Tok_String: return "string literal";
+	default:;
+		char *c = name;
+		printto(&c, name_end, "%s%s%s", BOLD, tokenName(kind), RESET);
+		return name;
+	}
+}
 
 const char *tokenName (TokenKind kind) {
 	if (token_names[kind]) {
@@ -1120,10 +1168,7 @@ const char *tokenName (TokenKind kind) {
 					return names[i].name;
 			}
 		}
-
-		strcpy(name, "unidentified token, ID (hacky, only the last emitted one is certain): ");
-		sprintf(name + strlen(name), "%d", kind);
-		return name;
+		return NULL;
 	}
 }
 
