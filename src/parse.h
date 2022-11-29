@@ -3,7 +3,7 @@
 // #include "ast.h"
 #include "arena.h"
 #include "ir.h"
-#include "lex.h"
+#include "lex_preproc.h"
 
 
 typedef enum {

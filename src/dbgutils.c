@@ -1,6 +1,6 @@
 #include <stdio.h>
 #include "util.h"
-#include "lex.h"
+#include "lex_preproc.h"
 
 /*
 

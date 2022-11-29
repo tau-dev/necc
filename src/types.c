@@ -31,7 +31,7 @@ Size typeSize (Type t, const Target *target) {
 	case Kind_Pointer:
 	case Kind_FunctionPtr:
 		return I64;
-	default: assert(0);
+	default: unreachable;
 	}
 }
 

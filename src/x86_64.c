@@ -3,7 +3,10 @@
 #include "parse.h"
 
 //    Emits the flat assembler format.
-#
+
+// TODO A StackAlloc of Constant size may be referenced across blocks,
+// to allow jumps over definitions. Probably need to allocate these in a
+// prepass.
 
 #define ON_STACK 255
 

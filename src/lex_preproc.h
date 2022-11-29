@@ -24,6 +24,7 @@ typedef enum {
 
 	Tok_Bang,
 	Tok_BangEquals,
+	Tok_Question,
 	Tok_Equals,
 	Tok_DoubleEquals,
 	Tok_Arrow,
@@ -99,6 +100,8 @@ typedef enum {
 	Tok_PreprocConcatenate,
 
 	Tok_EOF,
+
+	Tok_Is_Digraph,
 } TokenKind;
 
 const char *tokenName(TokenKind k);
@@ -143,4 +146,4 @@ typedef struct {
 } Paths;
 
 typedef LIST(Token) Token_List;
-Tokenization lex(const char *filename, Paths paths, Target *version);
+Tokenization lex(Arena *generated_strings, const char *filename, Paths paths, Target *version);

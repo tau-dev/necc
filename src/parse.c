@@ -52,6 +52,7 @@ typedef struct {
 } InitializationDest;
 
 static void vcomperror (Log level, const Tokenization *t, const Token *tok, const Token *parse_pos, const char *msg, va_list args) {
+	(void) parse_pos;
 	u32 idx = tok - t->tokens;
 	TokenPosition pos = t->positions[idx];
 	SourceFile source = *t->files.ptr[pos.source_file_ref];
@@ -65,10 +66,10 @@ static void vcomperror (Log level, const Tokenization *t, const Token *tok, cons
     	fprintf(stderr, "(macro-expanded from here)\n");
 	}
 
-#ifndef NDEBUG
-	printf("TOKEN STREAM:\n\t");
-	puts(lexz(*t, tok, parse_pos, 12));
-#endif
+// #ifndef NDEBUG
+// 	printf("TOKEN STREAM:\n\t");
+// 	puts(lexz(*t, tok, parse_pos, 12));
+// #endif
 
 	if (level & Log_Fatal) {
 #ifndef NDEBUG
@@ -361,7 +362,7 @@ void popScope (Parse *parse, Scope replacement) {
 }
 
 static void parseCompound(Parse *);
-static void parseStatement(Parse *);
+static void parseStatement(Parse *, bool *had_non_declaration);
 static Value parseExpression(Parse *);
 static Value parseExprAssignment(Parse *);
 static Value parseExprBitOr(Parse *);
@@ -421,6 +422,9 @@ static void parseCompound (Parse *parse) {
 	Scope enclosing_scope = parse->current_scope;
 	parse->current_scope = (Scope) {0};
 
+	// For C89, disallow declarators after the beginning of the block.
+	bool had_non_declaration = false;
+
 	while (true) {
 		Token t = *parse->pos;
 		if (t.kind == Tok_CloseBrace) {
@@ -429,7 +433,7 @@ static void parseCompound (Parse *parse) {
 		} else if (t.kind == Tok_EOF) {
 			parseerror(parse, block_begin, "unclosed %s", tokenName(Tok_OpenBrace));
 		} else {
-			parseStatement(parse);
+			parseStatement(parse, &had_non_declaration);
 		}
 	}
 
@@ -446,10 +450,11 @@ static Block *getLabeledBlock (Parse *parse, String label) {
 	return sym->label.block;
 }
 
-static void parseStatement (Parse *parse) {
+static void parseStatement (Parse *parse, bool *had_non_declaration) {
 	IrBuild *build = &parse->build;
 	bool labeled = false;
 	Token t = *parse->pos;
+	bool is_declaration = false;
 
 	Attributes attr = parseAttributes(parse);
 	(void) attr;
@@ -473,123 +478,134 @@ static void parseStatement (Parse *parse) {
 	}
 
 	switch (t.kind) {
-		case Tok_OpenBrace:
-			parseCompound(parse);
-			return;
-		case Tok_Key_Return: {
-			parse->pos++;
-			// TODO Check against function return type
-			if (tryEat(parse, Tok_Semicolon)) {
-				genReturnVal(build, IR_REF_NONE);
-			} else {
-				IrRef val = coerce(rvalue(parseExpression(parse), parse),
-						*parse->current_func_type.rettype,
-						parse);
-				expect(parse, Tok_Semicolon);
-
-				genReturnVal(build, val);
-			}
-
-			// Unreferenced dummy block for further instructions, will be ignored
-			startNewBlock(build, parse->arena, STRING_EMPTY);
-		} return;
-		case Tok_Key_While: {
-			parse->pos++;
-
-			Block *head = newBlock(parse->arena, zString("__while_head"));
-			genJump(build, head);
-			expect(parse, Tok_OpenParen);
-			Value condition = rvalue(parseExpression(parse), parse);
-			expect(parse, Tok_CloseParen);
-			genBranch(build, coerce(condition, BASIC_INT, parse));
-
-			head->exit.branch.on_true = startNewBlock(build, parse->arena, zString("__while_body"));
-			parseStatement(parse);
-
-			Block *join = newBlock(parse->arena, zString("__while_join"));
-			genJump(build, join);
-			head->exit.branch.on_false = join;
-		} return;
-		case Tok_Key_If: {
-			parse->pos++;
-
-			expect(parse, Tok_OpenParen);
-			Value condition = rvalue(parseExpression(parse), parse);
-			expect(parse, Tok_CloseParen);
-			genBranch(build, coerce(condition, BASIC_INT, parse));
-
-			Block *head = build->insertion_block;
-			head->exit.branch.on_true = startNewBlock(build, parse->arena, zString("__if_true"));
-			parseStatement(parse);
-
-			Block *join = newBlock(parse->arena, zString("__if_join"));
-
-			if (parse->pos->kind == Tok_Key_Else) {
-				parse->pos++;
-				head->exit.branch.on_false = startNewBlock(build, parse->arena, zString("__if_else"));
-				parseStatement(parse);
-				genJump(build, join);
-			} else {
-				head->exit.branch.on_false = join;
-				startBlock(build, join);
-			}
-		} return;
-		case Tok_Key_Goto: {
-			parse->pos++;
-			String label = expect(parse, Tok_Identifier).val.identifier;
+	case Tok_OpenBrace:
+		parseCompound(parse);
+		break;
+	case Tok_Key_Return: {
+		parse->pos++;
+		// TODO Check against function return type
+		if (tryEat(parse, Tok_Semicolon)) {
+			genReturnVal(build, IR_REF_NONE);
+		} else {
+			IrRef val = coerce(rvalue(parseExpression(parse), parse),
+					*parse->current_func_type.rettype,
+					parse);
 			expect(parse, Tok_Semicolon);
 
-			genJump(build, getLabeledBlock(parse, label));
+			genReturnVal(build, val);
+		}
 
-			// Unreferenced dummy block for further instructions, will be ignored
-			startNewBlock(build, parse->arena, STRING_EMPTY);
-		} return;
-		case Tok_Semicolon:
-			return;
-		default: {
-			Type base_type;
-			u8 storage;
-			if (tryParseTypeBase(parse, &base_type, &storage)) {
-				if (labeled)
-					requiresVersion(parse, "for arbitrary reasons, labels before declarations", Version_C23);
+		// Unreferenced dummy block for further instructions, will be ignored
+		startNewBlock(build, parse->arena, STRING_EMPTY);
+	} break;
+	case Tok_Key_While: {
+		parse->pos++;
 
-				if (storage == Storage_Typedef) {
-					parseTypedefDecls(parse, base_type);
-					return;
-				}
+		Block *head = newBlock(parse->arena, zString("__while_head"));
+		genJump(build, head);
+		expect(parse, Tok_OpenParen);
+		Value condition = rvalue(parseExpression(parse), parse);
+		expect(parse, Tok_CloseParen);
+		genBranch(build, coerce(condition, BASIC_INT, parse));
 
-				if (allowedNoDeclarator(parse, base_type))
-					return;
+		head->exit.branch.on_true = startNewBlock(build, parse->arena, zString("__while_body"));
+		parseStatement(parse, had_non_declaration);
 
-				do {
-					const Token *decl_token = parse->pos;
-					Declaration decl = parseDeclarator(parse, base_type);
-					bool is_new;
-					OrdinaryIdentifier *sym = genOrdSymbol(parse, decl.name, &is_new);
+		Block *join = newBlock(parse->arena, zString("__while_join"));
+		genJump(build, join);
+		head->exit.branch.on_false = join;
+	} break;
+	case Tok_Key_If: {
+		parse->pos++;
 
-					if (decl.type.kind == Kind_Function) {
-						parseerror(parse, decl_token, "TODO Support function declarations in functions");
-					} else if (decl.type.kind == Kind_Void) {
-						parseerror(parse, decl_token, "variables can not have $svoid$s type", BOLD, RESET);
-					} else {
-						sym->kind = Sym_Value_Auto;
-						sym->value = (Value) {decl.type,
-							genStackAllocFixed(build, typeSizeBytes(decl.type, &parse->target)),
-							storage == Storage_Register ? Ref_LValue_Register : Ref_LValue,
-						};
+		expect(parse, Tok_OpenParen);
+		Value condition = rvalue(parseExpression(parse), parse);
+		expect(parse, Tok_CloseParen);
+		genBranch(build, coerce(condition, BASIC_INT, parse));
 
-						if (tryEat(parse, Tok_Equals))
-							parseInitializer(parse, (InitializationDest) {0, sym->value.typ, .address = sym->value.inst});
-					}
-				} while (tryEat(parse, Tok_Comma));
-				expect(parse, Tok_Semicolon);
+		Block *head = build->insertion_block;
+		head->exit.branch.on_true = startNewBlock(build, parse->arena, zString("__if_true"));
+		parseStatement(parse, had_non_declaration);
 
-				return;
-			}
+		Block *join = newBlock(parse->arena, zString("__if_join"));
+
+		if (parse->pos->kind == Tok_Key_Else) {
+			parse->pos++;
+			head->exit.branch.on_false = startNewBlock(build, parse->arena, zString("__if_else"));
+			parseStatement(parse, had_non_declaration);
+			genJump(build, join);
+		} else {
+			head->exit.branch.on_false = join;
+			startBlock(build, join);
+		}
+	} break;
+	case Tok_Key_Goto: {
+		// TODO Check: "A goto statement shall not jump from outside the
+		// scope of an identifier having a variably modified type to
+		// inside the scope of that identifier." I think this is a
+		// run-time constarint, so we can only emit a warning.
+		parse->pos++;
+		String label = expect(parse, Tok_Identifier).val.identifier;
+		expect(parse, Tok_Semicolon);
+
+		genJump(build, getLabeledBlock(parse, label));
+
+		// Unreferenced dummy block for further instructions, will be ignored
+		startNewBlock(build, parse->arena, STRING_EMPTY);
+	} break;
+	case Tok_Semicolon:
+		break;
+	default: {
+		Type base_type;
+		u8 storage;
+		if (!tryParseTypeBase(parse, &base_type, &storage)) {
 			parseExpression(parse);
 			expect(parse, Tok_Semicolon);
-		} return;
+			break;
+		}
+		is_declaration = true;
+
+		if (labeled)
+			requiresVersion(parse, "for arbitrary reasons, labels before declarations", Version_C23);
+
+		if (storage == Storage_Typedef) {
+			parseTypedefDecls(parse, base_type);
+			break;
+		}
+
+		if (allowedNoDeclarator(parse, base_type))
+			break;
+
+		do {
+			const Token *decl_token = parse->pos;
+			Declaration decl = parseDeclarator(parse, base_type);
+			bool is_new;
+			OrdinaryIdentifier *sym = genOrdSymbol(parse, decl.name, &is_new);
+
+			if (decl.type.kind == Kind_Function) {
+				parseerror(parse, decl_token, "TODO Support function declarations in functions");
+			} else if (decl.type.kind == Kind_Void) {
+				parseerror(parse, decl_token, "variables can not have $svoid$s type", BOLD, RESET);
+			} else {
+				sym->kind = Sym_Value_Auto;
+				sym->value = (Value) {decl.type,
+					genStackAllocFixed(build, typeSizeBytes(decl.type, &parse->target)),
+					storage == Storage_Register ? Ref_LValue_Register : Ref_LValue,
+				};
+
+				if (tryEat(parse, Tok_Equals))
+					parseInitializer(parse, (InitializationDest) {0, sym->value.typ, .address = sym->value.inst});
+			}
+		} while (tryEat(parse, Tok_Comma));
+
+		expect(parse, Tok_Semicolon);
+	} break;
 	}
+
+	if (is_declaration && *had_non_declaration)
+		requiresVersion(parse, "declarations after the begnning of the block", Version_C99);
+	else
+		*had_non_declaration = true;
 }
 
 static Value parseExpression (Parse *parse) {
@@ -1170,8 +1186,6 @@ static void parseInitializer (Parse *parse, InitializationDest dest) {
 
 static void parseStructInitializer (Parse *parse, InitializationDest dest) {
 	assert(dest.type.kind == Kind_Struct);
-	assert(parse->pos->kind == Tok_OpenBrace);
-	parse->pos++;
 
 	u32 len = dest.type.struct_members.len;
 	StructMember *members = dest.type.struct_members.ptr;
@@ -1185,7 +1199,7 @@ static void parseStructInitializer (Parse *parse, InitializationDest dest) {
 	// TODO Zero out the gaps after initialization.
 
 	u32 member_idx = 0;
-	while (!tryEat(parse, Tok_CloseBrace)) {
+	while (true) {
 		if (tryEat(parse, Tok_Dot)) {
 			requiresVersion(parse, "dot-designated initializers", Version_C99);
 			const Token *name = parse->pos;
@@ -1210,7 +1224,13 @@ static void parseStructInitializer (Parse *parse, InitializationDest dest) {
 
 		member_idx++;
 
-		expect(parse, Tok_Comma);
+		if (tryEat(parse, Tok_Comma)) {
+			if (tryEat(parse, Tok_CloseBrace))
+				break;
+		} else {
+			expect(parse, Tok_CloseBrace);
+			break;
+		}
 	}
 }
 
@@ -1243,6 +1263,10 @@ static bool tryParseTypeName (Parse *parse, Type *type, u8 *storage_dest) {
 		*ptr.pointer = *type;
 		*type = ptr;
 	}
+	// TODO Rest of the type name.
+	// Note: empty parentheses in a type name are interpreted as
+	// “function with no parameter specification”, rather than
+	// redundant parentheses around the omitted identifier.
 	return true;
 }
 
@@ -1755,8 +1779,8 @@ Value rvalue (Value v, Parse *parse) {
 	// TODO Handle arrays, adapt to new byref categories
 	if (v.typ.kind == Kind_Function) {
 		v.typ.kind = Kind_FunctionPtr;
-	} else if (isByref(v)) {
-		assert(v.typ.kind == Kind_Pointer || v.typ.kind == Kind_Basic);
+	} else if (isLvalue(v)) {
+// 		assert(v.typ.kind == Kind_Pointer || v.typ.kind == Kind_Basic);
 
 		v.inst = genLoad(&parse->build, v.inst, typeSize(v.typ, &parse->target));
 		v.typ.qualifiers = 0;

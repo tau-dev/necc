@@ -16,6 +16,7 @@ int main (int argc, char **args) {
 	char *input = NULL;
 
 	String sys_paths[] = {
+		zString("/home/tau/foreign/lang/musl-1.2.3/arch/x86_64"),
 		zString("/home/tau/foreign/lang/musl-1.2.3/obj/include/"),
 		zString("/home/tau/foreign/lang/musl-1.2.3/include/"),
 	};
@@ -47,6 +48,9 @@ int main (int argc, char **args) {
 			char *flags = args[i] + 1;
 			if (strcmp(flags, "ir") == 0) {
 				emit_ir = true;
+			} else if (strcmp(flags, "v") == 0) {
+				printf(" NECC Version 0.0\n");
+				return 0;
 			} else if (strcmp(flags, "std") == 0) {
 				if (!args[i+1]) {
 					// ...
@@ -64,7 +68,7 @@ int main (int argc, char **args) {
 	Arena arena = create_arena(16 * 1024);
 
 
-	Tokenization tokens = lex(input, paths, &target_x64_linux_gcc);
+	Tokenization tokens = lex(&arena, input, paths, &target_x64_linux_gcc);
 
 	parse(&arena, tokens, target_x64_linux_gcc, &module);
 
@@ -94,10 +98,13 @@ int main (int argc, char **args) {
 
 
 #ifndef NDEBUG
+	free_arena(&arena);
+	for (u32 i = 0; i < tokens.files.len; i++)
+		free(tokens.files.ptr[i]);
+
 	free(tokens.tokens);
 	free(tokens.positions);
 	free(tokens.files.ptr);
-// 	fclose(dest);
 #endif
 	return 0;
 }
