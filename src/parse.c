@@ -30,6 +30,8 @@ typedef struct {
 	FunctionType current_func_type;
 	IrBuild build;
 	Scope func_goto_labels;
+	Block *current_loop_head;
+	Block *current_loop_switch_exit;
 
 	Module *module;
 } Parse;
@@ -128,14 +130,14 @@ bool tryEat (Parse *parse, TokenKind kind) {
 
 static Symbol *getSymbol (Parse *, String name);
 static Declaration parseDeclarator(Parse *, Type base_type);
-static bool allowedNoDeclarator(Parse *, Type base_type);
+static nodiscard bool allowedNoDeclarator(Parse *, Type base_type);
 // static Declaration parseDeclarator (Parse* parse, const Token **tok, Type base_type);
 static void parseInitializer(Parse *, InitializationDest);
 static Type parseValueType (Parse *, Value (*operator)(Parse *));
 static Type parseTypeBase(Parse *, u8 *storage);
 static Type parseTypeName(Parse *, u8 *storage);
-static bool tryParseTypeBase(Parse *, Type *dest, u8 *storage);
-static bool tryParseTypeName(Parse *, Type *dest, u8 *storage);
+static nodiscard bool tryParseTypeBase(Parse *, Type *dest, u8 *storage);
+static nodiscard bool tryParseTypeName(Parse *, Type *dest, u8 *storage);
 static void parseFunction(Parse *);
 static Value rvalue(Value v, Parse *);
 static Value dereference (Parse *, Value v);
@@ -143,6 +145,8 @@ static IrRef coerce(Value v, Type t, Parse *);
 static Value pointerAdd(IrBuild *, Value lhs, Value rhs, Parse *op_parse, const Token *);
 static void parseTypedefDecls(Parse *, Type base_type);
 static Attributes parseAttributes(Parse *);
+static void popScope(Parse *, Scope);
+static nodiscard Scope pushScope(Parse *);
 
 // Parses all top level declarations into a Module.
 void parse (Arena *arena, Tokenization tokens, Target target, Module *module) {
@@ -207,6 +211,7 @@ void parse (Arena *arena, Tokenization tokens, Target target, Module *module) {
 					.type = decl.type,
 					.is_public = public_linkage,
 					.decl_location = primary,
+					.def_kind = decl.type.kind == Kind_Function ? Static_Function : Static_Variable,
 				}));
 
 				sym->ordinary = ALLOC(arena, OrdinaryIdentifier);
@@ -228,38 +233,18 @@ void parse (Arena *arena, Tokenization tokens, Target target, Module *module) {
 					parsemsg(Log_Info | Log_Fatal, &parse, val->def_location, "previously defined here");
 				}
 
-				val->def_kind = Static_Function;
 				val->def_state = Def_Defined;
 				val->def_location = primary;
-
-// 				Declaration *old_parameters = module->ptr[existing->static_id].type.function.parameters.ptr;
-// 				Declaration *new_parameters = decl.type.function.parameters.ptr;
-// 				size_t param_count = decl.type.function.parameters.len;
-
-// 				assert(module->ptr[existing->static_id].type.function.parameters.len == decl.type.function.parameters.len);
-
-// 				for (u32 i = 0; i < param_count; i++) {
-// 					if (new_parameters[i].name.len == 0)
-// 						parseerror(&parse, "missing parameter name");
-
-// 					if (existing && old_parameters[i].name.len != 0 &&
-// 						!SPAN_EQL(old_parameters[i].name, new_parameters[i].name))
-// 					{
-// 						parseerror(&parse, "parameter redeclared to different name");
-// 					}
-// 				}
 
 				parse.current_func_type = decl.type.function;
 				parseFunction(&parse);
 				parse.scope_depth = 0;
 
+				val = &module->ptr[sym->ordinary->static_id];
 				val->function_ir = parse.build.ir;
 				val->function_entry = parse.build.entry;
 				break;
-			} else {
-				val->name = decl.name;
-				val->def_kind = Static_Variable;
-
+			} else if (decl.type.kind != Kind_Function) {
 				if (existing) {
 					if (val->is_public && storage == Storage_Static) {
 						parseerror(&parse, primary,
@@ -291,12 +276,13 @@ void parse (Arena *arena, Tokenization tokens, Target target, Module *module) {
 					InitializationDest init = {
 						.type = decl.type,
 						.reloc_references = &refs,
-						.reloc_data = ALLOCN(parse.arena, char, typeSizeBytes(val->type, &parse.target)),
+						.reloc_data = ALLOCN(parse.arena, char, typeSize(val->type, &parse.target)),
 					};
 					parse.build = global_ir;
 					parseInitializer(&parse, init);
 					global_ir = parse.build;
 
+					val = &module->ptr[sym->ordinary->static_id];
 					val->value_references = (References) {refs.len, refs.ptr};
 					val->value_data = (String) {init.reloc_data.len, init.reloc_data.ptr};
 				} else if ((storage == Storage_Static || storage == Storage_Unspecified)
@@ -305,24 +291,27 @@ void parse (Arena *arena, Tokenization tokens, Target target, Module *module) {
 					val->def_state = Def_Tentative;
 				}
 
-
-				if (!tryEat(&parse, Tok_Comma)) {
-					expect(&parse, Tok_Semicolon);
-					break;
-				}
-
-				declarators++;
 			}
+
+			if (!tryEat(&parse, Tok_Comma)) {
+				expect(&parse, Tok_Semicolon);
+				break;
+			}
+
+			declarators++;
 		}
 	}
 
 	for (u32 i = 0; i < module->len; i++) {
 		StaticValue *val = &module->ptr[i];
 		if (val->def_state == Def_Tentative)
-			val->value_data = (String) ALLOCN(parse.arena, char, typeSizeBytes(val->type, &parse.target));
+			val->value_data = (String) ALLOCN(parse.arena, char, typeSize(val->type, &parse.target));
 		else if (val->is_used && val->def_state == Def_Undefined && !val->is_public)
 			parseerror(&parse, val->decl_location, "TODO(phrasing) static identifier was never defined");
 	}
+
+	discardIrBuilder(&global_ir);
+	popScope(&parse, (Scope) {0});
 }
 
 static Symbol *getSymbol (Parse *parse, String name) {
@@ -341,7 +330,7 @@ OrdinaryIdentifier *genOrdSymbol (Parse *parse, String name, bool *new) {
 	bool is_new = !sym->ordinary || sym->ordinary->scope_depth < parse->scope_depth;
 	if (is_new) {
 		OrdinaryIdentifier *created = ALLOC(parse->arena, OrdinaryIdentifier);
-		*created = (OrdinaryIdentifier) { .shadowed = sym->ordinary };
+		*created = (OrdinaryIdentifier) { .shadowed = sym->ordinary, .scope_depth = parse->scope_depth };
 		sym->ordinary = created;
 		PUSH(parse->current_scope, sym);
 	}
@@ -351,12 +340,19 @@ OrdinaryIdentifier *genOrdSymbol (Parse *parse, String name, bool *new) {
 }
 
 
+Scope pushScope (Parse *parse) {
+	Scope prev = parse->current_scope;
+	parse->current_scope = (Scope) {0};
+	return prev;
+}
+
 void popScope (Parse *parse, Scope replacement) {
 	Scope def = parse->current_scope;
 	for (u32 i = 0; i < def.len; i++) {
 		assert(def.ptr[i]->ordinary->scope_depth == parse->scope_depth);
 		def.ptr[i]->ordinary = def.ptr[i]->ordinary->shadowed;
 	}
+	free(def.ptr);
 	parse->current_scope = replacement;
 	parse->scope_depth--;
 }
@@ -386,13 +382,13 @@ void parseFunction (Parse *parse) {
 
 	assert(parse->scope_depth == 0);
 	parse->scope_depth = 1;
-	parse->current_scope = (Scope) {0};
+	Scope enclosing = pushScope(parse);
 
 	u32 param_count = parse->current_func_type.parameters.len;
 	for (u32 i = 0; i < param_count; i++) {
 		Declaration param = parse->current_func_type.parameters.ptr[i];
 
-		IrRef slot = genStackAllocFixed(&parse->build, typeSizeBytes(param.type, &parse->target));
+		IrRef slot = genStackAllocFixed(&parse->build, typeSize(param.type, &parse->target));
 		IrRef paramval = genParameter(&parse->build, typeSize(param.type, &parse->target));
 		genStore(&parse->build, slot, paramval);
 
@@ -406,7 +402,7 @@ void parseFunction (Parse *parse) {
 	// TODO Warning if this is reachable and return type is not void.
 	genReturnVal(&parse->build, IR_REF_NONE);
 
-	popScope(parse, (Scope) {0});
+	popScope(parse, enclosing);
 
 	for (u32 i = 0; i < parse->func_goto_labels.capacity; i++) {
 		Symbol *sym = parse->func_goto_labels.ptr[i];
@@ -419,8 +415,7 @@ void parseFunction (Parse *parse) {
 static void parseCompound (Parse *parse) {
 	const Token *block_begin = parse->pos;
 	expect(parse, Tok_OpenBrace);
-	Scope enclosing_scope = parse->current_scope;
-	parse->current_scope = (Scope) {0};
+	Scope enclosing_scope = pushScope(parse);
 
 	// For C89, disallow declarators after the beginning of the block.
 	bool had_non_declaration = false;
@@ -589,7 +584,7 @@ static void parseStatement (Parse *parse, bool *had_non_declaration) {
 			} else {
 				sym->kind = Sym_Value_Auto;
 				sym->value = (Value) {decl.type,
-					genStackAllocFixed(build, typeSizeBytes(decl.type, &parse->target)),
+					genStackAllocFixed(build, typeSize(decl.type, &parse->target)),
 					storage == Storage_Register ? Ref_LValue_Register : Ref_LValue,
 				};
 
@@ -802,9 +797,9 @@ static Value parseExprLeftUnary (Parse *parse) {
 	case Tok_Asterisk:
 		return dereference(parse, parseExprLeftUnary(parse));
 	case Tok_Bang: {
-		Value v = parseExprLeftUnary(parse);
+		Value v = rvalue(parseExprLeftUnary(parse), parse);
 		IrRef zero = genImmediateInt(build, 0, typeSize(v.typ, &parse->target));
-		return (Value) {BASIC_INT, genEquals(build, v.inst, zero, typeSize(BASIC_INT, &parse->target))};
+		return (Value) {BASIC_INT, genEquals(build, v.inst, zero, parse->target.typesizes[Int_int])};
 	} break;
 	case Tok_Tilde: {
 		Value v = parseExprLeftUnary(parse);
@@ -855,7 +850,9 @@ static Value parseExprLeftUnary (Parse *parse) {
 		Type cast_target;
 		if (tryParseTypeName(parse, &cast_target, NULL)) {
 			expect(parse, Tok_CloseParen);
-			// TODO Compound literals
+			if (tryEat(parse, Tok_OpenBrace)) {
+				parseerror(parse, primary, "TODO Implement compound literals");
+			}
 			Value v = rvalue(parseExprLeftUnary(parse), parse);
 			// TODO Actually cast
 			// TODO In MSVC, a cast can produce an lvalue. I assume a
@@ -1015,6 +1012,26 @@ static Value parseExprBase (Parse *parse) {
 		return (Value) {BASIC_INT, genImmediateInt(build, t.val.integer, typeSize(BASIC_INT, &parse->target))};
 // 	case Tok_Real:
 // 		return (Value) {{Kind_Basic, {Basic_double}}, genImmediateReal(t.val.real)};
+	case Tok_String: {
+		Type strtype = {
+			.kind = Kind_Pointer,
+			.qualifiers = Qualifier_Const,
+			.pointer = ALLOC(parse->arena, Type),
+		};
+		*strtype.pointer = BASIC_CHAR;
+
+		PUSH(*parse->module, ((StaticValue) {
+			.type = strtype,
+			.decl_location = parse->pos-1,
+			.def_location = parse->pos-1,
+			.def_kind = Static_Variable,
+			.def_state = Def_Defined,
+			.value_data = t.val.string,
+		}));
+		u32 id = parse->module->len - 1;
+
+		return (Value) { strtype, genGlobal(build, id) };
+	}
 	case Tok_Identifier: {
 		Symbol *sym = mapGet(&symbols, t.val.string);
 		if (sym == NULL || sym->ordinary == NULL)
@@ -1154,7 +1171,7 @@ static void parseInitializer (Parse *parse, InitializationDest dest) {
 				memcpy(
 					dest.reloc_data.ptr + dest.offset,
 					&inst.constant,
-					1 << inst.size
+					inst.size
 				);
 			} else {
 				assert(inst.kind == Ir_Reloc);
@@ -1169,7 +1186,7 @@ static void parseInitializer (Parse *parse, InitializationDest dest) {
 					memcpy(
 						dest.reloc_data.ptr + dest.offset,
 						src->value_data.ptr + inst.reloc.offset,
-						1 << inst.size
+						inst.size
 					);
 				} else {
 					Reference ref = {dest.offset, inst.reloc.id, inst.reloc.offset};
@@ -1321,12 +1338,24 @@ static bool tryParseTypeBase (Parse *parse, Type *type, u8 *storage_dest) {
 			(void) attr;
 			if (tryEat(parse, Tok_Identifier)) {
 				// TODO
+				// A tagged struct or union type followed by its definition
+				// or by a semicolon *declares* that type tag into the
+				// scope; other usage may refer to an existing type.
+				// A tagged struct or union without definition which
+				// does not refer to a previous declaration declares its
+				// tag as an incomplete type.
+				// A tagged struct or union with definition must match
+				// all previous defintions.
 			}
 			expect(parse, Tok_OpenBrace);
 
 			LIST(StructMember) members = {0};
 			u32 current_offset = 0;
 			while (!tryEat(parse, Tok_CloseBrace)) {
+				// May not be function type, struct or union ending
+				// with an incomplete array, or incomplete type except
+				// that the last item may be an incomplete array.
+				// TODO Check this.
 				Type base = parseTypeBase(parse, NULL);
 				Declaration decl = parseDeclarator(parse, base);
 				// TODO Support VLAs
@@ -1802,8 +1831,8 @@ IrRef coerce (Value v, Type t, Parse *p) {
 
 	// Integer conversions
 	if (v.typ.kind == Kind_Basic && t.kind == Kind_Basic) {
-		Size target = p->target.typesizes[t.basic & ~Int_unsigned];
-		Size source = p->target.typesizes[v.typ.basic & ~Int_unsigned];
+		u16 target = p->target.typesizes[t.basic & ~Int_unsigned];
+		u16 source = p->target.typesizes[v.typ.basic & ~Int_unsigned];
 
 		IrBuild *build = &p->build;
 		// TODO Is it reasonable to omit the truncation on signed

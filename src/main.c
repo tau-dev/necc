@@ -16,9 +16,9 @@ int main (int argc, char **args) {
 	char *input = NULL;
 
 	String sys_paths[] = {
-		zString("/home/tau/foreign/lang/musl-1.2.3/arch/x86_64"),
-		zString("/home/tau/foreign/lang/musl-1.2.3/obj/include/"),
-		zString("/home/tau/foreign/lang/musl-1.2.3/include/"),
+		zString("./musl/arch/x86_64"),
+		zString("./musl/obj/include/"),
+		zString("./musl/include/"),
 	};
 	String user_paths[] = {
 		zString("./"),
@@ -40,6 +40,7 @@ int main (int argc, char **args) {
 			[Int_long] = I64,
 			[Int_longlong] = I64,
 		},
+		.ptr_size = I64,
 		.version = Version_GNU,
 	};
 

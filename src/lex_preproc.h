@@ -146,4 +146,5 @@ typedef struct {
 } Paths;
 
 typedef LIST(Token) Token_List;
+
 Tokenization lex(Arena *generated_strings, const char *filename, Paths paths, Target *version);

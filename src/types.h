@@ -21,7 +21,9 @@ typedef enum {
 typedef enum {
 	Kind_Void,
 	Kind_Basic,
+	Kind_Struct_Named,
 	Kind_Struct,
+	Kind_Union_Named,
 	Kind_Union,
 	Kind_Pointer,
 	Kind_Enum,
@@ -67,6 +69,7 @@ typedef struct StructMember StructMember;
 
 typedef SPAN(StructMember) StructType;
 
+typedef struct Symbol Symbol;
 typedef struct Type {
 	u8 kind;
 	u8 qualifiers;
@@ -75,10 +78,12 @@ typedef struct Type {
 		BasicType basic;
 		FunctionType function;
 		Type *pointer;
+		ArrayType array;
+		Symbol *nametagged;
+
+		// TODO Pre-calculate size, do not store these inline.
 		StructType struct_members;
 		DeclList union_members;
-		ArrayType array;
-		// TODO union, enum, ??
 	};
 } Type;
 
@@ -124,16 +129,15 @@ extern const char *version_names[];
 typedef struct {
 	Type ptrdiff;
 	Type intptr;
-	Size ptr_size;
-	Size int_size;
-	int typesizes[Int_unsigned];
+	PrimitiveSize ptr_size;
+	PrimitiveSize int_size;
+	PrimitiveSize typesizes[Int_unsigned];
 	Version version;
 } Target;
 
 bool typeCompatible(Type a, Type b);
 bool fnTypeEqual(FunctionType a, FunctionType b);
-Size typeSize(Type t, const Target *target);
-u32 typeSizeBytes(Type t, const Target *target);
+u32 typeSize(Type t, const Target *target);
 u32 typeAlignment(Type t, const Target *target);
 u32 addMemberOffset(u32 *offset, Type t, const Target *target);
 char *printDeclarator(Arena *a, Type t, String name);
@@ -142,6 +146,8 @@ char *printTypeHighlighted(Arena *a, Type t);
 void printTypeBase(Type t, char **insert, const char *end);
 void printTypeHead(Type t, char **insert, const char *end);
 void printTypeTail(Type t, char **insert, const char *end);
+
+
 
 #define BASIC_VOID ((Type) {Kind_Void})
 #define BASIC_INT ((Type) {Kind_Basic, .basic = Int_int})

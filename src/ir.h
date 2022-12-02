@@ -35,6 +35,7 @@ typedef enum {
 	Ir_Load,
 	Ir_Store,
 
+	Ir_Access,
 	Ir_Truncate,
 	Ir_SignExtend,
 	Ir_ZeroExtend,
@@ -55,21 +56,20 @@ typedef enum {
 } InstKind;
 
 typedef enum {
-	I8,
-	I16,
-	I32,
-	I64,
-	I128,
-} Size;
+	I8 = 1,
+	I16 = 2,
+	I32 = 4,
+	I64 = 8,
+	I128 = 16,
+} PrimitiveSize;
 
 // typedef SPAN(PhiNode) PhiNodes;
 
 // TODO Compress the heck out of this data.
 typedef struct Inst {
 	u8 kind;
-	u8 size;
+	u16 size;
 
-	// TODO Remove unnamed members for C99-compatibility
 	union {
 		u64 constant;
 		Call call;
@@ -84,6 +84,10 @@ typedef struct Inst {
 			IrRef lhs;
 			IrRef rhs;
 		} binop;
+		struct {
+			IrRef size;
+			u32 known_offset; // STYLE Without this, instructions could be immutable
+		} alloc;
 		struct {
 			IrRef source;
 			IrRef dest;

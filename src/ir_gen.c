@@ -1,17 +1,21 @@
 #include "ir_gen.h"
-#define HAS_EXITED(ir) ((ir)->insertion_block->exit.kind != Exit_None)
-
 
 // Some constant folding is performed here.
 // Some arithmetic simplifications require e.g. use-counts, and need to be performed in a separate step.
+
+
+#define HAS_EXITED(ir) ((ir)->insertion_block->exit.kind != Exit_None)
+// TODO Store pointer size in IrBuild
+#define PTR_SIZE I64
+
 
 IrRef append (IrBuild *build, Inst inst) {
 	PUSH (build->ir, inst);
 	return build->ir.len - 1;
 }
 
-IrRef genParameter (IrBuild *build, Size size) {
-	return append(build, (Inst) {Ir_Parameter, .unop = size});
+IrRef genParameter (IrBuild *build, u16 size) {
+	return append(build, (Inst) {Ir_Parameter, size});
 }
 
 IrRef genStackAllocFixed (IrBuild *build, u32 size) {
@@ -19,7 +23,7 @@ IrRef genStackAllocFixed (IrBuild *build, u32 size) {
 	return genStackAlloc(build, r);
 }
 IrRef genStackAlloc (IrBuild *build, IrRef size) {
-	return append(build, (Inst) {Ir_StackAlloc, .unop = size});
+	return append(build, (Inst) {Ir_StackAlloc, PTR_SIZE, {.alloc = {size}}});
 }
 
 void genReturnVal (IrBuild *build, IrRef val) {
@@ -166,7 +170,7 @@ IrRef genNot(IrBuild *build, IrRef a) {
 	return append(build, i);
 }
 
-IrRef genEquals(IrBuild *build, IrRef a, IrRef b, Size size) {
+IrRef genEquals(IrBuild *build, IrRef a, IrRef b, u16 size) {
 	Inst *inst = build->ir.ptr;
 	assert(inst[a].size == inst[b].size);
 	Inst i = {Ir_Equals, size, .binop = {a, b}};
@@ -189,14 +193,14 @@ IrRef genEquals(IrBuild *build, IrRef a, IrRef b, Size size) {
 		} else if (inst[b].kind == Ir_Constant && inst[b].constant == 0) {
 			// Relocs can never be zero.
 			i.kind = Ir_Constant;
-			i.constant = 1;
+			i.constant = 0;
 		}
 	}
 
 	return append(build, i);
 }
 
-IrRef genLessThan(IrBuild *build, IrRef a, IrRef b, Size size) {
+IrRef genLessThan(IrBuild *build, IrRef a, IrRef b, u16 size) {
 	Inst *inst = build->ir.ptr;
 	assert(inst[a].size == inst[b].size);
 	Inst i = {Ir_LessThan, size, .binop = {a, b}};
@@ -209,7 +213,7 @@ IrRef genLessThan(IrBuild *build, IrRef a, IrRef b, Size size) {
 	return append(build, i);
 }
 
-IrRef genLessThanOrEquals(IrBuild *build, IrRef a, IrRef b, Size size) {
+IrRef genLessThanOrEquals(IrBuild *build, IrRef a, IrRef b, u16 size) {
 	Inst *inst = build->ir.ptr;
 	assert(inst[a].size == inst[b].size);
 	Inst i = {Ir_LessThanOrEquals, size, .binop = {a, b}};
@@ -222,8 +226,8 @@ IrRef genLessThanOrEquals(IrBuild *build, IrRef a, IrRef b, Size size) {
 	return append(build, i);
 }
 
-IrRef genImmediateInt (IrBuild *build, long long i, Size size) {
-	return append(build, (Inst) {Ir_Constant, size, {i}});
+IrRef genImmediateInt (IrBuild *build, long long i, u16 size) {
+	return append(build, (Inst) {Ir_Constant, size, {.constant = i}});
 }
 
 IrRef genImmediateReal (IrBuild *build, double r) {
@@ -232,23 +236,28 @@ IrRef genImmediateReal (IrBuild *build, double r) {
 	return 0; // TODO
 }
 
-IrRef genTrunc (IrBuild *build, IrRef source, Size target) {
+IrRef genTrunc (IrBuild *build, IrRef source, u16 target) {
 	Inst *inst = build->ir.ptr;
 	assert(inst[source].size > target);
+	if (inst[source].kind == Ir_Constant)
+		return genImmediateInt(build, inst[source].constant & (((u64) 1 << target*8) - 1), target);
 
 	return append(build, (Inst) {Ir_Truncate, target, {source}});
 }
 
-IrRef genSignExt (IrBuild *build, IrRef source, Size target) {
+IrRef genSignExt (IrBuild *build, IrRef source, u16 target) {
 	Inst *inst = build->ir.ptr;
 	assert(inst[source].size < target);
+	// TODO constant propagation
 
 	return append(build, (Inst) {Ir_SignExtend, target, {source}});
 }
 
-IrRef genZeroExt (IrBuild *build, IrRef source, Size target) {
+IrRef genZeroExt (IrBuild *build, IrRef source, u16 target) {
 	Inst *inst = build->ir.ptr;
 	assert(inst[source].size < target);
+	if (inst[source].kind == Ir_Constant)
+		return genImmediateInt(build, inst[source].constant, target);
 
 	return append(build, (Inst) {Ir_ZeroExtend, target, {source}});
 }
@@ -260,10 +269,10 @@ IrRef genCall (IrBuild *build, IrRef func, ValuesSpan args) {
 }
 
 IrRef genGlobal (IrBuild *build, u32 id) {
-	return append(build, (Inst) {Ir_Reloc, I64, .binop = {id}});
+	return append(build, (Inst) {Ir_Reloc, PTR_SIZE, .binop = {id}});
 }
 
-IrRef genLoad (IrBuild *build, IrRef ref, Size size) {
+IrRef genLoad (IrBuild *build, IrRef ref, u16 size) {
 	IrRef load = append(build, (Inst) {Ir_Load, size, .unop = ref});
 	PUSH (build->insertion_block->mem_instructions, load);
 	return load;
@@ -278,6 +287,14 @@ IrRef genStore (IrBuild *build, IrRef dest, IrRef value) {
 	return store;
 }
 
+void discardIrBuilder(IrBuild *builder) {
+	// TODO Free loose blocks
+	free(builder->ir.ptr);
+}
+
+
+typedef unsigned long ulong;
+typedef unsigned int uint;
 void printBlock (Block *blk, IrList ir) {
 	if (blk->visited)
 		return;
@@ -287,77 +304,82 @@ void printBlock (Block *blk, IrList ir) {
 	printString(blk->label);
 	printf(":\n");
 	for (size_t i = blk->first_inst; i <= blk->last_inst; i++) {
-		printf(" %3lu = ", (unsigned long) i);
+		printf(" %3lu = ", (ulong) i);
 		Inst inst = ir.ptr[i];
-		switch (inst.kind) {
+
+		switch ((InstKind) inst.kind) {
 		case Ir_Reloc:
-			printf("global %d %+lld", inst.reloc.id, (long long)inst.reloc.offset);
-			break;
+			printf("global %d %+lld\n", inst.reloc.id, (long long)inst.reloc.offset);
+			continue;
 		case Ir_Constant:
-			printf("const 0x%lx (%lu)", (unsigned long) inst.constant, (unsigned long) inst.constant);
-			break;
+			printf("const 0x%lx (%lu)\n", (ulong) inst.constant, (ulong) inst.constant);
+			continue;
 		case Ir_Call: {
-			printf("call %lu (", (unsigned long) inst.call.function_ptr);
+			printf("call %lu (", (ulong) inst.call.function_ptr);
 			ValuesSpan params = inst.call.parameters;
 			for (u32 i = 0; i < params.len; i++) {
-				printf("%lu", (unsigned long) params.ptr[i]);
+				printf("%lu", (ulong) params.ptr[i]);
 				if (i + 1 < params.len)
 					printf(", ");
 			}
-			printf(")");
-		} break;
+			printf(")\n");
+		} continue;
 		case Ir_Phi:
 			printf("phi ");
 			for (u32 i = 0; i < inst.phi.len; i++) {
-				printf("%lu", (unsigned long) inst.phi.ptr[i]); break;
+				printf("%lu", (ulong) inst.phi.ptr[i]); break;
 				if (i + 1 < inst.phi.len)
 					printf(", ");
 			}
-			break;
+			continue;
 		case Ir_Parameter:
-			printf("param %lu", (unsigned long) inst.unop);
-			break;
+			printf("param %lu", (ulong) inst.size);
+			continue;
 		case Ir_StackAlloc:
-			printf("stack %lu", (unsigned long) inst.unop);
-			break;
+			printf("stack %lu", (ulong) inst.alloc.size);
+			continue;
+		case Ir_StackDealloc:
+			printf("discard %lu", (ulong) inst.unop);
+			continue;
 		case Ir_Load:
-			printf("load %lu", (unsigned long) inst.unop);
-			break;
+			printf("load i%ud, %lu", (uint) inst.size, (ulong) inst.unop);
+			continue;
 		case Ir_Store:
-			printf("store [%lu] %lu", (unsigned long) inst.binop.lhs, (unsigned long) inst.binop.rhs);
-			break;
-		case Ir_Add:
-			printf("add %lu %lu", (unsigned long) inst.binop.lhs, (unsigned long) inst.binop.rhs);
-			break;
-		case Ir_Sub:
-			printf("sub %lu %lu", (unsigned long) inst.binop.lhs, (unsigned long) inst.binop.rhs);
-			break;
-		case Ir_Mul:
-			printf("mul %lu %lu", (unsigned long) inst.binop.lhs, (unsigned long) inst.binop.rhs);
-			break;
-		case Ir_Div:
-			printf("div %lu %lu", (unsigned long) inst.binop.lhs, (unsigned long) inst.binop.rhs);
-			break;
-		case Ir_BitAnd:
-			printf("and %lu %lu", (unsigned long) inst.binop.lhs, (unsigned long) inst.binop.rhs);
-			break;
-		case Ir_BitOr:
-			printf("or %lu %lu", (unsigned long) inst.binop.lhs, (unsigned long) inst.binop.rhs);
-			break;
+			printf("store [%lu] %lu", (ulong) inst.binop.lhs, (ulong) inst.binop.rhs);
+			continue;
 		case Ir_BitNot:
-			printf("not %lu", (unsigned long) inst.unop);
-			break;
-		case Ir_BitXor:
-			printf("xor %lu %lu", (unsigned long) inst.binop.lhs, (unsigned long) inst.binop.rhs);
-			break;
-		case Ir_LessThan:
-			printf("cmp %lu < %lu", (unsigned long) inst.binop.lhs, (unsigned long) inst.binop.rhs);
-			break;
-		case Ir_LessThanOrEquals:
-			printf("cmp %lu <= %lu", (unsigned long) inst.binop.lhs, (unsigned long) inst.binop.rhs);
-			break;
+			printf("not %lu\n", (ulong) inst.unop);
+			continue;
+		case Ir_Truncate:
+			printf("trunc i%ud, %lu\n", (uint) inst.size, (ulong) inst.unop);
+			continue;
+		case Ir_SignExtend:
+			printf("signex i%ud, %lu\n", (uint) inst.size, (ulong) inst.unop);
+			continue;
+		case Ir_ZeroExtend:
+			printf("zeroex i%ud, %lu\n", (uint) inst.size, (ulong) inst.unop);
+			continue;
+		case Ir_Access:
+			printf("access i%ud, %lu @ %lu\n", (uint) inst.size, (ulong) inst.binop.lhs, (ulong) inst.binop.rhs);
+			continue;
+		case Ir_IntToFloat:
+			printf("int->float %lu\n", (ulong) inst.unop);
+			continue;
+		case Ir_FloatToInt:
+			printf("float->int %lu\n", (ulong) inst.unop);
+			continue;
+		case Ir_Add: printf("add"); break;
+		case Ir_Sub: printf("sub"); break;
+		case Ir_Mul: printf("mul"); break;
+		case Ir_Div: printf("div"); break;
+		case Ir_BitAnd: printf("and"); break;
+		case Ir_BitOr: printf("or"); break;
+		case Ir_BitXor: printf("xor"); break;
+		case Ir_LessThan: printf("cmp<"); break;
+		case Ir_LessThanOrEquals: printf("cmp<="); break;
+		case Ir_Equals: printf("cmp=="); break;
 		}
-		printf("\n");
+		printf("%lu %lu\n", (ulong) inst.binop.lhs, (ulong) inst.binop.rhs);
 	}
 
 	Exit exit = blk->exit;
@@ -369,7 +391,7 @@ void printBlock (Block *blk, IrList ir) {
 		printBlock(exit.unconditional, ir);
 		break;
 	case Exit_Branch:
-		printf("       branch %lu ? ", (unsigned long) exit.branch.condition);
+		printf("       branch %lu ? ", (ulong) exit.branch.condition);
 		printString(exit.branch.on_true->label);
 		printf(" : ");
 		printString(exit.branch.on_false->label);
@@ -381,7 +403,7 @@ void printBlock (Block *blk, IrList ir) {
 		if (exit.ret == IR_REF_NONE)
 			printf("       ret\n");
 		else
-			printf("       ret %lu\n", (unsigned long) exit.ret);
+			printf("       ret %lu\n", (ulong) exit.ret);
 		break;
 	default: {}
 	}

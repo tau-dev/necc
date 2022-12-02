@@ -54,7 +54,17 @@ typedef SPAN(const char) String;
 
 
 // #define CHECK(a, msg) do { if (!(a)) {puts("error: " msg); exit(EXIT_FAILURE); } } while(0)
-#define unreachable (assert(!"reached unreachable code"))
+#define unreachable (assert(!"unreachable"))
+
+
+#if (__STDC_VERSION__ >= 201904L) || (defined(_MSC_VER) && (_MSC_VER >= 1911) && (_MSVC_LANG >= 201703L))
+#define nodiscard [[nodiscard]]
+#elif defined(__GNUC__)
+#define nodiscard __attribute__((warn_unused_result))
+#else
+#define nodiscard
+#endif
+
 
 #define uchar uint8_t
 #define u8 uint8_t

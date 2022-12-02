@@ -1,6 +1,7 @@
-// #include "test.h"
+#include "test.h"
+
 //#define A(X,Y) X##Y
-#include <stdio.h>
+// #include <stdio.h>
 
 // #include <stddef.h>
 // #include <string.h>
@@ -10,6 +11,8 @@
 #define B(X) puts(# X)
 #define C(f) puts(# f)
 #define APPEND(x, y) x y
+
+int puts(const char *str);
 
 // static struct mystrucT {int a;};
 
@@ -31,7 +34,7 @@ static int o = 0;
 
 int c = !(int*)&x;
 
-int xyz(void c);
+// int xyz(void c);
 
 
 // static int (*mime(void))(void);
@@ -47,24 +50,25 @@ int main(int argc, char **args) {
 // 	double A;
 
 // 	APPEND(A, ("ohno"));
-	B("wow");
+// 	B("wow");
 // 	B(B("wow"));
 // 	C(B("me"));
 
 	char x = sizeof(int);
 	struct {int b;} typedef Woot;
 
-	Woot wat = {0};
+// 	Woot wat = {0};
 // 	int foo = Woot;
 
 // 	(void) (wat == wat);
-	(Woot) {.b=0} = (Woot) {.b=1};
+// 	(Woot) {.b=0} = (Woot) {.b=1};
 
 	char *a = &x;
 	long volatile long y;
-	(void) A;
+	puts("Hello World!");
+// 	(void) A;
 	(void) x;
-	(void) wat;
+// 	(void) wat;
 	(void) a;
 	(void) y;
 // 	char *y = &(1[&x]);
@@ -73,6 +77,6 @@ int main(int argc, char **args) {
 // 	ptrdiff_t ptd = 0;
 // 	memcpy((char) 'a', &ptd, &ptd - &ptd);
 // 	*args[argc-1] = 2;
-	return 0;
+	return 2;
 }
 

@@ -1,6 +1,7 @@
 #include "types.h"
 #include "ansii.h"
 #include "util.h"
+#include "parse.h"
 // #include <stdarg.h>
 
 
@@ -23,21 +24,27 @@ const char *version_names[Version_Lax + 1] = {
 };
 
 
-Size typeSize (Type t, const Target *target) {
-	switch (t.kind) {
-	case Kind_Basic:
-		assert(t.basic != (Int_char | Int_unsigned) && t.basic != (Int_bool | Int_unsigned));
-		return target->typesizes[t.basic & ~Int_unsigned];
-	case Kind_Pointer:
-	case Kind_FunctionPtr:
-		return I64;
-	default: unreachable;
-	}
-}
+// Size typeSize (Type t, const Target *target) {
+// 	switch (t.kind) {
+// 	default: unreachable;
+// 	}
+// }
 
-// result of 0 means incomplete type.
-u32 typeSizeBytes (Type t, const Target *target) {
+// Result of 0 means incomplete type.
+u32 typeSize (Type t, const Target *target) {
 	switch (t.kind) {
+	case Kind_Union_Named:
+	case Kind_Struct_Named: {
+		Symbol *sym = t.nametagged;
+		if (sym == NULL)
+			return 0;
+		Type actual = sym->struct_union_nametag;
+		if (t.kind == Kind_Struct_Named)
+			assert(actual.kind == Kind_Struct);
+		else
+			assert(actual.kind == Kind_Union);
+		return typeSize(actual, target);
+	}
 	case Kind_Struct: {
 		StructMember last = t.struct_members.ptr[t.struct_members.len - 1];
 		u32 max_alignment = 1;
@@ -46,24 +53,34 @@ u32 typeSizeBytes (Type t, const Target *target) {
 			if (align > max_alignment)
 				max_alignment = align;
 		}
-		u32 tightsize = last.offset + typeSizeBytes(last.type, target);
+		u32 tightsize = last.offset + typeSize(last.type, target);
 		return ((tightsize + max_alignment - 1) / max_alignment) * max_alignment;
 	}
-	default:
-		return 1 << typeSize(t, target);
+	case Kind_Void:
+		return 0;
+	case Kind_Basic:
+		assert(t.basic != (Int_char | Int_unsigned) && t.basic != (Int_bool | Int_unsigned));
+		return target->typesizes[t.basic & ~Int_unsigned];
+	case Kind_Pointer:
+	case Kind_FunctionPtr:
+		assert(target->typesizes[target->ptrdiff.basic] == target->ptr_size);
+		return target->ptr_size;
+	case Kind_Function:
+		unreachable;
+	default: assert(!"TODO Calculate other type sizes.");
 	}
 }
 
 
 u32 typeAlignment (Type t, const Target *target) {
-	u32 size = typeSizeBytes(t, target);
+	u32 size = typeSize(t, target);
 	return size < 8 ? size : 8;
 }
 
 u32 addMemberOffset (u32 *offset, Type t, const Target *target) {
 	u32 alignment = typeAlignment(t, target);
 	u32 aligned = ((*offset + alignment - 1) / alignment) * alignment;
-	*offset = aligned + typeSizeBytes(t, target);
+	*offset = aligned + typeSize(t, target);
 	return aligned;
 }
 
