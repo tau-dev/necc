@@ -248,7 +248,11 @@ IrRef genTrunc (IrBuild *build, IrRef source, u16 target) {
 IrRef genSignExt (IrBuild *build, IrRef source, u16 target) {
 	Inst *inst = build->ir.ptr;
 	assert(inst[source].size < target);
-	// TODO constant propagation
+	if (inst[source].kind == Ir_Constant) {
+		// TODO Actually sign extend the constant
+		return genImmediateInt(build, inst[source].constant, target);
+	}
+
 
 	return append(build, (Inst) {Ir_SignExtend, target, {source}});
 }
@@ -262,8 +266,8 @@ IrRef genZeroExt (IrBuild *build, IrRef source, u16 target) {
 	return append(build, (Inst) {Ir_ZeroExtend, target, {source}});
 }
 
-IrRef genCall (IrBuild *build, IrRef func, ValuesSpan args) {
-	IrRef call = append(build, (Inst) {Ir_Call, .call = {func, args}});
+IrRef genCall (IrBuild *build, IrRef func, ValuesSpan args, u16 size) {
+	IrRef call = append(build, (Inst) {Ir_Call, size, .call = {func, args}});
 	PUSH (build->insertion_block->side_effecting_instructions, call);
 	return call;
 }

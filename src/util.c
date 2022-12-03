@@ -105,7 +105,7 @@ void printMsg (Log level, SourceFile source, u32 offset) {
 		(unsigned long) loc.line, (unsigned long) loc.col);
 
 	const char *const messages[] = {
-		[Log_Err]  = RED "error:   " RESET,
+		[Log_Err]  = BOLD RED "error:   " RESET,
 		[Log_Warn] = YELLOW "warning: " RESET,
 		[Log_Info] = CYAN "info:    " RESET,
 	};

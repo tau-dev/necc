@@ -24,7 +24,7 @@ IrRef genImmediateReal(IrBuild *, double r);
 IrRef genTrunc(IrBuild *, IrRef source, u16 target);
 IrRef genSignExt(IrBuild *, IrRef source, u16 target);
 IrRef genZeroExt(IrBuild *, IrRef source, u16 target);
-IrRef genCall(IrBuild *, IrRef func, ValuesSpan args);
+IrRef genCall(IrBuild *, IrRef func, ValuesSpan args, u16 size);
 IrRef genGlobal(IrBuild *, u32 id);
 IrRef genLoad(IrBuild *, IrRef ref, u16 size);
 IrRef genStore(IrBuild *, IrRef dest, IrRef value);

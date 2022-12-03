@@ -1,18 +1,20 @@
 #include "test.h"
 
 //#define A(X,Y) X##Y
-// #include <stdio.h>
 
-// #include <stddef.h>
-// #include <string.h>
-// #include <stdio.h>
+
+#include <stddef.h>
+#include <string.h>
+#include <stdio.h>
 
 #define A(X) puts(X # X)
 #define B(X) puts(# X)
 #define C(f) puts(# f)
 #define APPEND(x, y) x y
 
-int puts(const char *str);
+int puts(const char *);
+
+int ms(int (*)(void));
 
 // static struct mystrucT {int a;};
 
@@ -47,7 +49,7 @@ int main(int argc, char **args) {
 	register int ohmy;
 	(void) ohmy;
 // 	int *p = &ohmy;
-// 	double A;
+	double A;
 
 // 	APPEND(A, ("ohno"));
 // 	B("wow");
@@ -71,12 +73,14 @@ int main(int argc, char **args) {
 // 	(void) wat;
 	(void) a;
 	(void) y;
+	(void) A;
+	(void) ohmy;
 // 	char *y = &(1[&x]);
 // 	(void) x;
 // 	printf("%d", sizeof(_Bool));
-// 	ptrdiff_t ptd = 0;
+	ptrdiff_t ptd = 0;
 // 	memcpy((char) 'a', &ptd, &ptd - &ptd);
 // 	*args[argc-1] = 2;
-	return 2;
+	return strlen("wow!");
 }
 

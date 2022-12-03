@@ -32,9 +32,7 @@ typedef struct {
 // TODO Separate out keywords by version.
 // TODO Sort and binary-search.
 #define KEYWORDS Tok_Key_Last - Tok_Key_First + 1
-Keyword names[KEYWORDS] = {
-// 	{"or", Keyword_Or},
-// 	{"and", Keyword_And},
+Keyword names[] = {
 	{"if", Tok_Key_If},
 	{"else", Tok_Key_Else},
 	{"goto", Tok_Key_Goto},
@@ -75,6 +73,9 @@ Keyword names[KEYWORDS] = {
 	{"static", Tok_Key_Static},
 	{"extern", Tok_Key_Extern},
 	{"_Thread_local", Tok_Key_Threadlocal},
+
+	{"__builtin_va_list", Tok_Key_VaList},
+	{"__restrict", Tok_Key_Restrict},
 };
 
 int keyword_cmp(const void *a, const void *b) {
@@ -83,7 +84,7 @@ int keyword_cmp(const void *a, const void *b) {
 
 Token fromWord (String word) {
 	for (int i = 0; i < KEYWORDS; ++i) {
-		if (eql(names[i].name, word)) {
+		if (names[i].name && eql(names[i].name, word)) {
 			Token ret = {0};
 			ret.kind = names[i].key;
 			return ret;
@@ -252,7 +253,7 @@ Token getToken (Arena *str_arena, const char **p) {
 			tok.kind = Tok_PreprocConcatenate;
 		} else {
 			pos++;
-			while (pos[0] == ' ') pos++;
+			while (pos[0] == ' ' || pos[0] == '\t') pos++;
 			const char *start = pos;
 			while (!isSpace(pos[0])) pos++;
 			tok = (Token) { Tok_PreprocDirective, { .identifier = {pos - start, start} } };
@@ -470,7 +471,7 @@ Tokenization lex (Arena *generated_strings, const char *filename, Paths paths, T
 			if (!line_begin)
 				lexerror(source, begin, "a preprocessor directive must be the first token of a line");
 			String directive = tok.val.identifier;
-			while (pos[0] == ' ') pos++;
+			while (pos[0] == ' ' || pos[0] == '\t') pos++;
 
 			if (eql("define", directive)) {
 				const char *start = pos;
@@ -484,8 +485,8 @@ Tokenization lex (Arena *generated_strings, const char *filename, Paths paths, T
 				}
 				String name = {pos - start, start};
 				void **entry = mapGetOrCreate(&macros, name);
-				if (*entry != NULL)
-					fprintf(stderr, "redefining %.*s\n", STRING_PRINTAGE(name));
+// 				if (*entry != NULL)
+// 					fprintf(stderr, "redefining %.*s (TODO Check that definitions are identical)\n", STRING_PRINTAGE(name));
 
 				Macro *mac = ALLOC(&macro_arena, Macro);
 				*entry = mac;

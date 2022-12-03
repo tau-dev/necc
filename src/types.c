@@ -35,25 +35,28 @@ u32 typeSize (Type t, const Target *target) {
 	switch (t.kind) {
 	case Kind_Union_Named:
 	case Kind_Struct_Named: {
-		Symbol *sym = t.nametagged;
-		if (sym == NULL)
-			return 0;
-		Type actual = sym->struct_union_nametag;
+		Type actual = t.nametagged->type;
+		if (actual.kind == Kind_Void)
+			return 0; // Incomplete
 		if (t.kind == Kind_Struct_Named)
 			assert(actual.kind == Kind_Struct);
 		else
 			assert(actual.kind == Kind_Union);
 		return typeSize(actual, target);
 	}
+	case Kind_Union:
 	case Kind_Struct: {
-		StructMember last = t.struct_members.ptr[t.struct_members.len - 1];
 		u32 max_alignment = 1;
-		for (u32 i = 0; i < t.struct_members.len; i++) {
-			u32 align = typeAlignment(t.struct_members.ptr[i].type, target);
+		u32 tightsize = 0;
+		for (u32 i = 0; i < t.members.len; i++) {
+			CompoundMember member = t.members.ptr[i];
+			u32 align = typeAlignment(member.type, target);
 			if (align > max_alignment)
 				max_alignment = align;
+			u32 end = member.offset + typeSize(member.type, target);
+			if (end > tightsize)
+				tightsize = end;
 		}
-		u32 tightsize = last.offset + typeSize(last.type, target);
 		return ((tightsize + max_alignment - 1) / max_alignment) * max_alignment;
 	}
 	case Kind_Void:
@@ -119,28 +122,11 @@ bool typeCompatible (Type a, Type b) {
 		// TODO
 		return true;
 	case Kind_Union:
-		if (a.union_members.len != b.union_members.len)
-			return false;
-		for (u32 i = 0; i < a.union_members.len; i++) {
-			if (!SPAN_EQL(a.union_members.ptr[i].name, b.union_members.ptr[i].name))
-				return false;
-			// FIXME Possible infinite recursion?
-			if (!typeCompatible(a.union_members.ptr[i].type, a.union_members.ptr[i].type))
-				return false;
-		}
-		return true;
 	case Kind_Struct:
-		// TODO Check name tags.
-		if (a.struct_members.len != b.struct_members.len)
-			return false;
-		for (u32 i = 0; i < a.struct_members.len; i++) {
-			if (!SPAN_EQL(a.struct_members.ptr[i].name, b.struct_members.ptr[i].name))
-				return false;
-			// FIXME Possible infinite recursion?
-			if (!typeCompatible(a.struct_members.ptr[i].type, a.struct_members.ptr[i].type))
-				return false;
-		}
-		return true;
+		return a.members.ptr == b.members.ptr;
+	case Kind_Struct_Named:
+	case Kind_Union_Named:
+		return a.nametagged == b.nametagged;
 	default:
 		printf("could not compare types, assuming equal\n");
 		return true;

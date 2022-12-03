@@ -93,8 +93,11 @@ typedef enum {
 	Tok_Key_Static,
 	Tok_Key_Extern,
 	Tok_Key_Threadlocal,
+
+	Tok_Key_VaList,
+
 	Tok_Key_First = Tok_Key_If,
-	Tok_Key_Last = Tok_Key_Threadlocal,
+	Tok_Key_Last = Tok_Key_VaList,
 
 	Tok_PreprocDirective,
 	Tok_PreprocConcatenate,

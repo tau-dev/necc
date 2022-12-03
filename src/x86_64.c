@@ -152,7 +152,7 @@ static bool isSpilled(Storage);
 static void emitFunction(Arena *, Module, IrList, Block *entry);
 static void emitBlock(Codegen *, Block *);
 static inline Storage storageSize(u16 size);
-static inline Storage storageSized(Storage, Storage);
+static inline Storage storageSized(Storage, u16);
 static inline Storage storageUnsized(Storage);
 static Storage regalloc(IrRef next_used_registers[GENERAL_PURPOSE_REGS_END], u16 size, IrRef);
 static const char *sizeOp(u16 size);
@@ -171,8 +171,7 @@ void emitX64AsmSimple(Arena *arena, Module module) {
 	for (u32 i = 0; i < module.len; i++) {
 		StaticValue reloc = module.ptr[i];
 		if (reloc.def_state == Def_Undefined)
-			printf("extrn '%.*s' as _%.*s\n%.*s = plt _%.*s\n",
-					STRING_PRINTAGE(reloc.name), STRING_PRINTAGE(reloc.name), STRING_PRINTAGE(reloc.name), STRING_PRINTAGE(reloc.name));
+			printf("extrn %.*s\n", STRING_PRINTAGE(reloc.name));
 		else if (reloc.is_public)
 			printf("public %.*s\n", STRING_PRINTAGE(reloc.name));
 	}
@@ -240,7 +239,6 @@ static void emitData (Module module, String data, References references) {
 			pos++;
 			while (pos < references.ptr[r].splice_pos) {
 				printf(",0%hhxh", data.ptr[pos]);
-	// 			printf("0%hhxh,", data.ptr[pos]);
 				pos++;
 			}
 			printf("\n");
@@ -440,7 +438,7 @@ static void emitBlock(Codegen *c, Block *block) {
 			if (src.kind == Ir_Constant || src.kind == Ir_Reloc) {
 				src_name = valueName(c, inst.unop);
 			} else {
-				Storage src_storage = c->storage.ptr[inst.unop];
+				Storage src_storage = storageSized(c->storage.ptr[inst.unop], inst.size);
 				src_name = storageName(c, src_storage);
 			}
 

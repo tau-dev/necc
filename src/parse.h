@@ -48,18 +48,26 @@ struct OrdinaryIdentifier {
 	i32 enum_constant;
 };
 
+typedef struct NameTaggedType NameTaggedType;
+
+struct NameTaggedType {
+	NameTaggedType *shadowed;
+	u32 scope_depth;
+
+	Type type;
+};
+
 typedef struct Symbol Symbol;
 typedef struct Symbol {
 	String name;
 
 	OrdinaryIdentifier *ordinary;
+	NameTaggedType *nametagged;
 
 	struct {
 		Block *block;
 		const Token *first_appearance;
 	} label;
-
-	Type struct_union_nametag; // Void if none declared.
 } Symbol;
 
 typedef struct {
@@ -102,10 +110,16 @@ typedef struct {
 
 typedef LIST(StaticValue) Module;
 
+typedef struct {
+	Target target;
+	bool crash_on_error;
+	bool gen_debug;
+} ParseOptions;
+
 
 static inline bool isByref(Value val) { return val.category || val.typ.kind == Kind_Struct || val.typ.kind == Kind_Union; }
 static inline bool isLvalue(Value val) { return val.category != Ref_RValue; }
 
-void parse(Arena *arena, Tokenization tokens, Target target, Module *module);
+void parse(Arena *arena, Tokenization tokens, ParseOptions opt, Module *module);
 
 

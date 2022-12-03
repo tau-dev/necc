@@ -9,7 +9,12 @@
 
 Module module = {0};
 
+
 void emitX64AsmSimple(Arena *arena, Module module);
+
+static bool eq (const char *a, const char *b) {
+	return strcmp(a, b) == 0;
+}
 
 int main (int argc, char **args) {
 	bool emit_ir = false;
@@ -44,15 +49,23 @@ int main (int argc, char **args) {
 		.version = Version_GNU,
 	};
 
+	ParseOptions opt = {
+		.target = target_x64_linux_gcc,
+	};
+
 	for (int i = 1; i < argc; i++) {
 		if (args[i][0] == '-') {
 			char *flags = args[i] + 1;
-			if (strcmp(flags, "ir") == 0) {
+			if (eq(flags, "ir")) {
 				emit_ir = true;
-			} else if (strcmp(flags, "v") == 0) {
-				printf(" NECC Version 0.0\n");
+			} else if (eq(flags, "v") || eq(flags, "version")) {
+				fprintf(stderr, " NECC Version 0.0\n");
 				return 0;
-			} else if (strcmp(flags, "std") == 0) {
+			} else if (eq(flags, "crash")) {
+				opt.crash_on_error = true;
+			} else if (eq(flags, "g") || eq(flags, "debug")) {
+				opt.gen_debug = true;
+			} else if (eq(flags, "std")) {
 				if (!args[i+1]) {
 					// ...
 				}
@@ -62,7 +75,7 @@ int main (int argc, char **args) {
 		}
 	}
 	if (input == NULL) {
-		printf("Please supply a file name.\n");
+		fprintf(stderr, "Please supply a file name.\n");
 		return 1;
 	}
 
@@ -71,7 +84,7 @@ int main (int argc, char **args) {
 
 	Tokenization tokens = lex(&arena, input, paths, &target_x64_linux_gcc);
 
-	parse(&arena, tokens, target_x64_linux_gcc, &module);
+	parse(&arena, tokens, opt, &module);
 
 // 	FILE *dest = fopen("a.out", "w");
 	if (emit_ir) {

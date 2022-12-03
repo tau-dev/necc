@@ -56,6 +56,7 @@ enum {
 typedef struct {
 	Type *rettype;
 	DeclList parameters;
+	bool is_vararg;
 } FunctionType;
 
 typedef struct {
@@ -65,11 +66,11 @@ typedef struct {
 
 
 // TODO struct and union also have a name tag and storage duration!
-typedef struct StructMember StructMember;
+typedef struct CompoundMember CompoundMember;
 
-typedef SPAN(StructMember) StructType;
+typedef SPAN(CompoundMember) Members;
 
-typedef struct Symbol Symbol;
+typedef struct NameTaggedType NameTaggedType;
 typedef struct Type {
 	u8 kind;
 	u8 qualifiers;
@@ -79,11 +80,10 @@ typedef struct Type {
 		FunctionType function;
 		Type *pointer;
 		ArrayType array;
-		Symbol *nametagged;
+		NameTaggedType *nametagged;
 
 		// TODO Pre-calculate size, do not store these inline.
-		StructType struct_members;
-		DeclList union_members;
+		Members members;
 	};
 } Type;
 
@@ -93,11 +93,11 @@ struct Function {
 	IrList ir;
 };
 
-typedef struct StructMember {
+typedef struct CompoundMember {
 	Type type;
 	String name;
 	u32 offset;
-} StructMember;
+} CompoundMember;
 
 typedef struct Declaration {
 	Type type;
