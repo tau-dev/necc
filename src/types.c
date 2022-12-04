@@ -111,6 +111,8 @@ bool typeCompatible (Type a, Type b) {
 	}
 
 	switch (a.kind) {
+	case Kind_Void:
+		return true;
 	case Kind_Function:
 	case Kind_FunctionPtr:
 		return fnTypeCompatible(a.function, b.function);
@@ -128,42 +130,27 @@ bool typeCompatible (Type a, Type b) {
 	case Kind_Union_Named:
 		return a.nametagged == b.nametagged;
 	default:
-		printf("could not compare types, assuming equal\n");
-		return true;
+		unreachable;
 	}
 }
 
 
 #define MAX_TYPE_STRING_LENGTH 1024
 
-char *printDeclarator (Arena *arena, Type t, String name) {
-	char *string = aalloc(arena, MAX_TYPE_STRING_LENGTH);
-	char *pos = string;
-	char *end = string + MAX_TYPE_STRING_LENGTH;
-
-	printTypeBase(t, &pos, end);
-	printto(&pos, end, " ");
-	printTypeHead(t, &pos, end);
-	if (name.len > 0 && pos + name.len + 1 < end) {
-		memcpy(pos, name.ptr, name.len);
-		pos += name.len;
-	}
-	printTypeTail(t, &pos, end);
-
-	return string;
-}
-
-static void printComplete (char **pos, const char *end, Type t) {
+static void printComplete (char **pos, const char *end, Type t, String name) {
 	printTypeBase(t, pos, end);
 	switch (t.kind) {
 	case Kind_Basic:
 	case Kind_Void:
 	case Kind_Struct:
+	case Kind_Struct_Named:
 	case Kind_Union:
+	case Kind_Union_Named:
 		break;
 	default:
 		printto(pos, end, " ");
 		printTypeHead(t, pos, end);
+		printto(pos, end, "%.*s", STRING_PRINTAGE(name));
 		printTypeTail(t, pos, end);
 		break;
 	}
@@ -172,17 +159,24 @@ static void printComplete (char **pos, const char *end, Type t) {
 char *printType (Arena *arena, Type t) {
 	char *string = aalloc(arena, MAX_TYPE_STRING_LENGTH);
 	char *pos = string;
-	printComplete(&pos, string + MAX_TYPE_STRING_LENGTH, t);
+	printComplete(&pos, string + MAX_TYPE_STRING_LENGTH, t, STRING_EMPTY);
 	return string;
-
 }
+
+char *printDeclarator (Arena *arena, Type t, String name) {
+	char *string = aalloc(arena, MAX_TYPE_STRING_LENGTH);
+	char *pos = string;
+	printComplete(&pos, string + MAX_TYPE_STRING_LENGTH, t, name);
+	return string;
+}
+
 
 char *printTypeHighlighted (Arena *arena, Type t) {
 	char *string = aalloc(arena, MAX_TYPE_STRING_LENGTH);
 	char *pos = string;
 	const char *end = string + MAX_TYPE_STRING_LENGTH;
 	printto(&pos, end, BOLD);
-	printComplete(&pos, end - strlen(RESET), t);
+	printComplete(&pos, end - strlen(RESET), t, STRING_EMPTY);
 	printto(&pos, end, RESET);
 	return string;
 }
@@ -224,8 +218,17 @@ void printTypeBase(Type t, char **pos, const char *end) {
 		default: assert(!"illegal type value");
 		}
 	} break;
+	case Kind_Union:
+		printto(pos, end, "anon. union");
+		break;
 	case Kind_Struct:
-		printto(pos, end, "struct {???}");
+		printto(pos, end, "anon. struct");
+		break;
+	case Kind_Struct_Named:
+		printto(pos, end, "struct %.*s", STRING_PRINTAGE(t.nametagged->name));
+		break;
+	case Kind_Union_Named:
+		printto(pos, end, "struct %.*s", STRING_PRINTAGE(t.nametagged->name));
 		break;
 	case Kind_Enum:
 		printto(pos, end, "enum {???}");
@@ -234,11 +237,11 @@ void printTypeBase(Type t, char **pos, const char *end) {
 }
 
 void printTypeHead (Type t, char **pos, const char *end) {
-
 	switch (t.kind) {
 	case Kind_Pointer:
 		printTypeHead(*t.pointer, pos, end);
-		if (t.pointer->kind == Kind_Array || t.pointer->kind == Kind_FunctionPtr)
+		if (t.pointer->kind == Kind_Array || t.pointer->kind == Kind_FunctionPtr
+				|| t.pointer->kind == Kind_Function) // TODO A Pointer should not actually ever point at a Function.
 			printto(pos, end, "(");
 		printto(pos, end, "*");
 		break;
@@ -269,7 +272,8 @@ void printTypeHead (Type t, char **pos, const char *end) {
 void printTypeTail (Type t, char **pos, const char *end) {
 	switch (t.kind) {
 	case Kind_Pointer:
-		if (t.pointer->kind == Kind_Array || t.pointer->kind == Kind_FunctionPtr)
+		if (t.pointer->kind == Kind_Array || t.pointer->kind == Kind_FunctionPtr
+				|| t.pointer->kind == Kind_Function)
 			printto(pos, end, ")");
 		printTypeTail(*t.pointer, pos, end);
 		break;
@@ -285,17 +289,10 @@ void printTypeTail (Type t, char **pos, const char *end) {
 	case Kind_Function:
 		printto(pos, end, "(");
 		for (size_t i = 0; i < t.function.parameters.len; i++) {
-			printTypeBase(t.function.parameters.ptr[i].type, pos, end);
-			String name = t.function.parameters.ptr[i].name;
-			if (name.len > 0 && *pos + name.len + 1 < end) {
-				printto(pos, end, " ");
-				printTypeHead(t.function.parameters.ptr[i].type, pos, end);
-				memcpy(*pos, name.ptr, name.len);
-				*pos += name.len;
-			} else {
-				printTypeHead(t.function.parameters.ptr[i].type, pos, end);
-			}
-			printTypeTail(t.function.parameters.ptr[i].type, pos, end);
+			Declaration param = t.function.parameters.ptr[i];
+
+			printComplete(pos, end, param.type, param.name);
+
 			if (i + 1 < t.function.parameters.len)
 				printto(pos, end, ", ");
 		}

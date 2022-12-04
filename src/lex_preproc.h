@@ -137,6 +137,7 @@ typedef struct {
 // All members allocated with malloc
 typedef struct {
 	LIST(SourceFile*) files;
+
 	Token *tokens;
 	TokenPosition *positions;
 	u32 count;

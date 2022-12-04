@@ -81,8 +81,11 @@ void printString(String s);
 
 typedef struct {
 	String name; // non-owning
+	String path; // non-owning
+
 	String content;
 	u32 idx;
+	u32 included_count;
 } SourceFile;
 
 typedef struct {

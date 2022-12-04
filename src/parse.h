@@ -51,6 +51,7 @@ struct OrdinaryIdentifier {
 typedef struct NameTaggedType NameTaggedType;
 
 struct NameTaggedType {
+	String name;
 	NameTaggedType *shadowed;
 	u32 scope_depth;
 

@@ -10,6 +10,7 @@
 
 
 bool eql (const char* a, String b) {
+	// PERFORMANCE Remove strlen
 	return strlen(a) == b.len && memcmp(a, b.ptr, b.len) == 0;
 }
 
@@ -32,7 +33,8 @@ static void printError (SourceFile source, u32 offset, const char *msg, ...) {
 SourceFile *readAllAlloc (String path, String filename) {
 	char *filename_z = malloc(path.len + filename.len + 1);
 	if (filename_z) {
-		memcpy(filename_z, path.ptr, path.len);
+		if (path.len)
+			memcpy(filename_z, path.ptr, path.len);
 		memcpy(filename_z + path.len, filename.ptr, filename.len);
 		filename_z[path.len + filename.len] = 0;
 		FILE *f = fopen(filename_z, "r");
@@ -46,16 +48,18 @@ SourceFile *readAllAlloc (String path, String filename) {
 						size_t got = fread(content, 1, count, f);
 						const char *nullbyte = memchr(content, 0, got);
 						if (nullbyte) {
-							SourceFile source = { filename, {got, content} };
+							SourceFile source = { filename, path, {got, content} };
 							printError(source, nullbyte - content, "file should not contain a null byte");
 						} else if (got == (size_t)count) {
 							content[count] = 0;
 							free(filename_z);
 							fclose(f);
 							SourceFile *result = (SourceFile*) data;
-							result->name = filename;
-							result->content = (String) {count, content};
-							result->idx = 0;
+							*result = (SourceFile) {
+								.name = filename,
+								.path = path,
+								.content = (String) {count, content},
+							};
 							return result;
 						}
 						free(data);
@@ -101,11 +105,11 @@ void printMsg (Log level, SourceFile source, u32 offset) {
 	SourceLocation loc = findSourcePos(
 			source.content.ptr, source.content.ptr + offset);
 
-	fprintf(stderr, "%.*s:%lu:%lu:\t", STRING_PRINTAGE(source.name),
+	fprintf(stderr, "%s%.*s%.*s:%lu:%lu:\t", BOLD, STRING_PRINTAGE(source.path), STRING_PRINTAGE(source.name),
 		(unsigned long) loc.line, (unsigned long) loc.col);
 
 	const char *const messages[] = {
-		[Log_Err]  = BOLD RED "error:   " RESET,
+		[Log_Err]  = RED "error:   " RESET,
 		[Log_Warn] = YELLOW "warning: " RESET,
 		[Log_Info] = CYAN "info:    " RESET,
 	};

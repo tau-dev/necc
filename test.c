@@ -2,15 +2,16 @@
 
 //#define A(X,Y) X##Y
 
-
 #include <stddef.h>
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 #define A(X) puts(X # X)
 #define B(X) puts(# X)
 #define C(f) puts(# f)
 #define APPEND(x, y) x y
+
 
 int puts(const char *);
 
@@ -20,7 +21,7 @@ int ms(int (*)(void));
 
 typedef struct {int a; int mayx;} M;
 
-// struct incomp;
+struct incomp;
 
 // extern struct incomp ms;
 
@@ -66,6 +67,7 @@ int main(int argc, char **args) {
 // 	(Woot) {.b=0} = (Woot) {.b=1};
 
 	char *a = &x;
+	char *p = &(1[&x]);
 	long volatile long y;
 	puts("Hello World!");
 // 	(void) A;
@@ -75,7 +77,6 @@ int main(int argc, char **args) {
 	(void) y;
 	(void) A;
 	(void) ohmy;
-// 	char *y = &(1[&x]);
 // 	(void) x;
 // 	printf("%d", sizeof(_Bool));
 	ptrdiff_t ptd = 0;

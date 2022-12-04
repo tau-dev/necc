@@ -11,12 +11,12 @@ OBJS := $(patsubst src/%.c,bin/%.o,$(C_SRCS))
 
 REQUIRED_DIRS := bin tests/bin
 
-debug: bin/nic-dbg
+debug: bin/necc-dbg
 
-release: bin/nic
+release: bin/necc
 
 run: debug
-	@./bin/nic-dbg test.c
+	@./bin/necc-dbg test.c
 
 test: tests/bin/main
 	@./tests/bin/main && echo "Tests passed." || echo "Tests failed."
@@ -26,13 +26,13 @@ test: tests/bin/main
 tests/bin/main: $(C_TESTS) $(filter-out bin/main.c.o, $(OBJS))
 	$(CC) $^ $(C_FLAGS) $(C_DBG_FLAGS) -o $@
 
-bin/nic-dbg: $(OBJS)
+bin/necc-dbg: $(OBJS)
 	$(CC) $^ $(C_FLAGS) $(C_DBG_FLAGS) -o $@
 
 bin/%.o: src/%.c $(C_HDRS)
 	$(CC) -c $< $(C_FLAGS) $(C_DBG_FLAGS) -o $@
 
-bin/nic: $(C_SRCS) $(C_HDRS)
+bin/necc: $(C_SRCS) $(C_HDRS)
 	$(CC) $(C_SRCS) $(C_FLAGS) $(C_REL_FLAGS) -o $@
 
 
@@ -52,10 +52,10 @@ printvars:
 	@echo "Objs: $(OBJS)"
 	@echo "Headers: $(C_HDRS)"
 
-lldb: bin/nic-dbg
-	@lldb ./bin/nic-dbg -- test.c
+lldb: bin/necc-dbg
+	@lldb ./bin/necc-dbg -- test.c
 
-gdb: bin/nic-dbg
+gdb: bin/necc-dbg
 	@gdb --args $^ test.c
 
 $(shell mkdir -p $(REQUIRED_DIRS))

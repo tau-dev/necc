@@ -51,6 +51,7 @@ typedef enum {
 
 typedef struct {
 	Arena *arena;
+	FILE *out;
 	IrList ir;
 	Module module;
 
@@ -146,10 +147,10 @@ const char *register_names[STACK_BEGIN] = {
 
 
 
-static void emitData(Module, String data, References);
+static void emitData(FILE *out, Module, String data, References);
 static void emitName (Module module, u32 id);
 static bool isSpilled(Storage);
-static void emitFunction(Arena *, Module, IrList, Block *entry);
+static void emitFunction(Arena *, FILE *, Module, IrList, Block *entry);
 static void emitBlock(Codegen *, Block *);
 static inline Storage storageSize(u16 size);
 static inline Storage storageSized(Storage, u16);
@@ -164,16 +165,16 @@ int splice_dest_order(const void *a, const void *b) {
 	return (i32) ((Reference*) a)->splice_pos - (i32) ((Reference*) b)->splice_pos;
 }
 
-void emitX64AsmSimple(Arena *arena, Module module) {
+void emitX64AsmSimple(FILE *out, Arena *arena, Module module) {
 	puts("use64\n"
 	     "format ELF64\n");
 
 	for (u32 i = 0; i < module.len; i++) {
 		StaticValue reloc = module.ptr[i];
 		if (reloc.def_state == Def_Undefined)
-			printf("extrn %.*s\n", STRING_PRINTAGE(reloc.name));
+			fprintf(out, "extrn '%.*s' as _%.*s\n", STRING_PRINTAGE(reloc.name), STRING_PRINTAGE(reloc.name));
 		else if (reloc.is_public)
-			printf("public %.*s\n", STRING_PRINTAGE(reloc.name));
+			fprintf(out, "public _%.*s as '%.*s'\n", STRING_PRINTAGE(reloc.name), STRING_PRINTAGE(reloc.name));
 	}
 
 	puts("\n\n"
@@ -181,9 +182,9 @@ void emitX64AsmSimple(Arena *arena, Module module) {
 	for (u32 i = 0; i < module.len; i++) {
 		StaticValue reloc = module.ptr[i];
 		if (reloc.def_kind == Static_Function && reloc.def_state) {
-			printf("%.*s:\n", STRING_PRINTAGE(reloc.name));
+			fprintf(out, "_%.*s:\n", STRING_PRINTAGE(reloc.name));
 			assert(reloc.type.kind == Kind_Function);
-			emitFunction(arena, module, reloc.function_ir, reloc.function_entry);
+			emitFunction(arena, out, module, reloc.function_ir, reloc.function_entry);
 		}
 	}
 
@@ -196,7 +197,7 @@ void emitX64AsmSimple(Arena *arena, Module module) {
 			&& reloc.def_state)
 		{
 			emitName(module, i);
-			emitData(module, reloc.value_data, reloc.value_references);
+			emitData(out, module, reloc.value_data, reloc.value_references);
 		}
 	}
 
@@ -209,7 +210,7 @@ void emitX64AsmSimple(Arena *arena, Module module) {
 			&& reloc.def_state)
 		{
 			emitName(module, i);
-			emitData(module, reloc.value_data, reloc.value_references);
+			emitData(out, module, reloc.value_data, reloc.value_references);
 		}
 	}
 	printf("\n");
@@ -220,12 +221,12 @@ static void emitName (Module module, u32 id) {
 	printf("align 8\n");
 	// STYLE Copypasta from valueName
 	if (reloc.name.len)
-		printf("%.*s:\n", STRING_PRINTAGE(reloc.name));
+		printf("_%.*s:\n", STRING_PRINTAGE(reloc.name));
 	else
 		printf("__%lu:\n", (unsigned long) id);
 }
 
-static void emitData (Module module, String data, References references) {
+static void emitData (FILE *out, Module module, String data, References references) {
 	if (references.len) {
 		qsort(references.ptr, references.len, sizeof(references.ptr[0]),
 			splice_dest_order);
@@ -235,26 +236,26 @@ static void emitData (Module module, String data, References references) {
 	for (u32 r = 0; r < references.len; r++) {
 		Reference ref = references.ptr[r];
 		if (pos < ref.splice_pos) {
-			printf(" db 0%hhxh", data.ptr[pos]);
+			fprintf(out, " db 0%hhxh", data.ptr[pos]);
 			pos++;
 			while (pos < references.ptr[r].splice_pos) {
-				printf(",0%hhxh", data.ptr[pos]);
+				fprintf(out, ",0%hhxh", data.ptr[pos]);
 				pos++;
 			}
-			printf("\n");
+			fprintf(out, "\n");
 		}
-		printf(" dq %.*s %+lld\n", STRING_PRINTAGE(module.ptr[ref.source_id].name), (long long) ref.offset);
+		fprintf(out, " dq %.*s %+lld\n", STRING_PRINTAGE(module.ptr[ref.source_id].name), (long long) ref.offset);
 		pos += 8;
 	}
 
 	if (pos < data.len) {
-		printf(" db 0%hhxh", data.ptr[pos]);
+		fprintf(out, " db 0%hhxh", data.ptr[pos]);
 		pos++;
 		while (pos < data.len) {
-			printf(",0%hhxh", data.ptr[pos]);
+			fprintf(out, ",0%hhxh", data.ptr[pos]);
 			pos++;
 		}
-		printf("\n");
+		fprintf(out, "\n");
 	}
 }
 
@@ -262,9 +263,10 @@ static void emitData (Module module, String data, References references) {
 
 
 
-static void emitFunction (Arena *arena, Module module, IrList ir, Block *entry) {
+static void emitFunction (Arena *arena, FILE *out, Module module, IrList ir, Block *entry) {
 	Codegen c = {
 		.arena = arena,
+		.out = out,
 		.ir = ir,
 		.lifetimes = (ValuesSpan) ALLOCN(arena, IrRef, ir.len),
 		.storage = (Storages) ALLOCN(arena, Storage, ir.len),
@@ -285,7 +287,7 @@ static void emitFunction (Arena *arena, Module module, IrList ir, Block *entry) 
 		c.used_registers[i] = IR_REF_NONE;
 	}
 	calcLifetimes(ir, c.lifetimes);
-	printf(" push rbx\n push r12\n push r13\n push r14\n push r15\n");
+	fprintf(out, " push rbx\n push r12\n push r13\n push r14\n push r15\n");
 	emitBlock(&c, entry);
 }
 
@@ -308,9 +310,9 @@ static void emitBlock(Codegen *c, Block *block) {
 	// param instructions will all appear in the first block.
 	u32 parameters_found = 0;
 
-	printf(".%s:\n ", block->label.ptr);
+	fprintf(c->out, ".%s:\n ", block->label.ptr);
 	if (block->first_inst == 0) { // entry
-		printf("sub rsp, %d\n ", (int) c->stack_allocated);
+		fprintf(c->out, "sub rsp, %d\n ", (int) c->stack_allocated);
 	}
 
 	for (u32 i = block->first_inst; i <= block->last_inst; i++) {
@@ -329,7 +331,7 @@ static void emitBlock(Codegen *c, Block *block) {
 			const char *lhs = valueName(c, inst.binop.lhs);
 			const char *rhs = valueName(c, inst.binop.rhs);
 			const char *dest = storageName(c, slot);
-			printf("mov rax, %s\n"
+			fprintf(c->out, "mov rax, %s\n"
 			     " add rax, %s\n"
 			     " mov %s, rax", lhs, rhs, dest);
 			c->storage.ptr[i] = slot;
@@ -339,7 +341,7 @@ static void emitBlock(Codegen *c, Block *block) {
 			const char *lhs = valueName(c, inst.binop.lhs);
 			const char *rhs = valueName(c, inst.binop.rhs);
 			const char *dest = storageName(c, slot);
-			printf("mov rax, %s\n"
+			fprintf(c->out, "mov rax, %s\n"
 			     " sub rax, %s\n"
 			     " mov %s, rax", lhs, rhs, dest);
 			c->storage.ptr[i] = slot;
@@ -349,7 +351,7 @@ static void emitBlock(Codegen *c, Block *block) {
 			const char *lhs = valueName(c, inst.binop.lhs);
 			const char *rhs = valueName(c, inst.binop.rhs);
 			const char *dest = storageName(c, slot);
-			printf("mov rax, %s\n"
+			fprintf(c->out, "mov rax, %s\n"
 			     " imul rax, %s\n"
 			     " mov %s, rax", lhs, rhs, dest);
 			c->storage.ptr[i] = slot;
@@ -362,43 +364,43 @@ static void emitBlock(Codegen *c, Block *block) {
 				Storage tmp = regalloc(next_used_registers, I64, i);
 				assert(!isSpilled(tmp));
 				const char *imm_reg = storageName(c, tmp);
-				printf("mov %s, %s\n ", imm_reg, rhs);
+				fprintf(c->out, "mov %s, %s\n ", imm_reg, rhs);
 				next_used_registers[storageUnsized(tmp)] = IR_REF_NONE;
 				rhs = imm_reg;
 			}
 			const char *dest = storageName(c, slot);
 			// TODO rdx will screw this up
-			printf("xor rdx, rdx\n"
+			fprintf(c->out, "xor rdx, rdx\n"
 			     " mov rax, %s\n"
 			     " idiv %s\n"
 			     " mov %s, rax", lhs, rhs, dest);
 			c->storage.ptr[i] = slot;
 		} break;
 		case Ir_BitOr: {
-			printf("TODO codegen or");
+			fprintf(stderr, "TODO codegen or");
 		} break;
 		case Ir_BitXor: {
-			printf("TODO codegen xor");
+			fprintf(stderr, "TODO codegen xor");
 		} break;
 		case Ir_BitAnd: {
 			Storage slot = regalloc(next_used_registers, I64, i);
 			const char *lhs = valueName(c, inst.binop.lhs);
 			const char *rhs = valueName(c, inst.binop.rhs);
 			const char *dest = storageName(c, slot);
-			printf("mov rax, %s\n"
+			fprintf(c->out, "mov rax, %s\n"
 			     " and rax, %s\n"
 			     " mov %s, rax", lhs, rhs, dest);
 			c->storage.ptr[i] = slot;
 		} break;
 		case Ir_BitNot: {
-			printf("TODO codegen not");
+			fprintf(stderr, "TODO codegen not");
 		} break;
 		case Ir_LessThan: {
 			Storage slot = regalloc(next_used_registers, I64, i);
 			const char *lhs = valueName(c, inst.binop.lhs);
 			const char *rhs = valueName(c, inst.binop.rhs);
 
-			printf("cmp %s, %s\n"
+			fprintf(c->out, "cmp %s, %s\n"
 			     " setl al\n"
 			     " movzx %s, al	; less than", lhs, rhs, storageName(c, slot));
 			c->storage.ptr[i] = slot;
@@ -407,7 +409,7 @@ static void emitBlock(Codegen *c, Block *block) {
 			Storage slot = regalloc(next_used_registers, I64, i);
 			const char *lhs = valueName(c, inst.binop.lhs);
 			const char *rhs = valueName(c, inst.binop.rhs);
-			printf("cmp %s, %s\n"
+			fprintf(c->out, "cmp %s, %s\n"
 			     " setle al\n"
 			     " movzx %s, al	; less than or equals", lhs, rhs, storageName(c, slot));
 			c->storage.ptr[i] = slot;
@@ -416,7 +418,7 @@ static void emitBlock(Codegen *c, Block *block) {
 			Storage slot = regalloc(next_used_registers, I64, i);
 			const char *lhs = valueName(c, inst.binop.lhs);
 			const char *rhs = valueName(c, inst.binop.rhs);
-			printf("cmp %s, %s\n"
+			fprintf(c->out, "cmp %s, %s\n"
 			     " sete al\n"
 			     " movzx %s, al	; less than or equals", lhs, rhs, storageName(c, slot));
 			c->storage.ptr[i] = slot;
@@ -424,7 +426,7 @@ static void emitBlock(Codegen *c, Block *block) {
 		case Ir_Access: {
 			Storage slot = regalloc(next_used_registers, inst.size, i);
 
-			printf("TODO Access");
+			fprintf(stderr, "TODO Access");
 
 			c->storage.ptr[i] = slot;
 		} break;
@@ -442,41 +444,41 @@ static void emitBlock(Codegen *c, Block *block) {
 				src_name = storageName(c, src_storage);
 			}
 
-			printf("mov %s, %s", storageName(c, slot), src_name);
+			fprintf(c->out, "mov %s, %s", storageName(c, slot), src_name);
 			c->storage.ptr[i] = slot;
 		} break;
 		case Ir_SignExtend: {
 			Storage slot = regalloc(next_used_registers, inst.size, i);
 
-			printf("movsx %s, %s", storageName(c, slot), valueName(c, inst.unop));
+			fprintf(c->out, "movsx %s, %s", storageName(c, slot), valueName(c, inst.unop));
 			c->storage.ptr[i] = slot;
 		} break;
 		case Ir_ZeroExtend: {
 			Storage slot = regalloc(next_used_registers, inst.size, i);
 
-			printf("movzx %s, %s", storageName(c, slot), valueName(c, inst.unop));
+			fprintf(c->out, "movzx %s, %s", storageName(c, slot), valueName(c, inst.unop));
 			c->storage.ptr[i] = slot;
 		} break;
 		case Ir_StackAlloc: {
 			Storage slot = regalloc(next_used_registers, I64, i);
-			printf("lea %s, [rsp+%d]	; alloc", storageName(c, slot), inst.alloc.known_offset);
+			fprintf(c->out, "lea %s, [rsp+%d]	; alloc", storageName(c, slot), inst.alloc.known_offset);
 			c->storage.ptr[i] = slot;
 		} break;
 		case Ir_Store: {
 			if (isSpilled(c->storage.ptr[i])) {
-				printf("TODO stack spillage");
+				fprintf(stderr, "TODO stack spillage");
 			} else {
 				const char *dest = valueName(c, inst.binop.lhs);
 				const char *src = valueName(c, inst.binop.rhs);
-				printf("mov %s [%s], %s	; store", sizeOp(valueSize(c, inst.binop.rhs)), dest, src);
+				fprintf(c->out, "mov %s [%s], %s	; store", sizeOp(valueSize(c, inst.binop.rhs)), dest, src);
 			}
 		} break;
 		case Ir_Load: {
 			if (isSpilled(c->storage.ptr[i])) {
-				printf("TODO stack spillage");
+				fprintf(stderr, "TODO stack spillage");
 			} else {
 				Storage slot = regalloc(next_used_registers, I64, i);
-				printf("mov %s, [%s]	; load", storageName(c, slot), valueName(c, inst.unop));
+				fprintf(c->out, "mov %s, [%s]	; load", storageName(c, slot), valueName(c, inst.unop));
 				c->storage.ptr[i] = slot;
 			}
 		} break;
@@ -484,7 +486,7 @@ static void emitBlock(Codegen *c, Block *block) {
 			u8 reg = parameter_regs[parameters_found];
 			if (parameters_found == 2) {
 				// rdx must be available for intermediate storage
-				printf("mov rbx, rdx");
+				fprintf(c->out, "mov rbx, rdx");
 				reg = RBX;
 			}
 			c->storage.ptr[i] = reg + storageSize(inst.size);
@@ -513,7 +515,7 @@ static void emitBlock(Codegen *c, Block *block) {
 				if (inst == IR_REF_NONE || isSpilled(c->storage.ptr[inst]))
 					continue;
 // 				stack_offsets[r] = stack_param_allocated;
-				printf("push %s\n ", storageName(c, c->storage.ptr[inst]));
+				fprintf(c->out, "push %s\n ", storageName(c, c->storage.ptr[inst]));
 // 				stack_param_allocated += c->ir.ptr[inst].size;
 			}
 			Storage slot = regalloc(next_used_registers, I64, i);
@@ -521,24 +523,24 @@ static void emitBlock(Codegen *c, Block *block) {
 
 			for (u32 p = 0; p < params.len; p++) {
 				u8 r = storageSized(parameter_regs[p], valueSize(c, params.ptr[p]));
-				printf("mov %s, %s\n ", register_names[r], valueName(c, params.ptr[p]));
+				fprintf(c->out, "mov %s, %s\n ", register_names[r], valueName(c, params.ptr[p]));
 			}
-			printf("call %s\n ", valueName(c, inst.call.function_ptr));
+			fprintf(c->out, "call %s\n ", valueName(c, inst.call.function_ptr));
 
 			for (i8 r = CALLER_SAVED_COUNT - 1; r >= 0; r--) {
 				u8 reg = caller_saved[r];
 				IrRef inst = c->used_registers[reg];
 				if (inst == IR_REF_NONE || isSpilled(c->storage.ptr[inst]))
 					continue;
-				printf("pop %s\n ", storageName(c, c->storage.ptr[inst]));
+				fprintf(c->out, "pop %s\n ", storageName(c, c->storage.ptr[inst]));
 // 				stack_param_allocated -= c->ir.ptr[inst].size;
 			}
-			printf("mov %s, rax", storageName(c, slot));
+			fprintf(c->out, "mov %s, rax", storageName(c, slot));
 			c->storage.ptr[i] = slot;
 		} break;
 		}
 
-		printf("\n ");
+		fprintf(c->out, "\n ");
 
 		memcpy(c->used_registers, next_used_registers, sizeof(next_used_registers));
 	}
@@ -547,24 +549,24 @@ static void emitBlock(Codegen *c, Block *block) {
 	switch (exit.kind) {
 	case Exit_Unconditional:
 		if (exit.unconditional->visited)
-			printf("jmp %s\n\n", exit.unconditional->label.ptr);
+			fprintf(c->out, "jmp %s\n\n", exit.unconditional->label.ptr);
 		emitBlock(c, exit.unconditional);
 		break;
 	case Exit_Branch: {
 		const char *condition = valueName(c, exit.branch.condition);
-		printf("test %s, -1\n", condition);
-		printf(" jnz .%s\n", exit.branch.on_true->label.ptr);
+		fprintf(c->out, "test %s, -1\n", condition);
+		fprintf(c->out, " jnz .%s\n", exit.branch.on_true->label.ptr);
 		if (exit.branch.on_false->visited)
-			printf(" jmp .%s\n\n", exit.branch.on_false->label.ptr);
+			fprintf(c->out, " jmp .%s\n\n", exit.branch.on_false->label.ptr);
 		emitBlock(c, exit.branch.on_false);
 		emitBlock(c, exit.branch.on_true);
 	} break;
 	case Exit_Return:
 		if (exit.ret != IR_REF_NONE)
-			printf("mov %s, %s\n ",
+			fprintf(c->out, "mov %s, %s\n ",
 					storageName(c, storageSized(RAX, valueSize(c, exit.ret))),
 					valueName(c, exit.ret));
-		printf("add rsp, %llu	; return\n pop r15\n pop r14\n pop r13\n pop r12\n pop rbx\n ret\n\n", (unsigned long long) c->stack_allocated);
+		fprintf(c->out, "add rsp, %llu	; return\n pop r15\n pop r14\n pop r13\n pop r12\n pop rbx\n ret\n\n", (unsigned long long) c->stack_allocated);
 		break;
 	case Exit_None: unreachable;
 	}
@@ -577,7 +579,7 @@ static Storage regalloc(IrRef next_used_registers[GENERAL_PURPOSE_REGS_END], u16
 			return i + storageSize(size);
 		}
 	}
-	printf("Cannot spill registers yet.");
+	fprintf(stderr, "Cannot spill registers yet.");
 	return 0;
 }
 
@@ -638,8 +640,9 @@ static const char *valueName(Codegen *c, IrRef ref) {
 		char *term;
 		if (name.len) {
 			term = aalloc(c->arena, name.len + max_num_chars);
-			memcpy(term, name.ptr, name.len);
-			term[name.len] = 0;
+			term[0] = '_';
+			memcpy(term+1, name.ptr, name.len);
+			term[name.len+1] = 0;
 		} else {
 			term = aalloc(c->arena, max_num_chars * 2);
 			snprintf(term, max_num_chars, "__%lu", (unsigned long) inst.reloc.id);
