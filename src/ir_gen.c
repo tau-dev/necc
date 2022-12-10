@@ -1,8 +1,12 @@
 #include "ir_gen.h"
 
-// Some constant folding is performed here.
-// Some arithmetic simplifications require e.g. use-counts, and need to be performed in a separate step.
+/*
 
+Generates IR, while doing a first constant-folding pass.
+Some arithmetic simplifications require e.g. use-counts, and need to be
+performed in a separate step.
+
+*/
 
 #define HAS_EXITED(ir) ((ir)->insertion_block->exit.kind != Exit_None)
 // TODO Store pointer size in IrBuild
@@ -45,7 +49,8 @@ void genJump (IrBuild *build, Block *dest) {
 		Exit_Unconditional,
 		.unconditional = dest
 	};
-	startBlock(build, dest);
+	if (dest)
+		startBlock(build, dest);
 }
 
 Block *newBlock (Arena *arena, String label) {
@@ -291,6 +296,19 @@ IrRef genStore (IrBuild *build, IrRef dest, IrRef value) {
 	return store;
 }
 
+IrRef genPhi (IrBuild *build, Arena *arena, IrRef *insts, u16 size) {
+	IrRef *r = insts;
+	while (*r != IR_REF_NONE) r++;
+	u32 count = r - insts;
+	Inst inst = {Ir_Phi, size, .phi = ALLOCN(arena, IrRef, count)};
+	memcpy(inst.phi.ptr, insts, count * sizeof(insts[0]));
+	for (u32 i = 0; i < count; i++)
+		assert(build->ir.ptr[insts[i]].size == size);
+
+
+	return append(build, inst);
+}
+
 void discardIrBuilder(IrBuild *builder) {
 	// TODO Free loose blocks
 	free(builder->ir.ptr);
@@ -299,115 +317,112 @@ void discardIrBuilder(IrBuild *builder) {
 
 typedef unsigned long ulong;
 typedef unsigned int uint;
-void printBlock (Block *blk, IrList ir) {
+void printBlock (FILE *dest, Block *blk, IrList ir) {
 	if (blk->visited)
 		return;
 	blk->visited = true;
 
-	printf(" ");
-	printString(blk->label);
-	printf(":\n");
+	fprintf(dest, " %.*s:\n", STRING_PRINTAGE(blk->label));
+
 	for (size_t i = blk->first_inst; i <= blk->last_inst; i++) {
-		printf(" %3lu = ", (ulong) i);
+		fprintf(dest, " %3lu = ", (ulong) i);
 		Inst inst = ir.ptr[i];
 
 		switch ((InstKind) inst.kind) {
 		case Ir_Reloc:
-			printf("global %d %+lld\n", inst.reloc.id, (long long)inst.reloc.offset);
+			fprintf(dest, "global %d %+lld\n", inst.reloc.id, (long long)inst.reloc.offset);
 			continue;
 		case Ir_Constant:
-			printf("const 0x%lx (%lu)\n", (ulong) inst.constant, (ulong) inst.constant);
+			fprintf(dest, "const 0x%lx (%lu)\n", (ulong) inst.constant, (ulong) inst.constant);
 			continue;
 		case Ir_Call: {
-			printf("call %lu (", (ulong) inst.call.function_ptr);
+			fprintf(dest, "call %lu (", (ulong) inst.call.function_ptr);
 			ValuesSpan params = inst.call.parameters;
 			for (u32 i = 0; i < params.len; i++) {
-				printf("%lu", (ulong) params.ptr[i]);
+				fprintf(dest, "%lu", (ulong) params.ptr[i]);
 				if (i + 1 < params.len)
-					printf(", ");
+					fprintf(dest, ", ");
 			}
-			printf(")\n");
+			fprintf(dest, ")\n");
 		} continue;
 		case Ir_Phi:
-			printf("phi ");
+			fprintf(dest, "phi ");
 			for (u32 i = 0; i < inst.phi.len; i++) {
-				printf("%lu", (ulong) inst.phi.ptr[i]); break;
+				fprintf(dest, "%lu", (ulong) inst.phi.ptr[i]); break;
 				if (i + 1 < inst.phi.len)
-					printf(", ");
+					fprintf(dest, ", ");
 			}
+			fprintf(dest, "\n");
 			continue;
 		case Ir_Parameter:
-			printf("param %lu", (ulong) inst.size);
+			fprintf(dest, "param %lu\n", (ulong) inst.size);
 			continue;
 		case Ir_StackAlloc:
-			printf("stack %lu", (ulong) inst.alloc.size);
+			fprintf(dest, "stack %lu\n", (ulong) inst.alloc.size);
 			continue;
 		case Ir_StackDealloc:
-			printf("discard %lu", (ulong) inst.unop);
+			fprintf(dest, "discard %lu\n", (ulong) inst.unop);
 			continue;
 		case Ir_Load:
-			printf("load i%ud, %lu", (uint) inst.size, (ulong) inst.unop);
+			fprintf(dest, "load i%ud, %lu\n", (uint) inst.size, (ulong) inst.unop);
 			continue;
 		case Ir_Store:
-			printf("store [%lu] %lu", (ulong) inst.binop.lhs, (ulong) inst.binop.rhs);
+			fprintf(dest, "store [%lu] %lu\n", (ulong) inst.binop.lhs, (ulong) inst.binop.rhs);
 			continue;
 		case Ir_BitNot:
-			printf("not %lu\n", (ulong) inst.unop);
+			fprintf(dest, "not %lu\n", (ulong) inst.unop);
 			continue;
 		case Ir_Truncate:
-			printf("trunc i%ud, %lu\n", (uint) inst.size, (ulong) inst.unop);
+			fprintf(dest, "trunc i%ud, %lu\n", (uint) inst.size, (ulong) inst.unop);
 			continue;
 		case Ir_SignExtend:
-			printf("signex i%ud, %lu\n", (uint) inst.size, (ulong) inst.unop);
+			fprintf(dest, "signex i%ud, %lu\n", (uint) inst.size, (ulong) inst.unop);
 			continue;
 		case Ir_ZeroExtend:
-			printf("zeroex i%ud, %lu\n", (uint) inst.size, (ulong) inst.unop);
+			fprintf(dest, "zeroex i%ud, %lu\n", (uint) inst.size, (ulong) inst.unop);
 			continue;
 		case Ir_Access:
-			printf("access i%ud, %lu @ %lu\n", (uint) inst.size, (ulong) inst.binop.lhs, (ulong) inst.binop.rhs);
+			fprintf(dest, "access i%ud, %lu @ %lu\n", (uint) inst.size, (ulong) inst.binop.lhs, (ulong) inst.binop.rhs);
 			continue;
 		case Ir_IntToFloat:
-			printf("int->float %lu\n", (ulong) inst.unop);
+			fprintf(dest, "int->float %lu\n", (ulong) inst.unop);
 			continue;
 		case Ir_FloatToInt:
-			printf("float->int %lu\n", (ulong) inst.unop);
+			fprintf(dest, "float->int %lu\n", (ulong) inst.unop);
 			continue;
-		case Ir_Add: printf("add"); break;
-		case Ir_Sub: printf("sub"); break;
-		case Ir_Mul: printf("mul"); break;
-		case Ir_Div: printf("div"); break;
-		case Ir_BitAnd: printf("and"); break;
-		case Ir_BitOr: printf("or"); break;
-		case Ir_BitXor: printf("xor"); break;
-		case Ir_LessThan: printf("cmp<"); break;
-		case Ir_LessThanOrEquals: printf("cmp<="); break;
-		case Ir_Equals: printf("cmp=="); break;
+		case Ir_Add: fprintf(dest, "add"); break;
+		case Ir_Sub: fprintf(dest, "sub"); break;
+		case Ir_Mul: fprintf(dest, "mul"); break;
+		case Ir_Div: fprintf(dest, "div"); break;
+		case Ir_BitAnd: fprintf(dest, "and"); break;
+		case Ir_BitOr: fprintf(dest, "or"); break;
+		case Ir_BitXor: fprintf(dest, "xor"); break;
+		case Ir_LessThan: fprintf(dest, "cmp<"); break;
+		case Ir_LessThanOrEquals: fprintf(dest, "cmp<="); break;
+		case Ir_Equals: fprintf(dest, "cmp=="); break;
 		}
-		printf("%lu %lu\n", (ulong) inst.binop.lhs, (ulong) inst.binop.rhs);
+		fprintf(dest, " %lu %lu\n", (ulong) inst.binop.lhs, (ulong) inst.binop.rhs);
 	}
 
 	Exit exit = blk->exit;
 	switch (exit.kind) {
 	case Exit_Unconditional:
-		printf("       jmp ");
-		printString(exit.unconditional->label);
-		printf("\n");
-		printBlock(exit.unconditional, ir);
+		fprintf(dest, "       jmp %.*s\n", STRING_PRINTAGE(exit.unconditional->label));
+		printBlock(dest, exit.unconditional, ir);
 		break;
 	case Exit_Branch:
-		printf("       branch %lu ? ", (ulong) exit.branch.condition);
-		printString(exit.branch.on_true->label);
-		printf(" : ");
-		printString(exit.branch.on_false->label);
-		printf("\n");
-		printBlock(exit.branch.on_true, ir);
-		printBlock(exit.branch.on_false, ir);
+		fprintf(dest, "       branch %lu ? %.*s : %.*s\n",
+			(ulong) exit.branch.condition,
+			STRING_PRINTAGE(exit.branch.on_true->label),
+			STRING_PRINTAGE(exit.branch.on_false->label));
+		printBlock(dest, exit.branch.on_true, ir);
+		printBlock(dest, exit.branch.on_false, ir);
 		break;
 	case Exit_Return:
 		if (exit.ret == IR_REF_NONE)
-			printf("       ret\n");
+			fprintf(dest, "       ret\n");
 		else
-			printf("       ret %lu\n", (ulong) exit.ret);
+			fprintf(dest, "       ret %lu\n", (ulong) exit.ret);
 		break;
 	default: {}
 	}

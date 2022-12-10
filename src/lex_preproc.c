@@ -5,6 +5,14 @@
 #include "lex_preproc.h"
 #include "arena.h"
 #include "ansii.h"
+#include "common.h"
+
+/*
+
+Combined lexer and preprocessor.
+
+*/
+
 
 bool isSpace(char);
 bool isAlpha(char c);
@@ -31,7 +39,6 @@ typedef struct {
 
 // TODO Separate out keywords by version.
 // TODO Sort and binary-search.
-#define KEYWORDS Tok_Key_Last - Tok_Key_First + 1
 Keyword names[] = {
 	{"if", Tok_Key_If},
 	{"else", Tok_Key_Else},
@@ -73,24 +80,30 @@ Keyword names[] = {
 	{"static", Tok_Key_Static},
 	{"extern", Tok_Key_Extern},
 	{"_Thread_local", Tok_Key_Threadlocal},
+	{"inline", Tok_Key_Inline},
 
 	{"__builtin_va_list", Tok_Key_VaList},
 	{"__restrict", Tok_Key_Restrict},
+
+	{"__FILE__", Tok_Key_File},
+	{"__LINE__", Tok_Key_Line},
 };
+#define NAMES_COUNT (sizeof(names) / sizeof(names[0]))
+
 
 int keyword_cmp(const void *a, const void *b) {
 	return strcmp(((Keyword*)a)->name, ((Keyword*)b)->name);
 }
 
 Token fromWord (String word) {
-	for (int i = 0; i < KEYWORDS; ++i) {
+	for (u32 i = 0; i < NAMES_COUNT; i++) {
 		if (names[i].name && eql(names[i].name, word)) {
 			Token ret = {0};
 			ret.kind = names[i].key;
 			return ret;
 		}
 	}
-	return (Token) {Tok_Identifier, {.identifier = word}};
+	return (Token) {Tok_Identifier, .val.identifier = word};
 }
 
 
@@ -125,7 +138,7 @@ void lexwarning (SourceFile source, const char *pos, const char *msg, ...) {
 String processStringLiteral(Arena *arena, String src);
 
 // TODO Trigraphs (trivial) and digraphs (annoying)
-Token getToken (Arena *str_arena, const char **p) {
+Token getToken (Arena *str_arena, SourceFile src, const char **p) {
 	Token tok = {0};
 	const char *pos = *p;
 
@@ -255,8 +268,8 @@ Token getToken (Arena *str_arena, const char **p) {
 			pos++;
 			while (pos[0] == ' ' || pos[0] == '\t') pos++;
 			const char *start = pos;
-			while (!isSpace(pos[0])) pos++;
-			tok = (Token) { Tok_PreprocDirective, { .identifier = {pos - start, start} } };
+			while (isAlnum(pos[0])) pos++;
+			tok = (Token) {Tok_PreprocDirective, .val.identifier = {pos - start, start}};
 			pos--;
 		}
 		break;
@@ -303,7 +316,7 @@ Token getToken (Arena *str_arena, const char **p) {
 		}
 		// TODO Error reporting
 		String val = processStringLiteral(str_arena, (String) {pos - begin, begin});
-		tok = (Token) { Tok_String, { .string = val } };
+		tok = (Token) {Tok_String, .val.string = val};
 	} break;
 	default:
 		if (isAlpha(pos[0])) {
@@ -312,9 +325,29 @@ Token getToken (Arena *str_arena, const char **p) {
 				pos++;
 
 			tok = fromWord((String) {pos - start, start});
+			if (tok.kind == Tok_Key_File) {
+				tok.kind = Tok_String;
+				tok.val.string = src.name;
+			} else if (tok.kind == Tok_Key_Line) {
+				tok.kind = Tok_Integer;
+				// TOOD Find line position. Re-searching for it every
+				// time would be quadratic complexity. Bad, but maybe
+				// does not occur very often...? Actually, assert-heavy
+				// code probably does. Ugh, I'll have to count every
+				// newline I skip...
+				tok.val.literal.integer = 0;
+			}
 			pos--;
 		} else if (isDigit(pos[0]) || pos[0] == '.') {
+			// Could just use strtod/strtol for number parsing, but the
+			// standard library functions have a pretty inefficient
+			// interface and I will have to manually handle C23 stuff
+			// like decimal-type suffixes and digit separators anyways.
 			const char *start = pos;
+
+			if (pos[0] == '0' && pos[1] == 'x') {
+				pos += 2;
+			}
 
 			while (isDigit(*pos))
 				pos++;
@@ -327,12 +360,13 @@ Token getToken (Arena *str_arena, const char **p) {
 					pos++;
 				if (*pos == '-' || *pos == '+')
 					pos++;
+
 				while (isDigit(*pos))
 					pos++;
 
-				tok = (Token) {Tok_Real, {.real = strtod(start, NULL)}};
+				tok = (Token) {Tok_Real, .val.real = strtod(start, NULL)};
 			} else {
-				tok = (Token) {Tok_Integer, {.integer = strtoll(start, NULL, 10)}};
+				tok = (Token) {Tok_Integer, .val.literal.integer = strtoll(start, NULL, 10)};
 
 				bool is_unsigned = pos[0] == 'u' || pos[0] == 'U';
 				if (is_unsigned)
@@ -348,7 +382,7 @@ Token getToken (Arena *str_arena, const char **p) {
 				}
 				if (is_unsigned)
 					literal_type |= Int_unsigned;
-				tok.val.int_type = literal_type;
+				tok.val.literal.int_type = literal_type;
 			}
 
 			pos--;
@@ -368,7 +402,6 @@ typedef struct MacroToken {
 	u16 file_ref;
 	// 0 if this token is not a parameter, 1+(index into parameters) if it is.
 	u8 parameter;
-	u8 preceded_by_space;
 } MacroToken;
 
 typedef struct {
@@ -420,20 +453,20 @@ static Token getTokenSpaced(Arena *, SourceFile, const char **p);
 static bool gobbleSpaceToNewline(const char **p);
 static bool evalPreprocExpression(ExpansionParams, Tokenization *);
 static void predefineMacros (Arena *arena, StringMap *macros, Target *);
-Tokenization lex (Arena *generated_strings, const char *filename, Paths paths, Target *target) {
+Tokenization lex (Arena *generated_strings, String filename, Paths paths, Target *target) {
 	typedef struct {
 		u16 file;
 		const char *pos;
 	} Inclusion;
 
-	qsort(names, sizeof(names)/sizeof(names[0]), sizeof(names[0]), keyword_cmp);
+// 	qsort(names, sizeof(names)/sizeof(names[0]), sizeof(names[0]), keyword_cmp);
 
 	Arena macro_arena = create_arena(2048);
 	Tokenization t = {0};
 
-	SourceFile *initial_source = readAllAlloc(zString(""), zString(filename));
+	SourceFile *initial_source = readAllAlloc(zString(""), filename);
 	if (initial_source == NULL) {
-		fprintf(stderr, RED "error: " RESET "could not open file \"%s\"\n", filename);
+		fprintf(stderr, RED "error: " RESET "could not open file \"%.*s\"\n", STRING_PRINTAGE(filename));
 		exit(1);
 	}
 	PUSH(t.files, initial_source);
@@ -465,7 +498,7 @@ Tokenization lex (Arena *generated_strings, const char *filename, Paths paths, T
 		while (true) {
 			line_begin = tryGobbleSpace(source, &pos) == Space_Linebreak || file_begin;
 			begin = pos;
-			tok = getToken(generated_strings, &pos);
+			tok = getToken(generated_strings, source, &pos);
 			if (tok.kind != Tok_EOF || source.idx == 0)
 				break;
 			Inclusion inc = POP(includes_stack);
@@ -550,14 +583,14 @@ Tokenization lex (Arena *generated_strings, const char *filename, Paths paths, T
 
 					u32 macro_pos = pos - source.content.ptr;
 					MacroToken t = {
-						.tok = getToken(generated_strings, &pos),
+						.tok = getToken(generated_strings, source, &pos),
 						.file_offset = macro_pos,
 						.file_ref = source.idx,
-						.preceded_by_space = havespace
 					};
+					t.tok.preceded_by_space = havespace;
 					if (t.tok.kind == Tok_EOF)
 						lexerror(source, pos, "macro definition must end before end of source file");
-					if (parameters && t.tok.kind == Tok_Identifier) {
+					if (parameters && (t.tok.kind == Tok_Identifier || t.tok.kind == Tok_PreprocDirective)) {
 						Parameter *param = mapGet(&macro_parameters, t.tok.val.identifier);
 						if (param)
 							t.parameter = param - mac->parameters.ptr + 1;
@@ -635,7 +668,7 @@ Tokenization lex (Arena *generated_strings, const char *filename, Paths paths, T
 					lexerror(source, begin, "missing argument for #pragma directive");
 				const char *start = pos;
 				while (*pos && *pos != '\n') pos++;
-				String pragma = {pos - start, pos};
+				String pragma = {pos - start, start};
 // 				pos--;
 
 				if (eql("once", pragma)) {
@@ -646,6 +679,8 @@ Tokenization lex (Arena *generated_strings, const char *filename, Paths paths, T
 						pos = inc.pos;
 						source = *t.files.ptr[inc.file];
 					}
+				} else {
+					lexwarning(source, start, "ignoring unknown #pragma directive");
 				}
 			} else if (eql("if", directive)) {
 				expansion.source = source;
@@ -720,6 +755,7 @@ Tokenization lex (Arena *generated_strings, const char *filename, Paths paths, T
 				macro->being_replaced = true;
 				PUSH(macro_expansion_stack, ((Replacement) {macro, .toks = arguments}));
 				expandInto(expansion, &t, false);
+
 				assert(macro_expansion_stack.len == 0);
 				continue;
 			}
@@ -777,16 +813,16 @@ static bool expandInto (const ExpansionParams ex, Tokenization *dest, bool is_ar
 				MacroToken paren = takeToken(ex, &level_of_argument_source);
 				if (paren.tok.kind != Tok_OpenParen) {
 					appendOneToken(dest, t.tok, (TokenPosition) {
-						.source_file_ref = ex.source.idx,
-						.source_file_offset = ex.source_file_offset,
-						.macro_file_ref = t.file_ref,
-						.macro_file_offset = t.file_offset,
+						.source_file_ref = t.file_ref,
+						.source_file_offset = t.file_offset,
+						.macro_file_ref = ex.source.idx,
+						.macro_file_offset = ex.source_file_offset,
 					});
 					appendOneToken(dest, paren.tok, (TokenPosition) {
-						.source_file_ref = ex.source.idx,
-						.source_file_offset = ex.source_file_offset,
-						.macro_file_ref = paren.file_ref,
-						.macro_file_offset = paren.file_offset,
+						.source_file_ref = paren.file_ref,
+						.source_file_offset = paren.file_offset,
+						.macro_file_ref = ex.source.idx,
+						.macro_file_offset = ex.source_file_offset,
 					});
 					continue;
 				}
@@ -818,10 +854,10 @@ static bool expandInto (const ExpansionParams ex, Tokenization *dest, bool is_ar
 				}
 			}
 			appendOneToken(dest, t.tok, (TokenPosition) {
-				.source_file_ref = ex.source.idx,
-				.source_file_offset = ex.source_file_offset,
-				.macro_file_ref = t.file_ref,
-				.macro_file_offset = t.file_offset,
+				.source_file_ref = t.file_ref,
+				.source_file_offset = t.file_offset,
+				.macro_file_ref = ex.source.idx,
+				.macro_file_offset = ex.source_file_offset,
 			});
 		}
 	}
@@ -863,6 +899,8 @@ static Tokenization *takeArguments(const ExpansionParams ex, Macro *mac) {
 	return argument_bufs;
 }
 
+void strPrintToken(char **dest, const char *end, Token t);
+u32 strPrintTokenLen(Token t);
 static MacroToken takeToken (const ExpansionParams ex, u32 *marker) {
 	MacroStack *stack = ex.stack;
 	while (stack->len) {
@@ -871,12 +909,28 @@ static MacroToken takeToken (const ExpansionParams ex, u32 *marker) {
 		if (macro) {
 			assert(repl->pos < macro->tokens.len);
 
-			MacroToken t = repl->mac->tokens.ptr[repl->pos];
+			MacroToken t = macro->tokens.ptr[repl->pos];
 			repl->pos++;
 			if (t.parameter) {
 				if (t.tok.kind == Tok_PreprocDirective) {
-					lexerror(ex.source, ex.source.content.ptr + ex.source_file_offset,
-						"TODO Implement stringification");
+					Tokenization arg = repl->toks[t.parameter-1];
+					u32 data_len = 0;
+					for (u32 i = 0; i < arg.count; i++) {
+						// TODO Missing spacing
+						data_len += strPrintTokenLen(arg.tokens[i]);
+					}
+					char *start = aalloc(ex.strings_arena, data_len);
+					char *c = start;
+					char *end = c + data_len;
+					for (u32 i = 0; i < arg.count; i++) {
+						// TODO Missing spacing
+						strPrintToken(&c, end, arg.tokens[i]);
+					}
+
+					collapseMacroStack(stack, marker);
+
+					t.tok = (Token) {Tok_String, .val.string = {data_len, start}};
+					return t;
 				}
 
 				Replacement arg = {
@@ -904,11 +958,12 @@ static MacroToken takeToken (const ExpansionParams ex, u32 *marker) {
 
 	bool have_space = tryGobbleSpace(ex.source, ex.src);
 	u32 pos = *ex.src - ex.source.content.ptr;
+	Token t = getToken(ex.strings_arena, ex.source, ex.src);
+	t.preceded_by_space = have_space;
 	return (MacroToken) {
+		.tok = t,
 		.file_ref = ex.source.idx,
 		.file_offset = pos,
-		.preceded_by_space = have_space,
-		.tok = getToken(ex.strings_arena, ex.src),
 	};
 }
 
@@ -1085,7 +1140,7 @@ static Token getTokenSpaced (Arena *str_arena, SourceFile source, const char **p
 	gobbleSpaceToNewline(p);
 	if (**p == '\n' || **p == 0)
 		lexerror(source, *p, "expected a token before the end of the line");
-	return getToken(str_arena, p);
+	return getToken(str_arena, source, p);
 }
 
 static bool gobbleSpaceToNewline (const char **p) {
@@ -1214,7 +1269,7 @@ static int parseUnop(ConstParse *parse) {
 
 static int parseCore(ConstParse *parse) {
 	if (parse->pos->kind == Tok_Integer) {
-		int x = parse->pos->val.integer;
+		int x = parse->pos->val.literal.integer;
 		parse->pos++;
 		return x;
 	} else if (parse->pos->kind == Tok_OpenParen) {
@@ -1243,7 +1298,7 @@ static bool evalPreprocExpression(ExpansionParams params, Tokenization *buf) {
 		gobbleSpaceToNewline(&pos);
 		if (*pos == '\n' || *pos == 0)
 			break;
-		Token tok = getToken(str_arena, &pos);
+		Token tok = getToken(str_arena, params.source, &pos);
 		if (tok.kind == Tok_Identifier) {
 			if (eql("defined", tok.val.identifier)) {
 				tok = getTokenSpaced(str_arena, params.source, &pos);
@@ -1255,11 +1310,11 @@ static bool evalPreprocExpression(ExpansionParams params, Tokenization *buf) {
 					lexerror(params.source, pos, "the operator %sdefined%s expects an identifier as an argument", BOLD, RESET);
 
 				bool found = mapGet(params.macros, tok.val.identifier);
-				tok = (Token) {Tok_Integer, {.integer = found, .int_type = Int_int}};
+				tok = (Token) {Tok_Integer, .val.literal = {.integer = found, .int_type = Int_int}};
 
 				if (parenthesized) {
 					gobbleSpaceToNewline(&pos);
-					if (*pos == '\n' || *pos == 0 || getToken(str_arena, &pos).kind != Tok_CloseParen)
+					if (*pos == '\n' || *pos == 0 || getToken(str_arena, params.source, &pos).kind != Tok_CloseParen)
 						lexerror(params.source, pos, "missing closing parenthesis");
 				}
 			} else {
@@ -1291,9 +1346,10 @@ static bool evalPreprocExpression(ExpansionParams params, Tokenization *buf) {
 // TODO Come up with a better system for nice highlighting.
 const char *token_names[Tok_EOF+1] = {
 	[Tok_Identifier] = "identifier",
-	[Tok_Integer] = "integer literal",
-	[Tok_Real] = "floating point literal",
-	[Tok_String] = "string literal",
+	[Tok_Integer] = "integer-literal",
+	[Tok_Real] = "floating-point-literal",
+	[Tok_String] = "string-literal",
+	[Tok_PreprocDirective] = "preprocessor-directive",
 
 	[Tok_OpenParen] = "(",
 	[Tok_CloseParen] = ")",
@@ -1314,8 +1370,10 @@ const char *token_names[Tok_EOF+1] = {
 	[Tok_DoubleEquals] = "==",
 	[Tok_Arrow] = "->",
 	[Tok_Plus] = "+",
+	[Tok_DoublePlus] = "++",
 	[Tok_PlusEquals] = "+=",
 	[Tok_Minus] = "-",
+	[Tok_DoubleMinus] = "--",
 	[Tok_MinusEquals] = "-=",
 	[Tok_Asterisk] = "*",
 	[Tok_AsteriskEquals] = "*=",
@@ -1343,9 +1401,10 @@ static const char *const name_end = name + 256;
 const char *tokenNameHighlighted (TokenKind kind) {
 	switch (kind) {
 	case Tok_Identifier: return "identifier";
-	case Tok_Integer: return "integer literal";
-	case Tok_Real: return "floating point literal";
-	case Tok_String: return "string literal";
+	case Tok_Integer: return "integer-literal";
+	case Tok_Real: return "floating-point-literal";
+	case Tok_String: return "string-literal";
+	case Tok_PreprocDirective: return "preprocessor-directive";
 	default:;
 		char *c = name;
 		printto(&c, name_end, "%s%s%s", BOLD, tokenName(kind), RESET);
@@ -1358,13 +1417,43 @@ const char *tokenName (TokenKind kind) {
 		return token_names[kind];
 	} else {
 		if (kind >= Tok_Key_First && kind <= Tok_Key_Last) {
-			const int count = sizeof(names) / sizeof(names[0]);
-			for (int i = 0; i < count; i++) {
+			for (u32 i = 0; i < NAMES_COUNT; i++) {
 				if (names[i].key == kind)
 					return names[i].name;
 			}
 		}
 		return NULL;
+	}
+}
+
+
+u32 strPrintTokenLen (Token t) {
+	switch (t.kind) {
+	case Tok_Identifier: return t.val.identifier.len;
+	case Tok_PreprocDirective: return t.val.identifier.len + 1;
+	case Tok_String: return t.val.string.len * 2 + 2;
+	case Tok_Integer: return t.val.literal.int_type <= Int_int ? 12 : 24;
+	default:
+		return strlen(tokenName(t.kind));
+	}
+}
+
+void strPrintToken (char **dest, const char *end, Token t) {
+	switch (t.kind) {
+	case Tok_PreprocDirective:
+		printto(dest, end, "#");
+		FALLTHROUGH;
+	case Tok_Identifier:
+		printto(dest, end, "%.*s", STRING_PRINTAGE(t.val.identifier));
+		return;
+	case Tok_String:
+		printto(dest, end, "%.*s", STRING_PRINTAGE(t.val.string));
+		return;
+	case Tok_Integer:
+		printto(dest, end, "%lld", t.val.literal.integer);
+		return;
+	default:
+		printto(dest, end, "%s", tokenName(t.kind));
 	}
 }
 
@@ -1397,7 +1486,7 @@ bool isAlnum (char c) {
 
 static void predefine (Arena *arena, StringMap *macros, const char *name) {
 	MacroToken *one = calloc(1, sizeof(MacroToken));
-	*one = (MacroToken) {{Tok_Integer, .val.integer = 1}};
+	*one = (MacroToken) {{Tok_Integer, .val.literal.integer = 1}};
 
 	String name_str = zString(name);
 	void **entry = mapGetOrCreate(macros, name_str);
@@ -1428,7 +1517,6 @@ String processStringLiteral(Arena *arena, String src) {
 		res[len] = src.ptr[i];
 		len++;
 	}
-	res[len] = 0;
-	return (String) {len + 1, res};
+	return (String) {len, res};
 }
 

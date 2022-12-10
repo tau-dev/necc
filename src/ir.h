@@ -73,7 +73,7 @@ typedef struct Inst {
 	union {
 		u64 constant;
 		Call call;
-		LIST(IrRef) phi;
+		SPAN(IrRef) phi;
 
 		IrRef unop;
 		struct {

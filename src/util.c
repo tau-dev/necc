@@ -8,6 +8,12 @@
 #define FOUND_NONE ((u32) -1)
 #define MAX_LOAD_PERCENTAGE 70
 
+/*
+
+Provides functions for strings, hash maps and error reporting.
+
+*/
+
 
 bool eql (const char* a, String b) {
 	// PERFORMANCE Remove strlen
@@ -73,10 +79,6 @@ SourceFile *readAllAlloc (String path, String filename) {
 	return NULL;
 }
 
-void printString (String s) {
-	fwrite(s.ptr, 1, s.len, stdout);
-}
-
 u64 strHash (String str) {
 	return wyhash(str.ptr, str.len, 1337, _wyp);
 }
@@ -124,6 +126,15 @@ void printWarn (SourceFile source, u32 offset) {
 }
 void printInfo (SourceFile source, u32 offset) {
 	printMsg(Log_Info, source, offset);
+}
+
+void generalFatal(const char *msg, ...) {
+	fprintf(stderr, RED "error:   " RESET);
+	va_list args;
+    va_start(args, msg);
+    vfprintf(stderr, msg, args);
+    va_end(args);
+    exit(1);
 }
 
 

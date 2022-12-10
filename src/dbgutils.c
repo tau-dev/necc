@@ -48,7 +48,9 @@ void tokz(Token t) {
 		if (c) {
 			appendz(c);
 		} else {
-			appendz("[???]");
+			char buf[10] = {0};
+			snprintf(buf, 10, "[%d]", (int) t.kind);
+			appendz(buf);
 		}
 	}
 }
@@ -59,15 +61,20 @@ const char *tz(Token t) {
 	return buf.ptr;
 }
 
-const int ctx_len = 8;
 const char *lexz(Tokenization t, const Token *current, const Token *parse_pos, u32 count) {
-	u32 offset = 0;
-	if (current && current > t.tokens + ctx_len)
-		offset = current - t.tokens - ctx_len;
+	int ctx_len = 8;
+	if (count) ctx_len = (count + 1) / 2;
+
+	i32 begin = (i32) (current ? current - t.tokens : t.count) - ctx_len;
+	u32 end = begin + 2*ctx_len;
+	if (end > t.count) {
+		begin -= end - t.count;
+		end = t.count;
+	}
+	if (begin < 0) begin = 0;
 	buf.len = 0;
 
-	u32 end = (count && offset + count < t.count) ? offset + count : t.count;
-	for (u32 i = offset; i < end; i++) {
+	for (u32 i = begin; i < end; i++) {
 		if (t.tokens + i == current)
 			appendz(" >MAIN> ");
 		if (t.tokens + i == parse_pos)

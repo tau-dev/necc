@@ -28,6 +28,7 @@ typedef enum {
 	Kind_Pointer,
 	Kind_Enum,
 	Kind_Array,
+	Kind_VLArray,
 	// Decays to Kind_FunctionPtr by rvalue() conversion. Handled
 	// specially (for error messages) in lvalue usage.
 	Kind_Function,
@@ -61,7 +62,7 @@ typedef struct {
 
 typedef struct {
 	Type *inner;
-	IrRef count;
+	u32 count; // IrRef for VLA (IR_REF_NONE for unspecified size), number otherwise.
 } ArrayType;
 
 
@@ -123,23 +124,17 @@ typedef enum {
 	Attribute_Unsequenced = 1 << 5,
 	Attribute_Reproducible = 1 << 6,
 } Attributes;
-
+typedef struct Target Target;
 extern const char *version_names[];
 
-typedef struct {
-	Type ptrdiff;
-	Type intptr;
-	PrimitiveSize ptr_size;
-	PrimitiveSize int_size;
-	PrimitiveSize typesizes[Int_unsigned];
-	Version version;
-} Target;
-
+Type resolveType(Type t);
 bool typeCompatible(Type a, Type b);
 bool fnTypeEqual(FunctionType a, FunctionType b);
 u32 typeSize(Type t, const Target *target);
 u32 typeAlignment(Type t, const Target *target);
 u32 addMemberOffset(u32 *offset, Type t, const Target *target);
+bool isFlexibleArrayMember(Members m, u32 index);
+
 char *printDeclarator(Arena *a, Type t, String name);
 char *printType(Arena *a, Type t);
 char *printTypeHighlighted(Arena *a, Type t);
@@ -151,7 +146,7 @@ void printTypeTail(Type t, char **insert, const char *end);
 
 #define BASIC_VOID ((Type) {Kind_Void})
 #define BASIC_INT ((Type) {Kind_Basic, .basic = Int_int})
-#define BASIC_CHAR ((Type) {Kind_Basic, .basic = Int_char})
+// #define BASIC_CHAR ((Type) {Kind_Basic, .basic = Int_char})
 #define INT_SIZE I32
 
 

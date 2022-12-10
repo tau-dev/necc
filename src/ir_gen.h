@@ -29,6 +29,7 @@ IrRef genGlobal(IrBuild *, u32 id);
 IrRef genLoad(IrBuild *, IrRef ref, u16 size);
 IrRef genStore(IrBuild *, IrRef dest, IrRef value);
 
+IrRef genPhi(IrBuild *build, Arena *arena, IrRef *insts, u16 size);
 void genReturnVal(IrBuild *, IrRef val);
 void genBranch(IrBuild *, IrRef condition);
 void genJump(IrBuild *, Block *blk);
@@ -36,7 +37,7 @@ Block *newBlock(Arena *arena, String label);
 void startBlock(IrBuild *, Block *blk);
 void discardBlock(Block *blk);
 void discardIrBuilder(IrBuild *);
-Block *startNewBlock (IrBuild *build, Arena *arena, String label);
+Block *startNewBlock(IrBuild *build, Arena *arena, String label);
 
-void printBlock(Block *entry, IrList ir);
+void printBlock(FILE *dest, Block *entry, IrList ir);
 

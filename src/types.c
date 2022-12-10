@@ -4,6 +4,12 @@
 #include "parse.h"
 // #include <stdarg.h>
 
+/*
+
+Routines for analyzing and printing types.
+
+*/
+
 
 // Used in the phrasings "supported with $version" and "target uses $version".
 
@@ -31,6 +37,11 @@ const char *version_names[Version_Lax + 1] = {
 // }
 
 // Result of 0 means incomplete type.
+
+Type resolveType (Type t) {
+	return t.kind == Kind_Struct_Named || t.kind == Kind_Union_Named ? t.nametagged->type : t;
+}
+
 u32 typeSize (Type t, const Target *target) {
 	switch (t.kind) {
 	case Kind_Union_Named:
@@ -70,10 +81,18 @@ u32 typeSize (Type t, const Target *target) {
 		return target->ptr_size;
 	case Kind_Function:
 		unreachable;
+	case Kind_Array:
+		return t.array.count * typeSize(*t.array.inner, target);
 	default: assert(!"TODO Calculate other type sizes.");
 	}
 }
 
+bool isFlexibleArrayMember (Members m, u32 index) {
+	if (index + 1 != m.len)
+		return false;
+	Type t = m.ptr[m.len - 1].type;
+	return t.kind == Kind_Array && t.array.count == IR_REF_NONE;
+}
 
 u32 typeAlignment (Type t, const Target *target) {
 	u32 size = typeSize(t, target);
@@ -222,7 +241,7 @@ void printTypeBase(Type t, char **pos, const char *end) {
 		printto(pos, end, "anon. union");
 		break;
 	case Kind_Struct:
-		printto(pos, end, "anon. struct");
+		printto(pos, end, "anonymous struct");
 		break;
 	case Kind_Struct_Named:
 		printto(pos, end, "struct %.*s", STRING_PRINTAGE(t.nametagged->name));

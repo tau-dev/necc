@@ -2,6 +2,12 @@
 
 //#define A(X,Y) X##Y
 
+#if __STDC_VERSION__ < 201112L && defined( __GNUC__)
+#define _Alignas(t) __attribute__((__aligned__(t)))
+#define _Alignof(t) __alignof__(t)
+#endif
+
+
 #include <stddef.h>
 #include <string.h>
 #include <stdio.h>
@@ -14,6 +20,7 @@
 
 
 int puts(const char *);
+
 
 int ms(int (*)(void));
 

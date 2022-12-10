@@ -93,11 +93,15 @@ typedef enum {
 	Tok_Key_Static,
 	Tok_Key_Extern,
 	Tok_Key_Threadlocal,
+	Tok_Key_Inline,
 
 	Tok_Key_VaList,
 
+	Tok_Key_File,
+	Tok_Key_Line,
+
 	Tok_Key_First = Tok_Key_If,
-	Tok_Key_Last = Tok_Key_VaList,
+	Tok_Key_Last = Tok_Key_Line,
 
 	Tok_PreprocDirective,
 	Tok_PreprocConcatenate,
@@ -114,12 +118,13 @@ const char *tokenNameHighlighted(TokenKind k);
 
 typedef struct {
 	TokenKind kind;
+	u8 preceded_by_space;
 
 	union {
 		struct {
 			long long integer;
 			BasicType int_type;
-		};
+		} literal;
 		String identifier;
 		double real;
 		String string;
@@ -151,4 +156,4 @@ typedef struct {
 
 typedef LIST(Token) Token_List;
 
-Tokenization lex(Arena *generated_strings, const char *filename, Paths paths, Target *version);
+Tokenization lex(Arena *generated_strings, String filename, Paths paths, Target *version);

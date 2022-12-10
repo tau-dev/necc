@@ -57,13 +57,18 @@ typedef SPAN(const char) String;
 #define unreachable (assert(!"unreachable"))
 
 
+
 #if (__STDC_VERSION__ >= 201904L) || (defined(_MSC_VER) && (_MSC_VER >= 1911) && (_MSVC_LANG >= 201703L))
+#define FALLTHROUGH [[fallthrough]]
 #define nodiscard [[nodiscard]]
 #elif defined(__GNUC__)
+#define FALLTHROUGH __attribute__((fallthrough))
 #define nodiscard __attribute__((warn_unused_result))
 #else
+#define FALLTHROUGH
 #define nodiscard
 #endif
+
 
 
 #define uchar uint8_t
@@ -77,7 +82,6 @@ typedef SPAN(const char) String;
 #define i64 int64_t
 
 u64 strHash(String);
-void printString(String s);
 
 typedef struct {
 	String name; // non-owning
@@ -124,4 +128,4 @@ void printMsg(Log, SourceFile, u32);
 void printErr(SourceFile, u32);
 void printWarn(SourceFile, u32);
 void printInfo(SourceFile, u32);
-
+void generalFatal(const char *msg, ...);

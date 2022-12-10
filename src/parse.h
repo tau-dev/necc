@@ -4,6 +4,7 @@
 #include "arena.h"
 #include "ir.h"
 #include "lex_preproc.h"
+#include "common.h"
 
 
 typedef enum {
@@ -38,6 +39,8 @@ struct OrdinaryIdentifier {
 	SymbolKind kind;
 	OrdinaryIdentifier *shadowed;
 	u32 scope_depth;
+	const Token *decl_location;
+	const Token *def_location;
 
 	Type typedef_type;
 
@@ -53,6 +56,8 @@ typedef struct NameTaggedType NameTaggedType;
 struct NameTaggedType {
 	String name;
 	NameTaggedType *shadowed;
+	const Token *def_location;
+
 	u32 scope_depth;
 
 	Type type;
@@ -67,7 +72,7 @@ typedef struct Symbol {
 
 	struct {
 		Block *block;
-		const Token *first_appearance;
+		const Token *def_location;
 	} label;
 } Symbol;
 
@@ -91,7 +96,6 @@ typedef struct {
 		Def_Defined,
 	} def_state;
 	const Token *decl_location;
-	const Token *def_location;
 	// External linkage.
 	bool is_public;
 	// Whether the value is referred to by any expression other than
@@ -111,16 +115,10 @@ typedef struct {
 
 typedef LIST(StaticValue) Module;
 
-typedef struct {
-	Target target;
-	bool crash_on_error;
-	bool gen_debug;
-} ParseOptions;
 
-
-static inline bool isByref(Value val) { return val.category || val.typ.kind == Kind_Struct || val.typ.kind == Kind_Union; }
+static inline bool isByref(Value val) { return val.category; }
 static inline bool isLvalue(Value val) { return val.category != Ref_RValue; }
 
-void parse(Arena *arena, Tokenization tokens, ParseOptions opt, Module *module);
+void parse(Arena *arena, Tokenization tokens, Options opt, Module *module);
 
 

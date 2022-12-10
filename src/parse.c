@@ -12,6 +12,18 @@
 #include "dbgutils.h"
 
 
+/*
+
+Parses and typechecks tokens into IR in a single pass.
+
+*/
+
+
+
+static Type chartype = {Kind_Basic, .basic = Int_char};
+static Type const_chartype = {Kind_Basic, .qualifiers = Qualifier_Const, .basic = Int_char};
+
+
 bool crash_on_error = false;
 // TODO Move this into Parse
 StringMap symbols = {0};
@@ -98,14 +110,16 @@ _Noreturn void parseerror (const Parse *p, const Token *main, const char *msg, .
     exit(1);
 }
 
-
 void parsemsg (Log level, const Parse *p, const Token *main, const char *msg, ...) {
     va_list args;
     va_start(args, msg);
     vcomperror(level, &p->tokens, main ? main : p->pos, p->pos, msg, args);
     va_end(args);
 }
-
+void redefinition (const Parse *p, const Token *main, const Token *previous, String name) {
+    parsemsg(Log_Err, p, main, "redefinition of %.*s", name);
+    parsemsg(Log_Info | Log_Fatal, p, previous, "previous definition was here");
+}
 
 _Noreturn void unexpectedToken (const Parse *p, TokenKind expected) {
 	parseerror(p, p->pos, "expected %s before the %s token", tokenName(expected), tokenName(p->pos->kind));
@@ -139,12 +153,13 @@ static Declaration parseDeclarator(Parse *, Type base_type, Namedness);
 static nodiscard bool allowedNoDeclarator(Parse *, Type base_type);
 // static Declaration parseDeclarator (Parse* parse, const Token **tok, Type base_type);
 static void parseInitializer(Parse *, InitializationDest);
+static Type arithmeticConversions (Parse *parse, Value *lhs, Value *rhs);
 static Type parseValueType (Parse *, Value (*operator)(Parse *));
 static Type parseTypeBase(Parse *, u8 *storage);
 static Type parseTypeName(Parse *, u8 *storage);
 static nodiscard bool tryParseTypeBase(Parse *, Type *dest, u8 *storage);
 static nodiscard bool tryParseTypeName(Parse *, Type *dest, u8 *storage);
-static void parseFunction(Parse *);
+static void parseFunction(Parse *, String func_name);
 static Value rvalue(Value v, Parse *);
 static Value dereference (Parse *, Value v);
 static IrRef coerce(Value v, Type t, Parse *);
@@ -155,7 +170,7 @@ static void popScope(Parse *, Scope);
 static nodiscard Scope pushScope(Parse *);
 
 // Parses all top level declarations into a Module.
-void parse (Arena *code_arena, Tokenization tokens, ParseOptions opt, Module *module) {
+void parse (Arena *code_arena, Tokenization tokens, Options opt, Module *module) {
 	// Used only as a scratch buffer for constructing constants at the
 	// top level. Kind of inefficient, but very straightforward.
 	IrBuild global_ir = {0};
@@ -225,6 +240,7 @@ void parse (Arena *code_arena, Tokenization tokens, ParseOptions opt, Module *mo
 				sym->ordinary = ALLOC(&parse.arena, OrdinaryIdentifier);
 				*sym->ordinary = (OrdinaryIdentifier) {
 					.kind = Sym_Value_Static,
+					.decl_location = primary,
 					.static_id = module->len-1,
 				};
 			}
@@ -236,16 +252,14 @@ void parse (Arena *code_arena, Tokenization tokens, ParseOptions opt, Module *mo
 				(parse.pos->kind == Tok_OpenBrace || tryParseTypeBase(&parse, &argument_type, NULL)))
 			{
 				// TODO Disallow old-style definitions in C23
-				if (val->def_state == Def_Defined) {
-					parsemsg(Log_Err, &parse, NULL, "redefinition of identifier ‘%.*s’", STRING_PRINTAGE(val->name));
-					parsemsg(Log_Info | Log_Fatal, &parse, val->def_location, "previously defined here");
-				}
+				if (val->def_state == Def_Defined)
+					redefinition(&parse, NULL, sym->ordinary->def_location, val->name);
 
 				val->def_state = Def_Defined;
-				val->def_location = primary;
+				sym->ordinary->def_location = primary;
 
 				parse.current_func_type = decl.type.function;
-				parseFunction(&parse);
+				parseFunction(&parse, decl.name);
 				parse.scope_depth = 0;
 
 				val = &module->ptr[sym->ordinary->static_id];
@@ -271,14 +285,11 @@ void parse (Arena *code_arena, Tokenization tokens, ParseOptions opt, Module *mo
 				}
 
 				if (tryEat(&parse, Tok_Equals)) {
-					// STYLE Copypasta
-					if (val->def_state == Def_Defined) {
-						parsemsg(Log_Err, &parse, NULL, "redefinition of identifier ‘%.*s’", STRING_PRINTAGE(val->name));
-						parsemsg(Log_Info | Log_Fatal, &parse, val->def_location, "previously defined here");
-					}
+					if (val->def_state == Def_Defined)
+						redefinition(&parse, NULL, sym->ordinary->def_location, val->name);
 
 					val->def_state = Def_Defined;
-					val->def_location = primary;
+					sym->ordinary->def_location = primary;
 
 					RefsList refs = {0};
 					InitializationDest init = {
@@ -339,7 +350,10 @@ OrdinaryIdentifier *genOrdSymbol (Parse *parse, String name, bool *new) {
 	bool is_new = !sym->ordinary || sym->ordinary->scope_depth < parse->scope_depth;
 	if (is_new) {
 		OrdinaryIdentifier *created = ALLOC(&parse->arena, OrdinaryIdentifier);
-		*created = (OrdinaryIdentifier) { .shadowed = sym->ordinary, .scope_depth = parse->scope_depth };
+		*created = (OrdinaryIdentifier) {
+			.shadowed = sym->ordinary,
+			.scope_depth = parse->scope_depth
+		};
 		sym->ordinary = created;
 		PUSH(parse->current_scope, sym);
 	}
@@ -352,6 +366,7 @@ OrdinaryIdentifier *genOrdSymbol (Parse *parse, String name, bool *new) {
 Scope pushScope (Parse *parse) {
 	Scope prev = parse->current_scope;
 	parse->current_scope = (Scope) {0};
+	parse->scope_depth++;
 	return prev;
 }
 
@@ -372,9 +387,13 @@ static void parseCompound(Parse *);
 static void parseStatement(Parse *, bool *had_non_declaration);
 static Value parseExpression(Parse *);
 static Value parseExprAssignment(Parse *);
+static Value parseExprElvis(Parse *);
+static Value parseExprOr(Parse *);
+static Value parseExprAnd(Parse *);
 static Value parseExprBitOr(Parse *);
 static Value parseExprBitXor(Parse *);
 static Value parseExprBitAnd(Parse *);
+static Value parseExprEquals (Parse *);
 static Value parseExprGreaterLess(Parse *);
 static Value parseExprAddition(Parse *);
 static Value parseExprMultiplication(Parse *);
@@ -385,15 +404,34 @@ static void parseStructInitializer(Parse *, InitializationDest);
 static void requiresVersion(Parse *, const char *desc, Version);
 static void requiresVersionJust(Parse *, const char *desc, Version);
 
-void parseFunction (Parse *parse) {
+void parseFunction (Parse *parse, String func_name) {
 	IrBuild *build = &parse->build;
 	*build = (IrBuild) {0};
 
 	build->entry = startNewBlock(build, parse->code_arena, zString("__entry"));
 
 	assert(parse->scope_depth == 0);
-	parse->scope_depth = 1;
 	Scope enclosing = pushScope(parse);
+
+	char *terminated = aalloc(parse->code_arena, func_name.len + 1);
+	memcpy(terminated, func_name.ptr, func_name.len);
+	terminated[func_name.len] = 0;
+	PUSH(*parse->module, ((StaticValue) {
+		.type = {
+			.kind = Kind_Array,
+			.array = { .inner = &const_chartype, .count = func_name.len + 1 },
+		},
+		.decl_location = parse->pos,
+		.def_kind = Static_Variable,
+		.value_data = {func_name.len+1, terminated},
+	}));
+	bool is_new;
+	OrdinaryIdentifier *func_name_sym = genOrdSymbol(parse, zString("__func__"), &is_new);
+	assert(is_new);
+	func_name_sym->kind = Sym_Value_Static;
+	func_name_sym->decl_location = func_name_sym->def_location = parse->pos;
+	func_name_sym->static_id = parse->module->len-1;
+
 
 	u32 param_count = parse->current_func_type.parameters.len;
 	for (u32 i = 0; i < param_count; i++) {
@@ -403,8 +441,11 @@ void parseFunction (Parse *parse) {
 		IrRef paramval = genParameter(&parse->build, typeSize(param.type, &parse->target));
 		genStore(&parse->build, slot, paramval);
 
-		OrdinaryIdentifier *sym = genOrdSymbol(parse, param.name, NULL);
+		bool is_new;
+		OrdinaryIdentifier *sym = genOrdSymbol(parse, param.name, &is_new);
+		assert(is_new);
 		sym->kind = Sym_Value_Auto;
+		sym->decl_location = sym->def_location = parse->pos;
 		sym->value = (Value) {param.type, slot, Ref_LValue};
 	}
 
@@ -419,7 +460,7 @@ void parseFunction (Parse *parse) {
 		Symbol *sym = parse->func_goto_labels.ptr[i];
 		Block *b = sym->label.block;
 		if (b && b->exit.kind == Exit_None)
-			parseerror(parse, sym->label.first_appearance, "a `goto` references label `%.*s`, which is not declared in this function", STRING_PRINTAGE(b->label));
+			parseerror(parse, sym->label.def_location, "a `goto` references label `%.*s`, which is not declared in this function", STRING_PRINTAGE(b->label));
 	}
 }
 
@@ -435,7 +476,7 @@ static void parseCompound (Parse *parse) {
 		Token t = *parse->pos;
 		if (t.kind == Tok_CloseBrace) {
 			parse->pos++;
-			return;
+			break;
 		} else if (t.kind == Tok_EOF) {
 			parseerror(parse, block_begin, "unclosed %s", tokenName(Tok_OpenBrace));
 		} else {
@@ -470,9 +511,9 @@ static void parseStatement (Parse *parse, bool *had_non_declaration) {
 
 		if (sym->label.block) {
 			if (sym->label.block->exit.kind != Exit_None)
-				parseerror(parse, parse->pos, "redefinition of label `%.*s`", STRING_PRINTAGE(t.val.identifier));
+				redefinition(parse, parse->pos, sym->label.def_location, t.val.identifier);
 		} else {
-			sym->label.first_appearance = parse->pos;
+			sym->label.def_location = parse->pos;
 			sym->label.block = newBlock(parse->code_arena, t.val.identifier);
 		}
 
@@ -594,8 +635,10 @@ static void parseStatement (Parse *parse, bool *had_non_declaration) {
 				parseerror(parse, decl_token, "variables can not have $svoid$s type", BOLD, RESET);
 			} else {
 				if (!is_new)
-					parseerror(parse, decl_token, "redefinition of variable (TODO Actually possibly just declaration)");
+					redefinition(parse, decl_token, sym->def_location, decl.name);
+
 				sym->kind = Sym_Value_Auto;
+				sym->decl_location = sym->def_location = decl_token;
 				sym->value = (Value) {decl.type,
 					genStackAllocFixed(build, typeSize(decl.type, &parse->target)),
 					storage == Storage_Register ? Ref_LValue_Register : Ref_LValue,
@@ -629,7 +672,7 @@ static Value parseExpression (Parse *parse) {
 }
 
 static Value parseExprAssignment (Parse *parse) {
-	Value v = parseExprBitOr(parse);
+	Value v = parseExprElvis(parse);
 	const Token *primary = parse->pos;
 	switch (primary->kind) {
 	case Tok_Equals:
@@ -649,6 +692,102 @@ static Value parseExprAssignment (Parse *parse) {
 	default:
 		return v;
 	}
+}
+
+static Value parseExprElvis (Parse *parse) {
+	Value cond = parseExprOr(parse);
+
+	const Token *primary = parse->pos;
+	if (tryEat(parse, Tok_Question)) {
+		if (cond.typ.kind != Kind_Basic)
+			parseerror(parse, primary, "condition value of %s %s must be scalar types, a value of type %s is not allowed",
+					tokenName(Tok_Question), tokenName(Tok_Colon), printTypeHighlighted(&parse->arena, cond.typ));
+		IrBuild *build = &parse->build;
+		Block *head = build->insertion_block;
+
+
+		genBranch(build, rvalue(cond, parse).inst);
+		head->exit.branch.on_true = startNewBlock(build, parse->code_arena, STRING_EMPTY);
+		Value lhs = rvalue(parseExprAssignment(parse), parse);
+		expect(parse, Tok_Colon);
+		head->exit.branch.on_false = startNewBlock(build, parse->code_arena, STRING_EMPTY);
+		Value rhs = rvalue(parseExprOr(parse), parse);
+		genJump(build, NULL);
+		if (!typeCompatible(lhs.typ, rhs.typ))
+			parseerror(parse, primary, "(TODO phrasing) (TODO join arithmetic types) Types are not compatible");
+		Block *join = newBlock(parse->code_arena, STRING_EMPTY);
+		genJump(build, join);
+		head->exit.branch.on_true->exit.unconditional = join;
+
+		IrRef phi_targets[] = {lhs.inst, rhs.inst, IR_REF_NONE};
+		cond = (Value) {BASIC_INT, genPhi(build, parse->code_arena, phi_targets, typeSize(lhs.typ, &parse->target))};
+	}
+	return cond;
+}
+
+static Value parseExprOr (Parse *parse) {
+	Value lhs = parseExprAnd(parse);
+	const Token *primary = parse->pos;
+	if (tryEat(parse, Tok_DoublePipe)) {
+		if (lhs.typ.kind != Kind_Basic)
+			parseerror(parse, primary, "operators to %s must be scalar types, a left-hand-side value of type %s is not allowed",
+					tokenName(Tok_DoublePipe), printTypeHighlighted(&parse->arena, lhs.typ));
+		const u16 int_size = typeSize(BASIC_INT, &parse->target);
+		IrBuild *build = &parse->build;
+		Block *head = build->insertion_block;
+
+		IrRef constant = genImmediateInt(build, 1, int_size);
+		genBranch(build, rvalue(lhs, parse).inst);
+		head->exit.branch.on_false = startNewBlock(build, parse->code_arena, STRING_EMPTY);
+
+		Value rhs = parseExprOr(parse);
+		if (rhs.typ.kind != Kind_Basic)
+			parseerror(parse, primary, "operators to %s must be scalar types, a right-hand-side value of type %s is not allowed",
+					tokenName(Tok_DoublePipe), printTypeHighlighted(&parse->arena, rhs.typ));
+		u32 rhs_size = typeSize(rhs.typ, &parse->target);
+		IrRef zero = genImmediateInt(build, 0, rhs_size);
+		IrRef cmp = genNot(build, genEquals(build, rvalue(rhs, parse).inst, zero, rhs_size));
+		Block *join = newBlock(parse->code_arena, STRING_EMPTY);
+		genJump(build, join);
+		head->exit.branch.on_true = join;
+
+		IrRef phi_targets[] = {constant, cmp, IR_REF_NONE};
+		lhs = (Value) {BASIC_INT, genPhi(build, parse->code_arena, phi_targets, int_size)};
+	}
+	return lhs;
+}
+
+// STYLE Copypasta, should probably be merged with parseExprOr.
+static Value parseExprAnd (Parse *parse) {
+	Value lhs = parseExprBitOr(parse);
+	const Token *primary = parse->pos;
+	if (tryEat(parse, Tok_DoublePipe)) {
+		if (lhs.typ.kind != Kind_Basic)
+			parseerror(parse, primary, "operators to %s must be scalar types, a left-hand-side value of type %s is not allowed",
+					tokenName(Tok_DoubleAmpersand), printTypeHighlighted(&parse->arena, lhs.typ));
+		const u16 int_size = typeSize(BASIC_INT, &parse->target);
+		IrBuild *build = &parse->build;
+		Block *head = build->insertion_block;
+
+		IrRef constant = genImmediateInt(build, 0, int_size);
+		genBranch(build, rvalue(lhs, parse).inst);
+		head->exit.branch.on_true = startNewBlock(build, parse->code_arena, STRING_EMPTY);
+
+		Value rhs = parseExprAnd(parse);
+		if (rhs.typ.kind != Kind_Basic)
+			parseerror(parse, primary, "operators to %s must be scalar types, a right-hand-side value of type %s is not allowed",
+					tokenName(Tok_DoubleAmpersand), printTypeHighlighted(&parse->arena, rhs.typ));
+		u32 rhs_size = typeSize(rhs.typ, &parse->target);
+		IrRef zero = genImmediateInt(build, 0, rhs_size);
+		IrRef cmp = genNot(build, genEquals(build, rvalue(rhs, parse).inst, zero, rhs_size));
+		Block *join = newBlock(parse->code_arena, STRING_EMPTY);
+		genJump(build, join);
+		head->exit.branch.on_false = join;
+
+		IrRef phi_targets[] = {constant, cmp, IR_REF_NONE};
+		lhs = (Value) {BASIC_INT, genPhi(build, parse->code_arena, phi_targets, int_size)};
+	}
+	return lhs;
 }
 
 
@@ -675,13 +814,38 @@ static Value parseExprBitXor (Parse *parse) {
 }
 
 static Value parseExprBitAnd (Parse *parse) {
-	Value lhs = parseExprGreaterLess(parse);
+	Value lhs = parseExprEquals(parse);
 	if (tryEat(parse, Tok_Ampersand)) {
 		IrRef a = coerce(rvalue(lhs, parse), BASIC_INT, parse);
 		IrRef b = coerce(rvalue(parseExprBitAnd(parse), parse), BASIC_INT, parse);
 		return (Value) {BASIC_INT, genAnd(&parse->build, a, b)};
 	}
 	return lhs;
+}
+
+
+static Value parseExprEquals (Parse *parse) {
+	IrBuild *build = &parse->build;
+	Value lhs = parseExprGreaterLess(parse);
+
+	switch (parse->pos->kind) {
+	case Tok_DoubleEquals: {
+		parse->pos++;
+		lhs = rvalue(lhs, parse);
+		Value rhs = rvalue(parseExprGreaterLess(parse), parse);
+		Type common = arithmeticConversions(parse, &lhs, &rhs);
+		return (Value) { common, genEquals(build, lhs.inst, rhs.inst, typeSize(common, &parse->target)) };
+	}
+	case Tok_BangEquals: {
+		parse->pos++;
+		lhs = rvalue(lhs, parse);
+		Value rhs = rvalue(parseExprGreaterLess(parse), parse);
+		Type common = arithmeticConversions(parse, &lhs, &rhs);
+		return (Value) { common, genNot(build, genEquals(build, lhs.inst, rhs.inst, typeSize(common, &parse->target))) };
+	}
+	default:
+		return lhs;
+	}
 }
 
 static Value parseExprGreaterLess (Parse *parse) {
@@ -693,33 +857,29 @@ static Value parseExprGreaterLess (Parse *parse) {
 		parse->pos++;
 		lhs = rvalue(lhs, parse);
 		Value rhs = rvalue(parseExprAddition(parse), parse);
-		return (Value) {BASIC_INT, genLessThan(build,
-				coerce(lhs, BASIC_INT, parse), coerce(rhs, BASIC_INT, parse),
-			typeSize(BASIC_INT, &parse->target))};
+		arithmeticConversions(parse, &lhs, &rhs);
+		return (Value) { BASIC_INT, genLessThan(build, lhs.inst, rhs.inst, typeSize(BASIC_INT, &parse->target)) };
 	}
 	case Tok_LessEquals: {
 		parse->pos++;
 		lhs = rvalue(lhs, parse);
 		Value rhs = rvalue(parseExprAddition(parse), parse);
-		return (Value) {BASIC_INT, genLessThanOrEquals(build,
-				coerce(lhs, BASIC_INT, parse), coerce(rhs, BASIC_INT, parse),
-			typeSize(BASIC_INT, &parse->target))};
+		arithmeticConversions(parse, &lhs, &rhs);
+		return (Value) { BASIC_INT, genLessThanOrEquals(build, lhs.inst, rhs.inst, typeSize(BASIC_INT, &parse->target)) };
 	}
 	case Tok_Greater: {
 		parse->pos++;
 		lhs = rvalue(lhs, parse);
 		Value rhs = rvalue(parseExprAddition(parse), parse);
-		return (Value) {BASIC_INT, genLessThan(build,
-				coerce(rhs, BASIC_INT, parse), coerce(lhs, BASIC_INT, parse),
-			typeSize(BASIC_INT, &parse->target))};
+		arithmeticConversions(parse, &lhs, &rhs);
+		return (Value) { BASIC_INT, genLessThan(build, rhs.inst, lhs.inst, typeSize(BASIC_INT, &parse->target)) };
 	}
 	case Tok_GreaterEquals: {
 		parse->pos++;
 		lhs = rvalue(lhs, parse);
 		Value rhs = rvalue(parseExprAddition(parse), parse);
-		return (Value) {BASIC_INT, genLessThanOrEquals(build,
-				coerce(rhs, BASIC_INT, parse), coerce(lhs, BASIC_INT, parse),
-			typeSize(BASIC_INT, &parse->target))};
+		arithmeticConversions(parse, &lhs, &rhs);
+		return (Value) { BASIC_INT, genLessThan(build, rhs.inst, lhs.inst, typeSize(BASIC_INT, &parse->target)) };
 	}
 	default:
 		return lhs;
@@ -826,7 +986,7 @@ static Value parseExprLeftUnary (Parse *parse) {
 		if (v.typ.kind == Kind_Function) {
 			v.typ.kind = Kind_FunctionPtr;
 		} else {
-			Type *pointee = ALLOC(&parse->arena, Type);
+			Type *pointee = ALLOC(parse->code_arena, Type);
 			*pointee = v.typ;
 			if (v.category == Ref_LValue_Register)
 				parseerror(parse, primary, "cannot take the address of a value declared %sregister%s", BOLD, RESET);
@@ -856,21 +1016,26 @@ static Value parseExprLeftUnary (Parse *parse) {
 	case Tok_Minus:
 		parseerror(parse, primary, "TODO unary +-");
 		break;
-	case Tok_Key_Alignof: {
-		parseerror(parse, primary, "TODO _Alignof");
-	} break;
 	case Tok_OpenParen: {
 		Type cast_target;
 		if (tryParseTypeName(parse, &cast_target, NULL)) {
 			expect(parse, Tok_CloseParen);
-			if (tryEat(parse, Tok_OpenBrace)) {
-				parseerror(parse, primary, "TODO Implement compound literals");
+			if (parse->pos->kind == Tok_OpenBrace) {
+				IrRef stack = genStackAllocFixed(build, typeSize(cast_target, &parse->target));
+				// TODO Generate Ir_StackDealloc at end of block!
+				InitializationDest dest = {
+					.type = cast_target,
+					.address = stack,
+				};
+				parseInitializer(parse, dest);
+				return (Value) {cast_target, stack, Ref_LValue};
+			} else {
+				Value v = rvalue(parseExprLeftUnary(parse), parse);
+				// TODO Actually cast
+				// TODO In MSVC, a cast can produce an lvalue. I assume a
+				// store to that will reverse-cast ...?
+				return (Value) {cast_target, coerce(v, cast_target, parse)};
 			}
-			Value v = rvalue(parseExprLeftUnary(parse), parse);
-			// TODO Actually cast
-			// TODO In MSVC, a cast can produce an lvalue. I assume a
-			// store to that will reverse-cast ...?
-			return (Value) {cast_target, coerce(v, cast_target, parse)};
 		} else {
 			parse->pos--;
 			return parseExprRightUnary(parse);
@@ -952,27 +1117,35 @@ static Value parseExprRightUnary (Parse *parse) {
 					parseerror(parse, NULL, "the arrow %s->%s operator expects a pointer value. You may want to use a regular dot", BOLD, RESET);
 				v = dereference(parse, v);
 			}
-			Token member = expect(parse, Tok_Identifier);
-			String member_name = member.val.identifier;
 
-			if (v.typ.kind == Kind_Struct || v.typ.kind == Kind_Union) {
-				bool found = false;
-				for (u32 i = 0; i < v.typ.members.len; i++) {
-					CompoundMember member = v.typ.members.ptr[i];
-					if (SPAN_EQL(member.name, member_name)) {
-						IrRef offset = genImmediateInt(build, member.offset, typeSize(parse->target.intptr, &parse->target));
-						v.typ = member.type;
-						v.inst = genAdd(build, v.inst, offset);
-						found = true;
+			String member_name = expect(parse, Tok_Identifier).val.identifier;
+			Type resolved = resolveType(v.typ);
+
+			if (resolved.kind == Kind_Struct || resolved.kind == Kind_Union) {
+				u32 i = 0;
+				for (; i < resolved.members.len; i++) {
+					if (SPAN_EQL(resolved.members.ptr[i].name, member_name))
 						break;
-					}
 				}
-				if (!found)
+				if (i == resolved.members.len)
 					parseerror(parse, NULL, "type %s does not have a member named %.*s", printTypeHighlighted(&parse->arena, v.typ), member_name.len, member_name.ptr);
-			} else if (v.typ.kind == Kind_Union) {
-				parseerror(parse, parse->pos-2, "TODO Implement unions", printTypeHighlighted(&parse->arena, v.typ), member_name.len, member_name.ptr);
+				CompoundMember member = resolved.members.ptr[i];
+				bool is_fam = isFlexibleArrayMember(resolved.members, i);
+
+				if (isLvalue(v)) {
+					IrRef offset = genImmediateInt(build, member.offset, typeSize(parse->target.intptr, &parse->target));
+					v.typ = member.type;
+					v.inst = genAdd(build, v.inst, offset);
+
+					if (is_fam)
+						parseerror(parse, parse->pos, "TODO Flexible array members");
+				} else {
+					parseerror(parse, parse->pos, "TODO rvalue member access");
+				}
+				break;
 			} else {
-				parseerror(parse, NULL, "member access only works on %sstruct%ss and %sunion%s [unions not yet implemented]", BOLD, RESET, BOLD, RESET);
+				parseerror(parse, NULL, "member access only works on %sstruct%ss and %sunion%ss, not on %s",
+						BOLD, RESET, BOLD, RESET, printTypeHighlighted(&parse->arena, resolved));
 			}
 		} else {
 			break;
@@ -1022,17 +1195,11 @@ static Value parseExprBase (Parse *parse) {
 		return v;
 	}
 	case Tok_Integer:
-		return (Value) {BASIC_INT, genImmediateInt(build, t.val.integer, typeSize(BASIC_INT, &parse->target))};
+		return (Value) {BASIC_INT, genImmediateInt(build, t.val.literal.integer, typeSize(BASIC_INT, &parse->target))};
 // 	case Tok_Real:
 // 		return (Value) {{Kind_Basic, {Basic_double}}, genImmediateReal(t.val.real)};
 	case Tok_String: {
 		const Token *scan = parse->pos - 1;
-		Type strtype = {
-			.kind = Kind_Pointer,
-			.qualifiers = Qualifier_Const,
-			.pointer = ALLOC(&parse->arena, Type),
-		};
-		*strtype.pointer = BASIC_CHAR;
 
 		u32 len = t.val.string.len;
 		while (parse->pos->kind == Tok_String) {
@@ -1048,18 +1215,31 @@ static Value parseExprBase (Parse *parse) {
 			scan++;
 		}
 		insert[0] = 0;
-
+		Type strtype = {
+			.kind = Kind_Array,
+			.array = {.inner = &chartype, .count = len + 1},
+		};
 		PUSH(*parse->module, ((StaticValue) {
 			.type = strtype,
 			.decl_location = parse->pos-1,
-			.def_location = parse->pos-1,
 			.def_kind = Static_Variable,
 			.def_state = Def_Defined,
 			.value_data = {len + 1, data},
 		}));
 		u32 id = parse->module->len - 1;
 
-		return (Value) { strtype, genGlobal(build, id) };
+		return (Value) { strtype, genGlobal(build, id), Ref_LValue };
+	}
+	case Tok_Key_Alignof: {
+		expect(parse, Tok_OpenParen);
+		Type t = parseTypeName(parse, NULL);
+		expect(parse, Tok_CloseParen);
+		return (Value) {
+			BASIC_INT,
+			genImmediateInt(build,
+					typeAlignment(t, &parse->target),
+					typeSize(t, &parse->target))
+		};
 	}
 	case Tok_Identifier: {
 		Symbol *sym = mapGet(&symbols, t.val.string);
@@ -1156,11 +1336,13 @@ static void parseInitializer (Parse *parse, InitializationDest dest) {
 	if (tryEat(parse, Tok_OpenBrace)) {
 		switch (dest.type.kind) {
 		case Kind_Struct:
+		case Kind_Struct_Named:
 			parseStructInitializer(parse, dest);
 			return;
-		case Kind_Union: {
+		case Kind_Union:
+		case Kind_Union_Named: {
 			u32 member_idx = 0;
-			Members members = dest.type.members;
+			Members members = resolveType(dest.type).members;
 			if (tryEat(parse, Tok_Dot)) {
 				requiresVersion(parse, "dot-designated initializers", Version_C99);
 				const Token *name = parse->pos;
@@ -1231,10 +1413,9 @@ static void parseInitializer (Parse *parse, InitializationDest dest) {
 }
 
 static void parseStructInitializer (Parse *parse, InitializationDest dest) {
-	assert(dest.type.kind == Kind_Struct);
-
-	u32 len = dest.type.members.len;
-	CompoundMember *members = dest.type.members.ptr;
+	Type resolved = resolveType(dest.type);
+	u32 len = resolved.members.len;
+	CompoundMember *members = resolved.members.ptr;
 
 	if (tryEat(parse, Tok_CloseBrace)) {
 		requiresVersionJust(parse, "empty initializers", Version_C23);
@@ -1280,6 +1461,14 @@ static void parseStructInitializer (Parse *parse, InitializationDest dest) {
 	}
 }
 
+static Type arithmeticConversions (Parse *parse, Value *lhs, Value *rhs) {
+	// TODO
+	Type common = BASIC_INT;
+	*lhs = (Value) {common, coerce(*lhs, common, parse)};
+	*rhs = (Value) {common, coerce(*rhs, common, parse)};
+	return common;
+}
+
 static Type parseValueType (Parse *parse, Value (*operator)(Parse *parse)) {
 	Block *current = parse->build.insertion_block;
 	// Emit the expression into a block which is then discarded. Pretty hacky.
@@ -1293,7 +1482,7 @@ static Type parseValueType (Parse *parse, Value (*operator)(Parse *parse)) {
 static Type parseTypeName (Parse *parse, u8 *storage) {
 	Type type;
 	if (!tryParseTypeName(parse, &type, storage))
-		parseerror(parse, parse->pos, "invalid type");
+		parseerror(parse, parse->pos, "expected a type name");
 	return type;
 }
 
@@ -1404,7 +1593,7 @@ static bool tryParseTypeBase (Parse *parse, Type *type, u8 *storage_dest) {
 				if (!existing ||
 					(can_declare && existing->scope_depth < parse->scope_depth))
 				{
-					NameTaggedType *new = ALLOC(&parse->arena, NameTaggedType);
+					NameTaggedType *new = ALLOC(parse->code_arena, NameTaggedType);
 					*new = (NameTaggedType) {
 						.name = named->name,
 						.shadowed = named->nametagged,
@@ -1434,8 +1623,7 @@ static bool tryParseTypeBase (Parse *parse, Type *type, u8 *storage_dest) {
 							}
 						}
 						if (!equal)
-							parseerror(parse, primary, "(TODO Note the previous definition location) redefinition of struct with different body");
-// 						free(body_type.members.ptr);
+							redefinition(parse, primary, existing->def_location, named->name);
 					}
 				}
 				base.kind = Kind_Struct_Named;
@@ -1457,6 +1645,7 @@ static bool tryParseTypeBase (Parse *parse, Type *type, u8 *storage_dest) {
 			expect(parse, Tok_OpenBrace);
 
 			for (i32 value = 0;; value++) {
+				const Token *primary = parse->pos;
 				String name = expect(parse, Tok_Identifier).val.identifier;
 
 				if (tryEat(parse, Tok_Equals)) {
@@ -1471,9 +1660,10 @@ static bool tryParseTypeBase (Parse *parse, Type *type, u8 *storage_dest) {
 				bool new;
 				OrdinaryIdentifier *ident = genOrdSymbol(parse, name, &new);
 				if (!new)
-					parseerror(parse, NULL, "redefinition of enumerator %.*s", STRING_PRINTAGE(name));
+					redefinition(parse, NULL, ident->def_location, name);
 
 				ident->kind = Sym_EnumConstant;
+				ident->decl_location = ident->def_location = primary;
 				ident->enum_constant = value;
 
 				if (tryEat(parse, Tok_Comma)) {
@@ -1683,7 +1873,7 @@ static Type parseStructUnionBody(Parse *parse, bool is_struct) {
 			if (is_struct)
 				member_offset = addMemberOffset(&current_offset, decl.type, &parse->target);
 
-			PUSH_A(&parse->arena, members, ((CompoundMember) {decl.type, decl.name, member_offset}));
+			PUSH_A(parse->code_arena, members, ((CompoundMember) {decl.type, decl.name, member_offset}));
 		} while (tryEat(parse, Tok_Comma));
 		expect(parse, Tok_Semicolon);
 	}
@@ -1743,7 +1933,7 @@ static Declaration parseDeclarator (Parse *parse, Type base_type, Namedness name
 		Attributes attr = parseAttributes(parse);
 		(void) attr;
 
-		Type *ptr = ALLOC(&parse->arena, Type);
+		Type *ptr = ALLOC(parse->code_arena, Type);
 		*ptr = base;
 
 		base = (Type) {Kind_Pointer,
@@ -1802,7 +1992,7 @@ static Declaration parseDeclarator (Parse *parse, Type base_type, Namedness name
 					parseerror(parse, NULL, "an array cannot contain a function. You may want to store function pointers instead");
 			}
 
-			Type *rettype = ALLOC(&parse->arena, Type);
+			Type *rettype = ALLOC(parse->code_arena, Type);
 			*rettype = *inner;
 
 			inner->kind = Kind_Function;
@@ -1821,7 +2011,7 @@ static Declaration parseDeclarator (Parse *parse, Type base_type, Namedness name
 						param_decl.type.kind = Kind_Pointer;
 						param_decl.type.pointer = param_decl.type.array.inner;
 					}
-					PUSH_A(&parse->arena, inner->function.parameters, param_decl);
+					PUSH_A(parse->code_arena, inner->function.parameters, param_decl);
 				} while (tryEat(parse, Tok_Comma));
 			}
 
@@ -1833,7 +2023,7 @@ static Declaration parseDeclarator (Parse *parse, Type base_type, Namedness name
 			if (enclosing && enclosing->kind == Kind_Function)
 				parseerror(parse, NULL, "a function cannot return an array. You may want to return a pointer to an array instead");
 
-			Type *content = ALLOC(&parse->arena, Type);
+			Type *content = ALLOC(parse->code_arena, Type);
 			*content = *inner;
 			bool is_static = tryEat(parse, Tok_Key_Static);
 
@@ -1853,6 +2043,8 @@ static Declaration parseDeclarator (Parse *parse, Type base_type, Namedness name
 			if (tryEat(parse, Tok_Asterisk)) {
 				parseerror(parse, NULL, "TODO Support ‘variable length array of unspecified size’, whatever that may be");
 				inner->array.count = 0;
+			} else if (parse->pos->kind == Tok_CloseBracket) {
+				inner->array.count = IR_REF_NONE;
 			} else {
 				inner->array.count = coerce(rvalue(parseExprAssignment(parse), parse), parse->target.ptrdiff, parse);
 				if (parse->build.ir.ptr[inner->array.count].kind != Ir_Constant) {
@@ -1880,13 +2072,11 @@ static void parseTypedefDecls(Parse *parse, Type base_type) {
 		bool new;
 		OrdinaryIdentifier *ident = genOrdSymbol(parse, decl.name, &new);
 		if (!new) {
-			if (ident->kind != Sym_Typedef)
-				parseerror(parse, begin, "TODO(phrasing) cannot typedef a value to a type");
-			if (!typeCompatible(ident->typedef_type, decl.type))
-				parseerror(parse, begin, "TODO(phrasing) identifier was already typedef'd to incompatible type %s",
-						printTypeHighlighted(&parse->arena, ident->typedef_type));
+			if (ident->kind != Sym_Typedef || !typeCompatible(ident->typedef_type, decl.type))
+				redefinition(parse, begin, ident->def_location, decl.name);
 		} else {
 			ident->kind = Sym_Typedef;
+			ident->decl_location = ident->def_location = begin;
 			ident->typedef_type = decl.type;
 		}
 	} while (tryEat(parse, Tok_Comma));
@@ -1927,25 +2117,26 @@ static Value dereference (Parse *parse, Value v) {
 // Performs lvalue conversion, array to pointer conversion and function
 // to pointer conversion as necessary.
 Value rvalue (Value v, Parse *parse) {
-	// TODO Handle arrays, adapt to new byref categories
 	if (v.typ.kind == Kind_Function) {
 		v.typ.kind = Kind_FunctionPtr;
+	} else if (v.typ.kind == Kind_Array) {
+		assert(isLvalue(v));
+		v.typ.kind = Kind_Pointer;
+		v.typ.pointer = v.typ.array.inner;
 	} else if (isLvalue(v)) {
-// 		assert(v.typ.kind == Kind_Pointer || v.typ.kind == Kind_Basic);
-
 		v.inst = genLoad(&parse->build, v.inst, typeSize(v.typ, &parse->target));
 		v.typ.qualifiers = 0;
-		v.category = Ref_RValue;
 	}
+	v.category = Ref_RValue;
 	return v;
 }
 
 
 IrRef coerce (Value v, Type t, Parse *p) {
-	assert(!isByref(v)); // FIXME Why???
+// 	assert(isLvalue(v));
 
 	if (t.kind == Kind_Void)
-		return 0;
+		return IR_REF_NONE;
 	if (typeCompatible(v.typ, t))
 		return v.inst;
 	if (t.basic == Int_bool)

@@ -2,12 +2,20 @@
 #include "types.h"
 #include "parse.h"
 
-//    Emits the flat assembler format.
+
+/*
+
+Generates assembly in the flat assembler format.
+C identifiers are prefixed with an underscore to disambiguate from
+instructions & registers.
+
+NOTE A StackAlloc of Constant size may be referenced across blocks,
+to allow jumps over definitions. Probably need to allocate these in a
+prepass.
 
 
-// NOTE A StackAlloc of Constant size may be referenced across blocks,
-// to allow jumps over definitions. Probably need to allocate these in a
-// prepass.
+*/
+
 
 
 // Register, or stack offset + STACK_BEGIN
@@ -148,7 +156,7 @@ const char *register_names[STACK_BEGIN] = {
 
 
 static void emitData(FILE *out, Module, String data, References);
-static void emitName (Module module, u32 id);
+static void emitName (FILE *, Module module, u32 id);
 static bool isSpilled(Storage);
 static void emitFunction(Arena *, FILE *, Module, IrList, Block *entry);
 static void emitBlock(Codegen *, Block *);
@@ -166,7 +174,7 @@ int splice_dest_order(const void *a, const void *b) {
 }
 
 void emitX64AsmSimple(FILE *out, Arena *arena, Module module) {
-	puts("use64\n"
+	fprintf(out, "use64\n"
 	     "format ELF64\n");
 
 	for (u32 i = 0; i < module.len; i++) {
@@ -177,7 +185,7 @@ void emitX64AsmSimple(FILE *out, Arena *arena, Module module) {
 			fprintf(out, "public _%.*s as '%.*s'\n", STRING_PRINTAGE(reloc.name), STRING_PRINTAGE(reloc.name));
 	}
 
-	puts("\n\n"
+	fprintf(out, "\n\n"
 	     "section '.text' executable\n");
 	for (u32 i = 0; i < module.len; i++) {
 		StaticValue reloc = module.ptr[i];
@@ -188,42 +196,42 @@ void emitX64AsmSimple(FILE *out, Arena *arena, Module module) {
 		}
 	}
 
-	puts("\n\n"
-	     "section '.data' writeable");
+	fprintf(out, "\n\n"
+	     "section '.data' writeable\n");
 	for (u32 i = 0; i < module.len; i++) {
 		StaticValue reloc = module.ptr[i];
 		if (reloc.def_kind == Static_Variable
 			&& !(reloc.type.qualifiers & Qualifier_Const)
 			&& reloc.def_state)
 		{
-			emitName(module, i);
+			emitName(out, module, i);
 			emitData(out, module, reloc.value_data, reloc.value_references);
 		}
 	}
 
-	puts("\n\n"
-	     "section '.rodata'");
+	fprintf(out, "\n\n"
+	     "section '.rodata'\n");
 	for (u32 i = 0; i < module.len; i++) {
 		StaticValue reloc = module.ptr[i];
 		if (reloc.def_kind == Static_Variable
 			&& (reloc.type.qualifiers & Qualifier_Const)
 			&& reloc.def_state)
 		{
-			emitName(module, i);
+			emitName(out, module, i);
 			emitData(out, module, reloc.value_data, reloc.value_references);
 		}
 	}
 	printf("\n");
 }
 
-static void emitName (Module module, u32 id) {
+static void emitName (FILE *out, Module module, u32 id) {
 	StaticValue reloc = module.ptr[id];
-	printf("align 8\n");
+	fprintf(out, "align 8\n");
 	// STYLE Copypasta from valueName
 	if (reloc.name.len)
-		printf("_%.*s:\n", STRING_PRINTAGE(reloc.name));
+		fprintf(out, "_%.*s:\n", STRING_PRINTAGE(reloc.name));
 	else
-		printf("__%lu:\n", (unsigned long) id);
+		fprintf(out, "__%lu:\n", (unsigned long) id);
 }
 
 static void emitData (FILE *out, Module module, String data, References references) {

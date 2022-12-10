@@ -6,6 +6,12 @@
 #define BLOCK_HEADER sizeof(void*)
 
 
+/*
+
+Provides functions to allocate quickly from a memory pool.
+
+*/
+
 struct ArenaBlock {
 	ArenaBlock *next;
 	char data[];
