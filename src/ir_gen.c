@@ -2,7 +2,7 @@
 
 /*
 
-Generates IR, while doing a first constant-folding pass.
+Generates IR, while doing a first constant-folding pass, and prints it in a nicely formatted form.
 Some arithmetic simplifications require e.g. use-counts, and need to be
 performed in a separate step.
 
@@ -322,7 +322,7 @@ void printBlock (FILE *dest, Block *blk, IrList ir) {
 		return;
 	blk->visited = true;
 
-	fprintf(dest, " %.*s:\n", STRING_PRINTAGE(blk->label));
+	fprintf(dest, " %.*s%p:\n", STRING_PRINTAGE(blk->label), (void *) blk);
 
 	for (size_t i = blk->first_inst; i <= blk->last_inst; i++) {
 		fprintf(dest, " %3lu = ", (ulong) i);
@@ -411,10 +411,10 @@ void printBlock (FILE *dest, Block *blk, IrList ir) {
 		printBlock(dest, exit.unconditional, ir);
 		break;
 	case Exit_Branch:
-		fprintf(dest, "       branch %lu ? %.*s : %.*s\n",
+		fprintf(dest, "       branch %lu ? %.*s%p : %.*s%p\n",
 			(ulong) exit.branch.condition,
-			STRING_PRINTAGE(exit.branch.on_true->label),
-			STRING_PRINTAGE(exit.branch.on_false->label));
+			STRING_PRINTAGE(exit.branch.on_true->label), (void *) exit.branch.on_true,
+			STRING_PRINTAGE(exit.branch.on_false->label), (void *) exit.branch.on_false);
 		printBlock(dest, exit.branch.on_true, ir);
 		printBlock(dest, exit.branch.on_false, ir);
 		break;

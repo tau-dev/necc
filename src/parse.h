@@ -116,6 +116,7 @@ typedef struct {
 typedef LIST(StaticValue) Module;
 
 
+// STYLE TODO With IR sizing, lvalues are now the same as byref. Merge these two.
 static inline bool isByref(Value val) { return val.category; }
 static inline bool isLvalue(Value val) { return val.category != Ref_RValue; }
 

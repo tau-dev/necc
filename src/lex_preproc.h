@@ -94,6 +94,7 @@ typedef enum {
 	Tok_Key_Extern,
 	Tok_Key_Threadlocal,
 	Tok_Key_Inline,
+	Tok_Key_Noreturn,
 
 	Tok_Key_VaList,
 

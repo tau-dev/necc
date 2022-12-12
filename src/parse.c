@@ -161,8 +161,7 @@ static nodiscard bool tryParseTypeBase(Parse *, Type *dest, u8 *storage);
 static nodiscard bool tryParseTypeName(Parse *, Type *dest, u8 *storage);
 static void parseFunction(Parse *, String func_name);
 static Value rvalue(Value v, Parse *);
-static Value dereference (Parse *, Value v);
-static IrRef coerce(Value v, Type t, Parse *);
+static Value dereference(Parse *, Value v);
 static Value pointerAdd(IrBuild *, Value lhs, Value rhs, Parse *op_parse, const Token *);
 static void parseTypedefDecls(Parse *, Type base_type);
 static Attributes parseAttributes(Parse *);
@@ -393,14 +392,19 @@ static Value parseExprAnd(Parse *);
 static Value parseExprBitOr(Parse *);
 static Value parseExprBitXor(Parse *);
 static Value parseExprBitAnd(Parse *);
-static Value parseExprEquals (Parse *);
+static Value parseExprEquality (Parse *);
 static Value parseExprGreaterLess(Parse *);
 static Value parseExprAddition(Parse *);
 static Value parseExprMultiplication(Parse *);
 static Value parseExprLeftUnary(Parse *);
 static Value parseExprRightUnary(Parse *);
 static Value parseExprBase(Parse *);
+// TODO The order of parameters here is inconsistent.
 static void parseStructInitializer(Parse *, InitializationDest);
+static IrRef coerce(Value v, Type t, Parse *, const Token *);
+static IrRef toBoolean(Value v, Parse *, const Token *);
+static IrRef coercerval(Value v, Type t, Parse *, const Token *, bool allow_casts);
+static Value immediateIntVal(Parse *, Type typ, u64 val);
 static void requiresVersion(Parse *, const char *desc, Version);
 static void requiresVersionJust(Parse *, const char *desc, Version);
 
@@ -408,7 +412,7 @@ void parseFunction (Parse *parse, String func_name) {
 	IrBuild *build = &parse->build;
 	*build = (IrBuild) {0};
 
-	build->entry = startNewBlock(build, parse->code_arena, zString("__entry"));
+	build->entry = startNewBlock(build, parse->code_arena, zString("entry"));
 
 	assert(parse->scope_depth == 0);
 	Scope enclosing = pushScope(parse);
@@ -524,6 +528,7 @@ static void parseStatement (Parse *parse, bool *had_non_declaration) {
 		t = *parse->pos;
 	}
 
+	const Token *primary = parse->pos;
 	switch (t.kind) {
 	case Tok_OpenBrace:
 		parseCompound(parse);
@@ -534,9 +539,9 @@ static void parseStatement (Parse *parse, bool *had_non_declaration) {
 		if (tryEat(parse, Tok_Semicolon)) {
 			genReturnVal(build, IR_REF_NONE);
 		} else {
-			IrRef val = coerce(rvalue(parseExpression(parse), parse),
+			IrRef val = coerce(parseExpression(parse),
 					*parse->current_func_type.rettype,
-					parse);
+					parse, primary);
 			expect(parse, Tok_Semicolon);
 
 			genReturnVal(build, val);
@@ -548,17 +553,17 @@ static void parseStatement (Parse *parse, bool *had_non_declaration) {
 	case Tok_Key_While: {
 		parse->pos++;
 
-		Block *head = newBlock(parse->code_arena, zString("__while_head"));
+		Block *head = newBlock(parse->code_arena, zString("while_head_"));
 		genJump(build, head);
 		expect(parse, Tok_OpenParen);
-		Value condition = rvalue(parseExpression(parse), parse);
+		Value condition = parseExpression(parse);
 		expect(parse, Tok_CloseParen);
-		genBranch(build, coerce(condition, BASIC_INT, parse));
+		genBranch(build, toBoolean(condition, parse, primary));
 
-		head->exit.branch.on_true = startNewBlock(build, parse->code_arena, zString("__while_body"));
+		head->exit.branch.on_true = startNewBlock(build, parse->code_arena, zString("while_body_"));
 		parseStatement(parse, had_non_declaration);
 
-		Block *join = newBlock(parse->code_arena, zString("__while_join"));
+		Block *join = newBlock(parse->code_arena, zString("while_join_"));
 		genJump(build, join);
 		head->exit.branch.on_false = join;
 	} break;
@@ -566,19 +571,19 @@ static void parseStatement (Parse *parse, bool *had_non_declaration) {
 		parse->pos++;
 
 		expect(parse, Tok_OpenParen);
-		Value condition = rvalue(parseExpression(parse), parse);
+		Value condition = parseExpression(parse);
 		expect(parse, Tok_CloseParen);
-		genBranch(build, coerce(condition, BASIC_INT, parse));
+		genBranch(build, toBoolean(condition, parse, primary));
 
 		Block *head = build->insertion_block;
-		head->exit.branch.on_true = startNewBlock(build, parse->code_arena, zString("__if_true"));
+		head->exit.branch.on_true = startNewBlock(build, parse->code_arena, zString("if_true_"));
 		parseStatement(parse, had_non_declaration);
 
-		Block *join = newBlock(parse->code_arena, zString("__if_join"));
+		Block *join = newBlock(parse->code_arena, zString("if_join_"));
 
 		if (parse->pos->kind == Tok_Key_Else) {
 			parse->pos++;
-			head->exit.branch.on_false = startNewBlock(build, parse->code_arena, zString("__if_else"));
+			head->exit.branch.on_false = startNewBlock(build, parse->code_arena, zString("if_else_"));
 			parseStatement(parse, had_non_declaration);
 			genJump(build, join);
 		} else {
@@ -659,6 +664,41 @@ static void parseStatement (Parse *parse, bool *had_non_declaration) {
 		*had_non_declaration = true;
 }
 
+static Value arithAdd(Parse *parse, const Token *primary, Value lhs, Value rhs) {
+	assert(!isLvalue(lhs));
+	assert(!isLvalue(rhs));
+	if (lhs.typ.kind == Kind_Pointer || rhs.typ.kind == Kind_Pointer) {
+		return pointerAdd(&parse->build, lhs, rhs, parse, primary);
+	} else {
+		Type common = arithmeticConversions(parse, &lhs, &rhs);
+		return (Value) {common, genAdd(&parse->build, lhs.inst, rhs.inst)};
+	}
+}
+
+static Value arithSub(Parse *parse, const Token *primary, Value lhs, Value rhs) {
+	assert(!isLvalue(lhs));
+	assert(!isLvalue(rhs));
+	IrBuild *build = &parse->build;
+	if (lhs.typ.kind == Kind_Pointer) {
+		IrRef stride = genImmediateInt(build,
+				typeSize(*lhs.typ.pointer, &parse->target), parse->target.ptr_size);
+
+		if (rhs.typ.kind == Kind_Pointer) {
+			IrRef diff = genSub(build, lhs.inst, rhs.inst);
+			return (Value) {BASIC_INT, genDiv(build, diff, stride)};
+		} else {
+			IrRef idx = genMul(build, coercerval(rhs, BASIC_INT, parse, primary, false), stride);
+			return (Value) {lhs.typ, genSub(build, lhs.inst, idx)};
+		}
+	} else {
+		if (rhs.typ.kind == Kind_Pointer)
+			parseerror(parse, primary, "cannot subtract pointer from %s", printType(&parse->arena, rhs.typ));
+		Type common = arithmeticConversions(parse, &lhs, &rhs);
+		return (Value) {common, genSub(build, lhs.inst, rhs.inst)};
+	}
+}
+
+
 static Value parseExpression (Parse *parse) {
 	Attributes attr = parseAttributes(parse);
 	(void) attr;
@@ -674,8 +714,14 @@ static Value parseExpression (Parse *parse) {
 static Value parseExprAssignment (Parse *parse) {
 	Value v = parseExprElvis(parse);
 	const Token *primary = parse->pos;
+	bool modfiy = true;
+
 	switch (primary->kind) {
 	case Tok_Equals:
+		modfiy = false;
+		FALLTHROUGH;
+	case Tok_PlusEquals:
+	case Tok_MinusEquals:
 		parse->pos++;
 		if (v.typ.kind == Kind_Function)
 			parseerror(parse, primary, "cannot assign to a function");
@@ -684,11 +730,25 @@ static Value parseExprAssignment (Parse *parse) {
 		if (v.typ.qualifiers & Qualifier_Const)
 			parseerror(parse, primary, "cannot assign to a %sconst%s-qualified value", BOLD, RESET);
 
-		Value assigned_val = parseExprAssignment(parse);
+		Value assigned = parseExprAssignment(parse);
 
-		genStore(&parse->build, v.inst, coerce(rvalue(assigned_val, parse), v.typ, parse));
-		return assigned_val;
-	// TODO Tok_PlusEquals, Tok_MinusEquals etc.
+		if (modfiy) {
+			Value loaded = {v.typ, genLoad(&parse->build, v.inst, typeSize(v.typ, &parse->target))};
+			assigned = rvalue(assigned, parse);
+			switch (primary->kind) {
+			case Tok_PlusEquals:
+				assigned = arithAdd(parse, primary, loaded, assigned);
+				break;
+			case Tok_MinusEquals:
+				assigned = arithSub(parse, primary, loaded, assigned);
+				break;
+			default:
+				parseerror(parse, primary, "TODO Compound assignments");
+			}
+		}
+
+		genStore(&parse->build, v.inst, coerce(assigned, v.typ, parse, primary));
+		return assigned;
 	default:
 		return v;
 	}
@@ -795,9 +855,10 @@ static Value parseExprAnd (Parse *parse) {
 // right-to-left; most of them are commutative tho.
 static Value parseExprBitOr (Parse *parse) {
 	Value lhs = parseExprBitXor(parse);
+	const Token *primary = parse->pos;
 	if (tryEat(parse, Tok_Pipe)) {
-		IrRef a = coerce(rvalue(lhs, parse), BASIC_INT, parse);
-		IrRef b = coerce(rvalue(parseExprBitOr(parse), parse), BASIC_INT, parse);
+		IrRef a = coerce(lhs, BASIC_INT, parse, primary);
+		IrRef b = coerce(parseExprBitOr(parse), BASIC_INT, parse, primary);
 		return (Value) {BASIC_INT, genOr(&parse->build, a, b)};
 	}
 	return lhs;
@@ -805,43 +866,54 @@ static Value parseExprBitOr (Parse *parse) {
 
 static Value parseExprBitXor (Parse *parse) {
 	Value lhs = parseExprBitAnd(parse);
+	const Token *primary = parse->pos;
 	if (tryEat(parse, Tok_Hat)) {
-		IrRef a = coerce(rvalue(lhs, parse), BASIC_INT, parse);
-		IrRef b = coerce(rvalue(parseExprBitXor(parse), parse), BASIC_INT, parse);
+		IrRef a = coerce(lhs, BASIC_INT, parse, primary);
+		IrRef b = coerce(parseExprBitXor(parse), BASIC_INT, parse, primary);
 		return (Value) {BASIC_INT, genXor(&parse->build, a, b)};
 	}
 	return lhs;
 }
 
 static Value parseExprBitAnd (Parse *parse) {
-	Value lhs = parseExprEquals(parse);
+	Value lhs = parseExprEquality(parse);
+	const Token *primary = parse->pos;
 	if (tryEat(parse, Tok_Ampersand)) {
-		IrRef a = coerce(rvalue(lhs, parse), BASIC_INT, parse);
-		IrRef b = coerce(rvalue(parseExprBitAnd(parse), parse), BASIC_INT, parse);
+		IrRef a = coerce(lhs, BASIC_INT, parse, primary);
+		IrRef b = coerce(parseExprBitAnd(parse), BASIC_INT, parse, primary);
 		return (Value) {BASIC_INT, genAnd(&parse->build, a, b)};
 	}
 	return lhs;
 }
 
 
-static Value parseExprEquals (Parse *parse) {
+static Value parseExprEquality (Parse *parse) {
 	IrBuild *build = &parse->build;
 	Value lhs = parseExprGreaterLess(parse);
 
 	switch (parse->pos->kind) {
-	case Tok_DoubleEquals: {
-		parse->pos++;
-		lhs = rvalue(lhs, parse);
-		Value rhs = rvalue(parseExprGreaterLess(parse), parse);
-		Type common = arithmeticConversions(parse, &lhs, &rhs);
-		return (Value) { common, genEquals(build, lhs.inst, rhs.inst, typeSize(common, &parse->target)) };
-	}
+	case Tok_DoubleEquals:
 	case Tok_BangEquals: {
+		const Token *primary = parse->pos;
 		parse->pos++;
 		lhs = rvalue(lhs, parse);
 		Value rhs = rvalue(parseExprGreaterLess(parse), parse);
-		Type common = arithmeticConversions(parse, &lhs, &rhs);
-		return (Value) { common, genNot(build, genEquals(build, lhs.inst, rhs.inst, typeSize(common, &parse->target))) };
+		if (lhs.typ.kind == Kind_Pointer && lhs.typ.kind == Kind_Pointer) {
+			if (!lhs.typ.pointer->kind == Kind_Void &&
+				!rhs.typ.pointer->kind == Kind_Void &&
+				!typeCompatible(lhs.typ, rhs.typ))
+			{
+				parseerror(parse, primary, "can not compare types %s and %s",
+						printTypeHighlighted(&parse->arena, lhs.typ), printTypeHighlighted(&parse->arena, rhs.typ));
+			}
+		} else {
+			arithmeticConversions(parse, &lhs, &rhs);
+		}
+
+		IrRef eql = genEquals(build, lhs.inst, rhs.inst, typeSize(BASIC_INT, &parse->target));
+		if (primary->kind == Tok_BangEquals)
+			eql = genNot(build, eql);
+		return (Value) { BASIC_INT, eql };
 	}
 	default:
 		return lhs;
@@ -887,57 +959,41 @@ static Value parseExprGreaterLess (Parse *parse) {
 }
 
 static Value parseExprAddition (Parse *parse) {
-	IrBuild *build = &parse->build;
 	Value lhs = parseExprMultiplication(parse);
-	const Token *primary = parse->pos;
-	Token t = *primary;
-	if (t.kind != Tok_Plus && t.kind != Tok_Minus)
-		return lhs;
-	parse->pos++;
-	lhs = rvalue(lhs, parse);
-	Value rhs = rvalue(parseExprMultiplication(parse), parse);
 
+	while (true) {
+		const Token *primary = parse->pos;
+		if (primary->kind != Tok_Plus && primary->kind != Tok_Minus)
+			return lhs;
+		parse->pos++;
+		lhs = rvalue(lhs, parse);
+		Value rhs = rvalue(parseExprMultiplication(parse), parse);
 
-	// TODO Type checking
-	if (t.kind == Tok_Plus) {
-		if (lhs.typ.kind == Kind_Pointer || rhs.typ.kind == Kind_Pointer) {
-			return pointerAdd(build, lhs, rhs, parse, primary);
-		} else {
-			return (Value) {BASIC_INT, genAdd(build, coerce(lhs, BASIC_INT, parse), coerce(rhs, BASIC_INT, parse))};
-		}
-	} else {
-		if (lhs.typ.kind == Kind_Pointer) {
-			IrRef stride = genImmediateInt(build,
-					typeSize(*lhs.typ.pointer, &parse->target), parse->target.ptr_size);
-
-			if (rhs.typ.kind == Kind_Pointer) {
-				IrRef diff = genSub(build, lhs.inst, rhs.inst);
-				return (Value) {BASIC_INT, genDiv(build, diff, stride)};
-			} else {
-				IrRef idx = genMul(build, coerce(rhs, BASIC_INT, parse), stride);
-				return (Value) {lhs.typ, genSub(build, lhs.inst, idx)};
-			}
-		} else {
-			if (rhs.typ.kind == Kind_Pointer)
-				parseerror(parse, primary, "cannot subtract pointer from %s", printType(&parse->arena, rhs.typ));
-			return (Value) {BASIC_INT, genSub(build, coerce(lhs, BASIC_INT, parse), coerce(rhs, BASIC_INT, parse))};
-		}
+		// TODO Type checking
+		if (primary->kind == Tok_Plus)
+			lhs = arithAdd(parse, primary, lhs, rhs);
+		else
+			lhs = arithSub(parse, primary, lhs, rhs);
 	}
 }
 
 static Value parseExprMultiplication (Parse *parse) {
 	Value lhs = parseExprLeftUnary(parse);
-	Token t = *parse->pos;
-	if (t.kind != Tok_Asterisk && t.kind != Tok_Slash)
-		return lhs;
-	parse->pos++;
-	lhs = rvalue(lhs, parse);
-	Value rhs = rvalue(parseExprLeftUnary(parse), parse);
 
-	if (t.kind == Tok_Asterisk)
-		return (Value) { BASIC_INT, genMul(&parse->build, lhs.inst, rhs.inst) };
-	else
-		return (Value) { BASIC_INT, genDiv(&parse->build, lhs.inst, rhs.inst) };
+	while (true) {
+		const Token *primary = parse->pos;
+		if (primary->kind != Tok_Asterisk && primary->kind != Tok_Slash)
+			return lhs;
+		parse->pos++;
+		lhs = rvalue(lhs, parse);
+		Value rhs = rvalue(parseExprLeftUnary(parse), parse);
+
+		Type common = arithmeticConversions(parse, &lhs, &rhs);
+		if (primary->kind == Tok_Asterisk)
+			lhs = (Value) {common, genMul(&parse->build, lhs.inst, rhs.inst)};
+		else
+			lhs = (Value) {common, genDiv(&parse->build, lhs.inst, rhs.inst)};
+	}
 }
 
 static Value parseExprLeftUnary (Parse *parse) {
@@ -956,7 +1012,7 @@ static Value parseExprLeftUnary (Parse *parse) {
 		Value rval = (Value) {v.typ, genLoad(build, v.inst, typeSize(v.typ, &parse->target))};
 
 		const int delta = parse->pos->kind == Tok_DoublePlus ? 1 : -1;
-		Value one = {v.typ, genImmediateInt(build, delta, typeSize(v.typ, &parse->target))};
+		Value one = immediateIntVal(parse, v.typ, delta);
 
 		Value result;
 		if (v.typ.kind == Kind_Pointer)
@@ -1001,16 +1057,14 @@ static Value parseExprLeftUnary (Parse *parse) {
 	case Tok_Key_Sizeof: {
 		Type typ;
 		bool openparen = tryEat(parse, Tok_OpenParen);
-		if (!openparen || !tryParseTypeBase(parse, &typ, NULL))
+		if (!openparen || !tryParseTypeName(parse, &typ, NULL))
 			typ = parseValueType(parse, openparen ? parseExpression : parseExprLeftUnary);
 		if (openparen)
 			expect(parse, Tok_CloseParen);
 		if (typ.kind == Kind_Function)
 			parseerror(parse, primary, "the operand of a sizeof may not have a function type");
 
-		Type sizetype = parse->target.ptrdiff;
-		sizetype.basic |= Int_unsigned;
-		return (Value) {sizetype, genImmediateInt(build, typeSize(typ, &parse->target), typeSize(sizetype, &parse->target))};
+		return immediateIntVal(parse, parse->target.ptrdiff, typeSize(typ, &parse->target));
 	} break;
 	case Tok_Plus:
 	case Tok_Minus:
@@ -1021,6 +1075,8 @@ static Value parseExprLeftUnary (Parse *parse) {
 		if (tryParseTypeName(parse, &cast_target, NULL)) {
 			expect(parse, Tok_CloseParen);
 			if (parse->pos->kind == Tok_OpenBrace) {
+				// Compound literal.
+				// TODO Parse right unary operators!
 				IrRef stack = genStackAllocFixed(build, typeSize(cast_target, &parse->target));
 				// TODO Generate Ir_StackDealloc at end of block!
 				InitializationDest dest = {
@@ -1030,11 +1086,9 @@ static Value parseExprLeftUnary (Parse *parse) {
 				parseInitializer(parse, dest);
 				return (Value) {cast_target, stack, Ref_LValue};
 			} else {
+				// Cast operator
 				Value v = rvalue(parseExprLeftUnary(parse), parse);
-				// TODO Actually cast
-				// TODO In MSVC, a cast can produce an lvalue. I assume a
-				// store to that will reverse-cast ...?
-				return (Value) {cast_target, coerce(v, cast_target, parse)};
+				return (Value) {cast_target, coercerval(v, cast_target, parse, primary, true)};
 			}
 		} else {
 			parse->pos--;
@@ -1062,11 +1116,11 @@ static Value parseExprRightUnary (Parse *parse) {
 			DeclList params = func.typ.function.parameters;
 			if (parse->pos->kind != Tok_CloseParen) {
 				do {
+					const Token *primary = parse->pos;
 					Value arg = parseExprAssignment(parse);
-					arg = rvalue(arg, parse);
 					if (arguments.len == params.len)
 						parseerror(parse, primary, "too many arguments to function call");
-					PUSH_A(parse->code_arena, arguments, coerce(arg, params.ptr[arguments.len].type, parse));
+					PUSH_A(parse->code_arena, arguments, coerce(arg, params.ptr[arguments.len].type, parse, primary));
 				} while (tryEat(parse, Tok_Comma));
 			}
 			expect(parse, Tok_CloseParen);
@@ -1098,7 +1152,7 @@ static Value parseExprRightUnary (Parse *parse) {
 				parseerror(parse, primary, "cannot modify an rvalue");
 			Value rval = (Value) {v.typ, genLoad(build, v.inst, typeSize(v.typ, &parse->target))};
 
-			Value one = {v.typ, genImmediateInt(build, delta, typeSize(v.typ, &parse->target))};
+			Value one = immediateIntVal(parse, v.typ, delta);
 
 			IrRef result;
 			if (v.typ.kind == Kind_Pointer)
@@ -1130,19 +1184,20 @@ static Value parseExprRightUnary (Parse *parse) {
 				if (i == resolved.members.len)
 					parseerror(parse, NULL, "type %s does not have a member named %.*s", printTypeHighlighted(&parse->arena, v.typ), member_name.len, member_name.ptr);
 				CompoundMember member = resolved.members.ptr[i];
-				bool is_fam = isFlexibleArrayMember(resolved.members, i);
+				bool is_flex = isFlexibleArrayMember(resolved.members, i);
 
 				if (isLvalue(v)) {
 					IrRef offset = genImmediateInt(build, member.offset, typeSize(parse->target.intptr, &parse->target));
 					v.typ = member.type;
 					v.inst = genAdd(build, v.inst, offset);
 
-					if (is_fam)
-						parseerror(parse, parse->pos, "TODO Flexible array members");
+					if (is_flex) {
+						v.typ = (Type) {Kind_Pointer, .pointer = &resolved.members.ptr[i].type};
+						v.category = Ref_RValue;
+					}
 				} else {
-					parseerror(parse, parse->pos, "TODO rvalue member access");
+					parseerror(parse, NULL, "TODO rvalue member access");
 				}
-				break;
 			} else {
 				parseerror(parse, NULL, "member access only works on %sstruct%ss and %sunion%ss, not on %s",
 						BOLD, RESET, BOLD, RESET, printTypeHighlighted(&parse->arena, resolved));
@@ -1195,7 +1250,7 @@ static Value parseExprBase (Parse *parse) {
 		return v;
 	}
 	case Tok_Integer:
-		return (Value) {BASIC_INT, genImmediateInt(build, t.val.literal.integer, typeSize(BASIC_INT, &parse->target))};
+		return immediateIntVal(parse, (Type) {Kind_Basic, .basic = t.val.literal.int_type}, t.val.literal.integer);
 // 	case Tok_Real:
 // 		return (Value) {{Kind_Basic, {Basic_double}}, genImmediateReal(t.val.real)};
 	case Tok_String: {
@@ -1234,12 +1289,7 @@ static Value parseExprBase (Parse *parse) {
 		expect(parse, Tok_OpenParen);
 		Type t = parseTypeName(parse, NULL);
 		expect(parse, Tok_CloseParen);
-		return (Value) {
-			BASIC_INT,
-			genImmediateInt(build,
-					typeAlignment(t, &parse->target),
-					typeSize(t, &parse->target))
-		};
+		return immediateIntVal(parse, BASIC_INT, typeAlignment(t, &parse->target));
 	}
 	case Tok_Identifier: {
 		Symbol *sym = mapGet(&symbols, t.val.string);
@@ -1250,11 +1300,8 @@ static Value parseExprBase (Parse *parse) {
 		case Sym_Typedef:
 			parseerror(parse, NULL, "expected a value, found a typedef name");
 		case Sym_EnumConstant:
-			return (Value) {
-				BASIC_INT, // TODO Store parent type for Sym_EnumConstant.
-				genImmediateInt(build, ident->enum_constant, typeSize(BASIC_INT, &parse->target)),
-				Ref_RValue,
-			};
+			// TODO Store enum-ness in the integer type, e.g. for switch completeness checking.
+			return immediateIntVal(parse, BASIC_INT, ident->enum_constant);
 		case Sym_Value_Static:
 			return (Value) {
 				parse->module->ptr[ident->static_id].type,
@@ -1407,7 +1454,7 @@ static void parseInitializer (Parse *parse, InitializationDest dest) {
 		} else {
 			IrRef offset = genImmediateInt(build, dest.offset, parse->target.ptr_size);
 			IrRef dest_addr = genAdd(build, dest.address, offset);
-			genStore(build, dest_addr, coerce(rvalue(got, parse), dest.type, parse));
+			genStore(build, dest_addr, coerce(got, dest.type, parse, begin));
 		}
 	}
 }
@@ -1462,10 +1509,14 @@ static void parseStructInitializer (Parse *parse, InitializationDest dest) {
 }
 
 static Type arithmeticConversions (Parse *parse, Value *lhs, Value *rhs) {
+	assert(!isLvalue(*lhs));
+	assert(!isLvalue(*rhs));
+	const Token *primary = NULL;
 	// TODO
+
 	Type common = BASIC_INT;
-	*lhs = (Value) {common, coerce(*lhs, common, parse)};
-	*rhs = (Value) {common, coerce(*rhs, common, parse)};
+	*lhs = (Value) {common, coercerval(*lhs, common, parse, primary, false)};
+	*rhs = (Value) {common, coercerval(*rhs, common, parse, primary, false)};
 	return common;
 }
 
@@ -1499,7 +1550,7 @@ static bool tryParseTypeName (Parse *parse, Type *type, u8 *storage_dest) {
 static Type parseTypeBase (Parse *parse, u8 *storage) {
 	Type type;
 	if (!tryParseTypeBase(parse, &type, storage))
-		parseerror(parse, parse->pos, "invalid type");
+		parseerror(parse, parse->pos, "expected a type name");
 	return type;
 }
 
@@ -1741,6 +1792,10 @@ static bool tryParseTypeBase (Parse *parse, Type *type, u8 *storage_dest) {
 		case Tok_Key_Extern:
 			storage = Storage_Extern;
 			storages++;
+			break;
+		case Tok_Key_Inline:
+		case Tok_Key_Noreturn:
+			// TODO
 			break;
 		case Tok_Key_Threadlocal:
 			requiresVersion(parse, "thread-local types", Version_C17);
@@ -2020,6 +2075,7 @@ static Declaration parseDeclarator (Parse *parse, Type base_type, Namedness name
 			enclosing = inner;
 			inner = rettype;
 		} else if (tryEat(parse, Tok_OpenBracket)) {
+			const Token *primary = parse->pos - 1;
 			if (enclosing && enclosing->kind == Kind_Function)
 				parseerror(parse, NULL, "a function cannot return an array. You may want to return a pointer to an array instead");
 
@@ -2046,7 +2102,7 @@ static Declaration parseDeclarator (Parse *parse, Type base_type, Namedness name
 			} else if (parse->pos->kind == Tok_CloseBracket) {
 				inner->array.count = IR_REF_NONE;
 			} else {
-				inner->array.count = coerce(rvalue(parseExprAssignment(parse), parse), parse->target.ptrdiff, parse);
+				inner->array.count = coerce(parseExprAssignment(parse), parse->target.ptrdiff, parse, primary);
 				if (parse->build.ir.ptr[inner->array.count].kind != Ir_Constant) {
 					requiresVersion(parse, "variable length arrays", Version_C99);
 					parseerror(parse,NULL, "TODO Support VLA");
@@ -2085,16 +2141,19 @@ static void parseTypedefDecls(Parse *parse, Type base_type) {
 }
 
 static Value pointerAdd (IrBuild *ir, Value lhs, Value rhs, Parse *op_parse, const Token *token) {
+	assert(!isLvalue(lhs));
+	assert(!isLvalue(rhs));
 	assert(lhs.typ.kind == Kind_Pointer || rhs.typ.kind == Kind_Pointer);
+
 	if (lhs.typ.kind == Kind_Pointer && rhs.typ.kind == Kind_Pointer)
 		parseerror(op_parse, token, "cannot add two pointers");
 	Value ptr;
 	IrRef integer;
 	if (lhs.typ.kind == Kind_Pointer) {
 		ptr = lhs;
-		integer = coerce(rhs, op_parse->target.ptrdiff, op_parse);
+		integer = coercerval(rhs, op_parse->target.ptrdiff, op_parse, token, false);
 	} else {
-		integer = coerce(lhs, op_parse->target.ptrdiff, op_parse);
+		integer = coercerval(lhs, op_parse->target.ptrdiff, op_parse, token, false);
 		ptr = rhs;
 	}
 	IrRef stride = genImmediateInt(ir,
@@ -2115,7 +2174,8 @@ static Value dereference (Parse *parse, Value v) {
 
 
 // Performs lvalue conversion, array to pointer conversion and function
-// to pointer conversion as necessary.
+// to pointer conversion as necessary. This is idempotent, but I still
+// want to avoid just sprinkling it everywhere.
 Value rvalue (Value v, Parse *parse) {
 	if (v.typ.kind == Kind_Function) {
 		v.typ.kind = Kind_FunctionPtr;
@@ -2131,9 +2191,21 @@ Value rvalue (Value v, Parse *parse) {
 	return v;
 }
 
+static IrRef coerce (Value v, Type t, Parse *p, const Token *primary) {
+	return coercerval(rvalue(v, p), t, p, primary, false);
+}
 
-IrRef coerce (Value v, Type t, Parse *p) {
-// 	assert(isLvalue(v));
+static IrRef toBoolean(Value v, Parse *p, const Token *primary) {
+	if (v.typ.kind != Kind_Basic)
+		parseerror(p, primary, "(TODO Explain this better) expected an expression of scalar type");
+
+	return coerce(v, BASIC_INT, p, primary);
+}
+
+// Performs implicit conversions on rvalues.
+static IrRef coercerval (Value v, Type t, Parse *p, const Token *primary, bool allow_casts) {
+	assert(!isLvalue(v));
+	IrBuild *build = &p->build;
 
 	if (t.kind == Kind_Void)
 		return IR_REF_NONE;
@@ -2146,8 +2218,8 @@ IrRef coerce (Value v, Type t, Parse *p) {
 	if (v.typ.kind == Kind_Basic && t.kind == Kind_Basic) {
 		u16 target = p->target.typesizes[t.basic & ~Int_unsigned];
 		u16 source = p->target.typesizes[v.typ.basic & ~Int_unsigned];
+		assert(source == build->ir.ptr[v.inst].size);
 
-		IrBuild *build = &p->build;
 		// TODO Is it reasonable to omit the truncation on signed
 		// destination? This could cause a UB overflow to potentially
 		// screw with much later calculations.
@@ -2165,12 +2237,26 @@ IrRef coerce (Value v, Type t, Parse *p) {
 
 	// Conversions to and from void*
 	if (v.typ.kind == Kind_Pointer && t.kind == Kind_Pointer
-			&& (v.typ.pointer->kind == Kind_Void || t.pointer->kind == Kind_Void))
+			&& (v.typ.pointer->kind == Kind_Void || t.pointer->kind == Kind_Void || allow_casts))
 	{
 		return v.inst;
 	}
-	parseerror(p, NULL, "TODO(location) could not convert type %s to type %s",
+
+	if (allow_casts) {
+		// NOTE This relies on pointers being the largest types.
+		if (t.kind == Kind_Basic && v.typ.kind == Kind_Pointer)
+			return genTrunc(build, v.inst, p->target.typesizes[t.basic & ~Int_unsigned]);
+		if (t.kind == Kind_Pointer && v.typ.kind == Kind_Basic)
+			return genZeroExt(build, v.inst, p->target.ptr_size);
+	}
+	parseerror(p, primary, "could not convert type %s to type %s",
 		printTypeHighlighted(&p->arena, v.typ), printTypeHighlighted(&p->arena, t));
+}
+
+static Value immediateIntVal(Parse *p, Type typ, u64 val) {
+	return (Value) { typ,
+		genImmediateInt(&p->build, val, typeSize(typ, &p->target))
+	};
 }
 
 static void requiresVersionJust (Parse *parse, const char *desc, Version v) {

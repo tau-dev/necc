@@ -81,6 +81,7 @@ Keyword names[] = {
 	{"extern", Tok_Key_Extern},
 	{"_Thread_local", Tok_Key_Threadlocal},
 	{"inline", Tok_Key_Inline},
+	{"_Noreturn", Tok_Key_Noreturn},
 
 	{"__builtin_va_list", Tok_Key_VaList},
 	{"__restrict", Tok_Key_Restrict},
@@ -325,6 +326,8 @@ Token getToken (Arena *str_arena, SourceFile src, const char **p) {
 				pos++;
 
 			tok = fromWord((String) {pos - start, start});
+
+			// TODO __FILE__ and __LINE__ should actually be handled by macro expansion.
 			if (tok.kind == Tok_Key_File) {
 				tok.kind = Tok_String;
 				tok.val.string = src.name;
@@ -868,6 +871,7 @@ static bool expandInto (const ExpansionParams ex, Tokenization *dest, bool is_ar
 // Allocates the argument list.
 // PERFOMANCE A single Tokenization for all pre-expansion should be
 // enough if expanded-buffer Replacements store offset and length.
+// Wait, is that the case?
 static Tokenization *takeArguments(const ExpansionParams ex, Macro *mac) {
 	assert(mac->is_function_like);
 	Tokenization *argument_bufs = calloc(mac->parameters.len, sizeof(Tokenization));
@@ -1062,7 +1066,7 @@ static SpaceClass tryGobbleSpace (SourceFile source, const char **p) {
 	}
 }
 
-// PERFORMANCE This function is potentially a very hot path.
+// PERFORMANCE This function is potentially a very hot path. Optimize!
 static void skipToEndIf (SourceFile source, const char **p) {
 	const char *pos = *p;
 
@@ -1484,9 +1488,9 @@ bool isAlnum (char c) {
 }
 
 
-static void predefine (Arena *arena, StringMap *macros, const char *name) {
+static void predefine (Arena *arena, StringMap *macros, const char *name, int val) {
 	MacroToken *one = calloc(1, sizeof(MacroToken));
-	*one = (MacroToken) {{Tok_Integer, .val.literal.integer = 1}};
+	*one = (MacroToken) {{Tok_Integer, .val.literal.integer = val}};
 
 	String name_str = zString(name);
 	void **entry = mapGetOrCreate(macros, name_str);
@@ -1499,12 +1503,40 @@ static void predefine (Arena *arena, StringMap *macros, const char *name) {
 }
 
 
+u32 version_vals[] = {
+	[Version_C99] = 199901L,
+	[Version_C17] = 201710L,
+	[Version_C23] = 202301L,
+	[Version_GNU] = 201710L,
+	[Version_MSVC] = 201710L,
+};
+
 static void predefineMacros (Arena *arena, StringMap *macros, Target *target) {
-	predefine(arena, macros, "__STDC_ANALYZABLE__");
-	predefine(arena, macros, "__LITTLE_ENDIAN__");
+	predefine(arena, macros, "__STDC__", 1);
+	// TODO
+// 	predefine(arena, macros, "__DATE__", 1);
+// 	predefine(arena, macros, "__TIME__", 1);
+	if (target->version >= Version_C99) {
+		predefine(arena, macros, "__STDC_VERSION__", version_vals[target->version]);
+		predefine(arena, macros, "__STDC_HOSTED__", 1);
+	}
+	if (target->version >= Version_C17) {
+		predefine(arena, macros, "__STDC_ANALYZABLE__", 1);
+		predefine(arena, macros, "__STDC_NO_ATOMICS__", 1);
+		predefine(arena, macros, "__STDC_NO_COMPLEX__", 1);
+		predefine(arena, macros, "__STDC_NO_THREADS__", 1);
+	}
+
 	if (target->version == Version_GNU) {
-		predefine(arena, macros, "__GNU__");
-		predefine(arena, macros, "__GNUC__");
+		predefine(arena, macros, "unix", 1);
+		predefine(arena, macros, "__unix__", 1);
+		predefine(arena, macros, "__LITTLE_ENDIAN__", 1);
+
+// 		predefine(arena, macros, "__GNUC__", 1);
+		predefine(arena, macros, "__BYTE_ORDER__", 1);
+		predefine(arena, macros, "__ORDER_LITTLE_ENDIAN__", 1);
+		predefine(arena, macros, "__ORDER_BIG_ENDIAN__", 2);
+		predefine(arena, macros, "__ORDER_PDP_ENDIAN__", 3);
 	}
 }
 

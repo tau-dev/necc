@@ -91,7 +91,7 @@ bool isFlexibleArrayMember (Members m, u32 index) {
 	if (index + 1 != m.len)
 		return false;
 	Type t = m.ptr[m.len - 1].type;
-	return t.kind == Kind_Array && t.array.count == IR_REF_NONE;
+	return t.kind == Kind_VLArray && t.array.count == IR_REF_NONE;
 }
 
 u32 typeAlignment (Type t, const Target *target) {

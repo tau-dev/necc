@@ -155,8 +155,9 @@ const char *register_names[STACK_BEGIN] = {
 
 
 
-static void emitData(FILE *out, Module, String data, References);
+static void emitData(FILE *, Module, String data, References);
 static void emitName (FILE *, Module module, u32 id);
+static void emitJump(FILE *, const char *inst, const Block *dest);
 static bool isSpilled(Storage);
 static void emitFunction(Arena *, FILE *, Module, IrList, Block *entry);
 static void emitBlock(Codegen *, Block *);
@@ -318,7 +319,8 @@ static void emitBlock(Codegen *c, Block *block) {
 	// param instructions will all appear in the first block.
 	u32 parameters_found = 0;
 
-	fprintf(c->out, ".%s:\n ", block->label.ptr);
+	fprintf(c->out, ".%.*s%p:\n ", STRING_PRINTAGE(block->label), (void *) block);
+
 	if (block->first_inst == 0) { // entry
 		fprintf(c->out, "sub rsp, %d\n ", (int) c->stack_allocated);
 	}
@@ -557,15 +559,18 @@ static void emitBlock(Codegen *c, Block *block) {
 	switch (exit.kind) {
 	case Exit_Unconditional:
 		if (exit.unconditional->visited)
-			fprintf(c->out, "jmp %s\n\n", exit.unconditional->label.ptr);
+			emitJump(c->out, "jmp", exit.unconditional);
+
 		emitBlock(c, exit.unconditional);
 		break;
 	case Exit_Branch: {
 		const char *condition = valueName(c, exit.branch.condition);
 		fprintf(c->out, "test %s, -1\n", condition);
-		fprintf(c->out, " jnz .%s\n", exit.branch.on_true->label.ptr);
+		emitJump(c->out, "jnz", exit.branch.on_true);
+
 		if (exit.branch.on_false->visited)
-			fprintf(c->out, " jmp .%s\n\n", exit.branch.on_false->label.ptr);
+			emitJump(c->out, "jmp", exit.branch.on_false);
+
 		emitBlock(c, exit.branch.on_false);
 		emitBlock(c, exit.branch.on_true);
 	} break;
@@ -578,6 +583,10 @@ static void emitBlock(Codegen *c, Block *block) {
 		break;
 	case Exit_None: unreachable;
 	}
+}
+
+static void emitJump(FILE *out, const char *inst, const Block *dest) {
+	fprintf(out, " %s .%.*s%p\n\n", inst, STRING_PRINTAGE(dest->label), (void *) dest);
 }
 
 static Storage regalloc(IrRef next_used_registers[GENERAL_PURPOSE_REGS_END], u16 size, IrRef inst) {

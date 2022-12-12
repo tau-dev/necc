@@ -1,7 +1,7 @@
-#include "arena.h"
-
 #include <stdio.h>
 #include <stdalign.h>
+
+#include "arena.h"
 
 #define BLOCK_HEADER sizeof(void*)
 
