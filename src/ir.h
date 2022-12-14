@@ -28,7 +28,8 @@ typedef enum {
 	Ir_Reloc,
 	Ir_Constant,
 	Ir_Call,
-	Ir_Phi,
+	Ir_PhiOut,
+	Ir_PhiIn, // No operands
 	Ir_Parameter,
 	Ir_StackAlloc,
 	Ir_StackDealloc,
@@ -73,7 +74,6 @@ typedef struct Inst {
 	union {
 		u64 constant;
 		Call call;
-		SPAN(IrRef) phi;
 
 		IrRef unop;
 		struct {
@@ -93,6 +93,13 @@ typedef struct Inst {
 			IrRef dest;
 			IrRef len;
 		} copy;
+		// Apparently this kind of representation is called "parameterized basic
+		// blocks". It does not matter very much.
+		struct {
+			IrRef source;
+			IrRef on_true;
+			IrRef on_false; // Unused for jumps.
+		} phi_out;
 	};
 } Inst;
 

@@ -28,8 +28,9 @@ IrRef genCall(IrBuild *, IrRef func, ValuesSpan args, u16 size);
 IrRef genGlobal(IrBuild *, u32 id);
 IrRef genLoad(IrBuild *, IrRef ref, u16 size);
 IrRef genStore(IrBuild *, IrRef dest, IrRef value);
-
-IrRef genPhi(IrBuild *build, Arena *arena, IrRef *insts, u16 size);
+IrRef genPhiIn(IrBuild *build, u16 size);
+IrRef genPhiOut(IrBuild *build, IrRef source);
+void setPhiOut(IrBuild *build, IrRef phi, IrRef dest_true, IrRef dest_false);
 void genReturnVal(IrBuild *, IrRef val);
 void genBranch(IrBuild *, IrRef condition);
 void genJump(IrBuild *, Block *blk);

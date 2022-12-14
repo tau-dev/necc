@@ -104,7 +104,7 @@ typedef enum {
 	Tok_Key_First = Tok_Key_If,
 	Tok_Key_Last = Tok_Key_Line,
 
-	Tok_PreprocDirective,
+	Tok_PreprocDirective, // Directive or stringified argument.
 	Tok_PreprocConcatenate,
 
 	Tok_EOF,

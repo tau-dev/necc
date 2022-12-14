@@ -16,7 +16,8 @@ prepass.
 
 */
 
-
+typedef unsigned long ulong;
+typedef unsigned long long ullong;
 
 // Register, or stack offset + STACK_BEGIN
 typedef u16 Storage;
@@ -67,6 +68,7 @@ typedef struct {
 	Storages storage;
 	IrRef used_registers[GENERAL_PURPOSE_REGS_END];
 	u32 stack_allocated;
+	bool is_memory_return;
 } Codegen;
 
 
@@ -158,14 +160,12 @@ const char *register_names[STACK_BEGIN] = {
 static void emitData(FILE *, Module, String data, References);
 static void emitName (FILE *, Module module, u32 id);
 static void emitJump(FILE *, const char *inst, const Block *dest);
-static bool isSpilled(Storage);
-static void emitFunction(Arena *, FILE *, Module, IrList, Block *entry);
-static void emitBlock(Codegen *, Block *);
-static inline Storage storageSize(u16 size);
-static inline Storage storageSized(Storage, u16);
-static inline Storage storageUnsized(Storage);
-static Storage regalloc(IrRef next_used_registers[GENERAL_PURPOSE_REGS_END], u16 size, IrRef);
+static void emitFunctionForward(Arena *, FILE *, Module, StaticValue, const Target *);
+static void emitBlockForward(Codegen *, Block *);
+static inline Storage registerSize(u16 size);
+static inline const char *registerSized(Register, u16);
 static const char *sizeOp(u16 size);
+static bool isMemory(u16 size);
 static u16 valueSize(Codegen *, IrRef);
 static const char *valueName(Codegen *, IrRef);
 static const char *storageName(Codegen *, Storage);
@@ -174,14 +174,19 @@ int splice_dest_order(const void *a, const void *b) {
 	return (i32) ((Reference*) a)->splice_pos - (i32) ((Reference*) b)->splice_pos;
 }
 
-void emitX64AsmSimple(FILE *out, Arena *arena, Module module) {
+void emitX64AsmSimple(FILE *out, Arena *arena, Module module, const Target *target) {
 	fprintf(out, "use64\n"
 	     "format ELF64\n");
 
 	for (u32 i = 0; i < module.len; i++) {
 		StaticValue reloc = module.ptr[i];
+		if (reloc.name.len == 0) {
+			assert(reloc.def_state != Def_Undefined);
+			assert(!reloc.is_public);
+			continue;
+		}
 		if (reloc.def_state == Def_Undefined)
-			fprintf(out, "extrn '%.*s' as _%.*s\n", STRING_PRINTAGE(reloc.name), STRING_PRINTAGE(reloc.name));
+			fprintf(out, "extrn '%.*s' as _%.*s	; %lu\n", STRING_PRINTAGE(reloc.name), STRING_PRINTAGE(reloc.name), (ulong) i);
 		else if (reloc.is_public)
 			fprintf(out, "public _%.*s as '%.*s'\n", STRING_PRINTAGE(reloc.name), STRING_PRINTAGE(reloc.name));
 	}
@@ -193,7 +198,7 @@ void emitX64AsmSimple(FILE *out, Arena *arena, Module module) {
 		if (reloc.def_kind == Static_Function && reloc.def_state) {
 			fprintf(out, "_%.*s:\n", STRING_PRINTAGE(reloc.name));
 			assert(reloc.type.kind == Kind_Function);
-			emitFunction(arena, out, module, reloc.function_ir, reloc.function_entry);
+			emitFunctionForward(arena, out, module, reloc, target);
 		}
 	}
 
@@ -232,7 +237,7 @@ static void emitName (FILE *out, Module module, u32 id) {
 	if (reloc.name.len)
 		fprintf(out, "_%.*s:\n", STRING_PRINTAGE(reloc.name));
 	else
-		fprintf(out, "__%lu:\n", (unsigned long) id);
+		fprintf(out, "__%lu:\n", (ulong) id);
 }
 
 static void emitData (FILE *out, Module module, String data, References references) {
@@ -268,40 +273,65 @@ static void emitData (FILE *out, Module module, String data, References referenc
 	}
 }
 
+static u32 roundUp(u32 x)  {
+	return ((x + 7) / 8) * 8;
+}
 
-
-
-
-static void emitFunction (Arena *arena, FILE *out, Module module, IrList ir, Block *entry) {
+static void emitFunctionForward (Arena *arena, FILE *out, Module module, StaticValue reloc, const Target *target) {
+	IrList ir = reloc.function_ir;
+	Block *entry = reloc.function_entry;
 	Codegen c = {
 		.arena = arena,
 		.out = out,
 		.ir = ir,
+		.is_memory_return = isMemory(typeSize(*reloc.type.function.rettype, target)),
 		.lifetimes = (ValuesSpan) ALLOCN(arena, IrRef, ir.len),
 		.storage = (Storages) ALLOCN(arena, Storage, ir.len),
 		.module = module,
 	};
-	for (u32 i = 0; i < ir.len; i++) {
-		if (ir.ptr[i].kind == Ir_StackAlloc) {
-			Inst inst = ir.ptr[i];
-			assert(ir.ptr[inst.alloc.size].kind == Ir_Constant);
 
+	for (u32 i = 0; i < ir.len; i++) {
+		Inst inst = ir.ptr[i];
+		switch (inst.kind) {
+		case Ir_StackAlloc:
 			ir.ptr[i].alloc.known_offset = c.stack_allocated;
-			c.stack_allocated += ir.ptr[inst.alloc.size].constant;
-		} else {
-			c.storage.ptr[i] = 0;
+			Inst sz = ir.ptr[inst.alloc.size];
+			assert(sz.kind == Ir_Constant);
+			c.stack_allocated += roundUp(sz.constant);
+			break;
+		case Ir_Parameter:
+			if (isMemory(inst.size)) {
+				continue;
+			}
+			break;
+		}
+
+		switch (inst.kind) {
+		case Ir_Store:
+		case Ir_StackDealloc:
+			break;
+		default:
+			c.storage.ptr[i] = c.stack_allocated;
+			c.stack_allocated += roundUp(inst.size);
 		}
 	}
-	for (u32 i = 0; i < GENERAL_PURPOSE_REGS_END; i++) {
-		c.used_registers[i] = IR_REF_NONE;
+
+	u32 mem_params = c.stack_allocated + 8;
+	for (u32 i = 0; i < ir.len; i++) {
+		Inst inst = ir.ptr[i];
+		if (inst.kind == Ir_Parameter && isMemory(inst.size)) {
+			c.storage.ptr[i] = mem_params;
+			mem_params += inst.size;
+		}
 	}
-	calcLifetimes(ir, c.lifetimes);
-	fprintf(out, " push rbx\n push r12\n push r13\n push r14\n push r15\n");
-	emitBlock(&c, entry);
+
+	fprintf(c.out, " add rsp, %lu\n", (ulong) c.stack_allocated);
+	if (c.is_memory_return)
+		fprintf(c.out, " mov r15, rdi\n");
+	emitBlockForward(&c, entry);
 }
 
-// INTEGER arguments use in order %rdi %rsi (%rdx->%rbx) %rcx %r8 %r9.
-const u8 parameter_regs[] = {
+const Register parameter_regs[] = {
 	RDI,
 	RSI,
 	RDX,
@@ -310,249 +340,209 @@ const u8 parameter_regs[] = {
 	R9,
 };
 
-static void emitBlock(Codegen *c, Block *block) {
-	if (block->visited || block->exit.kind == Exit_None)
+static const u32 parameter_regs_count = sizeof(parameter_regs) / sizeof(parameter_regs[0]);
+
+static void copyTo (Codegen *c, const char *to, u32 to_offset, const char *from, u32 from_offset, u16 size) {
+	ulong offset = 0;
+	while (size - offset > 8) {
+		fprintf(c->out, " mov r8, [%s+%lu]\n", from, offset+from_offset);
+		fprintf(c->out, " mov [%s+%lu], r8 \n", to, offset+to_offset);
+		offset += 8;
+	}
+	const char *tmp = registerSized(R8, size - offset);
+	fprintf(c->out, " mov %s, [%s+%lu]\n", tmp, from, offset+from_offset);
+	fprintf(c->out, " mov [%s+%lu], %s \n", to, offset+to_offset, tmp);
+}
+
+
+static const char *loadTo (Codegen *c, Register reg, IrRef i) {
+	const char *dest = registerSized(reg, c->ir.ptr[i].size);
+	fprintf(c->out, " mov %s, %s\n", dest, storageName(c, c->storage.ptr[i]));
+	return dest;
+}
+
+
+static void triple (Codegen *c, const char *msg, IrRef lhs, IrRef rhs, IrRef dest) {
+	const char *rax = loadTo(c, RAX, lhs);
+	fprintf(c->out, " %s %s, %s\n mov %s, %s\n", msg, rax, valueName(c, rhs), valueName(c, dest), rax);
+}
+
+// This backend performs _no_ register allocation.
+static void emitBlockForward (Codegen *c, Block *block) {
+	if (block->visited)
 		return;
+	assert(block->exit.kind != Exit_None);
+
 	block->visited = true;
-	IrRef next_used_registers[GENERAL_PURPOSE_REGS_END];
 
 	// param instructions will all appear in the first block.
-	u32 parameters_found = 0;
+	u32 parameters_found = c->is_memory_return;
 
-	fprintf(c->out, ".%.*s%p:\n ", STRING_PRINTAGE(block->label), (void *) block);
+	fprintf(c->out, ".%.*s%u:\n", STRING_PRINTAGE(block->label), (u32) (intptr_t) block);
 
 	if (block->first_inst == 0) { // entry
-		fprintf(c->out, "sub rsp, %d\n ", (int) c->stack_allocated);
+		fprintf(c->out, " sub rsp, %d\n", (int) c->stack_allocated);
 	}
+	LIST(IrRef) false_phis = {0};
 
 	for (u32 i = block->first_inst; i <= block->last_inst; i++) {
 		Inst inst = c->ir.ptr[i];
-		for (u32 r = 0; r < GENERAL_PURPOSE_REGS_END; r++) {
-			IrRef inst = c->used_registers[r];
-			if (inst == IR_REF_NONE || c->lifetimes.ptr[inst] <= i) {
-				next_used_registers[r] = IR_REF_NONE;
-			} else
-				next_used_registers[r] = inst;
-		}
 
 		switch ((InstKind) inst.kind) {
-		case Ir_Add: {
-			Storage slot = regalloc(next_used_registers, I64, i);
-			const char *lhs = valueName(c, inst.binop.lhs);
-			const char *rhs = valueName(c, inst.binop.rhs);
-			const char *dest = storageName(c, slot);
-			fprintf(c->out, "mov rax, %s\n"
-			     " add rax, %s\n"
-			     " mov %s, rax", lhs, rhs, dest);
-			c->storage.ptr[i] = slot;
-		} break;
-		case Ir_Sub: {
-			Storage slot = regalloc(next_used_registers, I64, i);
-			const char *lhs = valueName(c, inst.binop.lhs);
-			const char *rhs = valueName(c, inst.binop.rhs);
-			const char *dest = storageName(c, slot);
-			fprintf(c->out, "mov rax, %s\n"
-			     " sub rax, %s\n"
-			     " mov %s, rax", lhs, rhs, dest);
-			c->storage.ptr[i] = slot;
-		} break;
-		case Ir_Mul: {
-			Storage slot = regalloc(next_used_registers, I64, i);
-			const char *lhs = valueName(c, inst.binop.lhs);
-			const char *rhs = valueName(c, inst.binop.rhs);
-			const char *dest = storageName(c, slot);
-			fprintf(c->out, "mov rax, %s\n"
-			     " imul rax, %s\n"
-			     " mov %s, rax", lhs, rhs, dest);
-			c->storage.ptr[i] = slot;
-		} break;
-		case Ir_Div: {
-			Storage slot = regalloc(next_used_registers, I64, i);
-			const char *lhs = valueName(c, inst.binop.lhs);
-			const char *rhs = valueName(c, inst.binop.rhs);
-			if (c->ir.ptr[inst.binop.rhs].kind == Ir_Constant) {
-				Storage tmp = regalloc(next_used_registers, I64, i);
-				assert(!isSpilled(tmp));
-				const char *imm_reg = storageName(c, tmp);
-				fprintf(c->out, "mov %s, %s\n ", imm_reg, rhs);
-				next_used_registers[storageUnsized(tmp)] = IR_REF_NONE;
-				rhs = imm_reg;
-			}
-			const char *dest = storageName(c, slot);
-			// TODO rdx will screw this up
-			fprintf(c->out, "xor rdx, rdx\n"
-			     " mov rax, %s\n"
-			     " idiv %s\n"
-			     " mov %s, rax", lhs, rhs, dest);
-			c->storage.ptr[i] = slot;
-		} break;
-		case Ir_BitOr: {
-			fprintf(stderr, "TODO codegen or");
-		} break;
-		case Ir_BitXor: {
-			fprintf(stderr, "TODO codegen xor");
-		} break;
-		case Ir_BitAnd: {
-			Storage slot = regalloc(next_used_registers, I64, i);
-			const char *lhs = valueName(c, inst.binop.lhs);
-			const char *rhs = valueName(c, inst.binop.rhs);
-			const char *dest = storageName(c, slot);
-			fprintf(c->out, "mov rax, %s\n"
-			     " and rax, %s\n"
-			     " mov %s, rax", lhs, rhs, dest);
-			c->storage.ptr[i] = slot;
-		} break;
+		case Ir_Add: triple(c, "add", inst.binop.lhs, inst.binop.rhs, i); break;
+		case Ir_Sub: triple(c, "sub", inst.binop.lhs, inst.binop.rhs, i); break;
+		case Ir_Mul: triple(c, "imul", inst.binop.lhs, inst.binop.rhs, i); break;
+		case Ir_Div:
+			fprintf(c->out, " xor rdx, rdx\n");
+			loadTo(c, RAX, inst.binop.lhs);
+			fprintf(c->out, " idiv %s %s\n mov %s, %s\n",
+					sizeOp(inst.size), valueName(c, inst.binop.rhs), valueName(c, i),
+					registerSized(RAX, inst.size));
+			break;
+		case Ir_BitOr: triple(c, "or", inst.binop.lhs, inst.binop.rhs, i); break;
+		case Ir_BitXor: triple(c, "xor", inst.binop.lhs, inst.binop.rhs, i); break;
+		case Ir_BitAnd: triple(c, "and", inst.binop.lhs, inst.binop.rhs, i); break;
 		case Ir_BitNot: {
-			fprintf(stderr, "TODO codegen not");
+			const char *reg = loadTo(c, RAX, inst.unop);
+			fprintf(c->out, "not %s\n"
+			     " mov %s, %s\n", reg, valueName(c, i), reg);
+
 		} break;
 		case Ir_LessThan: {
-			Storage slot = regalloc(next_used_registers, I64, i);
-			const char *lhs = valueName(c, inst.binop.lhs);
-			const char *rhs = valueName(c, inst.binop.rhs);
-
-			fprintf(c->out, "cmp %s, %s\n"
+			fprintf(c->out, " cmp %s, %s\n"
 			     " setl al\n"
-			     " movzx %s, al	; less than", lhs, rhs, storageName(c, slot));
-			c->storage.ptr[i] = slot;
+			     " movzx rsi, al\n"
+			     " mov %s, %s\n",
+			     loadTo(c, RAX, inst.binop.lhs),
+			     valueName(c, inst.binop.rhs),
+			     valueName(c, i),
+			     registerSized(RSI, inst.size));
 		} break;
 		case Ir_LessThanOrEquals: {
-			Storage slot = regalloc(next_used_registers, I64, i);
-			const char *lhs = valueName(c, inst.binop.lhs);
-			const char *rhs = valueName(c, inst.binop.rhs);
-			fprintf(c->out, "cmp %s, %s\n"
+			fprintf(c->out, " cmp %s, %s\n"
 			     " setle al\n"
-			     " movzx %s, al	; less than or equals", lhs, rhs, storageName(c, slot));
-			c->storage.ptr[i] = slot;
+			     " movzx rsi, al\n"
+			     " mov %s, %s\n",
+			     loadTo(c, RAX, inst.binop.lhs),
+			     valueName(c, inst.binop.rhs),
+			     valueName(c, i),
+			     registerSized(RSI, inst.size));
 		} break;
 		case Ir_Equals: {
-			Storage slot = regalloc(next_used_registers, I64, i);
-			const char *lhs = valueName(c, inst.binop.lhs);
-			const char *rhs = valueName(c, inst.binop.rhs);
-			fprintf(c->out, "cmp %s, %s\n"
+			fprintf(c->out, " cmp %s, %s\n"
 			     " sete al\n"
-			     " movzx %s, al	; less than or equals", lhs, rhs, storageName(c, slot));
-			c->storage.ptr[i] = slot;
-		} break;
-		case Ir_Access: {
-			Storage slot = regalloc(next_used_registers, inst.size, i);
-
-			fprintf(stderr, "TODO Access");
-
-			c->storage.ptr[i] = slot;
+			     " movzx rsi, al\n"
+			     " mov %s, %s\n",
+			     loadTo(c, RAX, inst.binop.lhs),
+			     valueName(c, inst.binop.rhs),
+			     valueName(c, i),
+			     registerSized(RSI, inst.size));
 		} break;
 		case Ir_Truncate: {
-			Storage slot = regalloc(next_used_registers, inst.size, i);
-
-			Inst src = c->ir.ptr[inst.unop];
-			assert(src.size >= inst.size);
-			// STYLE Much hackyness
-			const char *src_name;
-			if (src.kind == Ir_Constant || src.kind == Ir_Reloc) {
-				src_name = valueName(c, inst.unop);
-			} else {
-				Storage src_storage = storageSized(c->storage.ptr[inst.unop], inst.size);
-				src_name = storageName(c, src_storage);
-			}
-
-			fprintf(c->out, "mov %s, %s", storageName(c, slot), src_name);
-			c->storage.ptr[i] = slot;
+			const char *reg = registerSized(RAX, c->ir.ptr[i].size);
+			fprintf(c->out, " mov %s, %s\n", reg, valueName(c, inst.unop));
+			fprintf(c->out, " mov %s %s, %s\n", sizeOp(c->ir.ptr[i].size), valueName(c, i), reg);
 		} break;
 		case Ir_SignExtend: {
-			Storage slot = regalloc(next_used_registers, inst.size, i);
-
-			fprintf(c->out, "movsx %s, %s", storageName(c, slot), valueName(c, inst.unop));
-			c->storage.ptr[i] = slot;
+			const char *reg = registerSized(RSI, inst.size);
+			fprintf(c->out, " movsx%s %s, %s %s\n mov %s, %s\n",
+				(valueSize(c, inst.unop) > 2 ? "d" : ""), reg, sizeOp(valueSize(c, inst.unop)), valueName(c, inst.unop),
+				valueName(c, i), reg);
 		} break;
 		case Ir_ZeroExtend: {
-			Storage slot = regalloc(next_used_registers, inst.size, i);
+			fprintf(c->out, " xor rax, rax\n mov %s, %s\n mov %s, %s\n",
+				registerSized(RAX, valueSize(c, inst.unop)),  valueName(c, inst.unop),
+				valueName(c, i), registerSized(RAX, inst.size));
+		} break;
 
-			fprintf(c->out, "movzx %s, %s", storageName(c, slot), valueName(c, inst.unop));
-			c->storage.ptr[i] = slot;
-		} break;
-		case Ir_StackAlloc: {
-			Storage slot = regalloc(next_used_registers, I64, i);
-			fprintf(c->out, "lea %s, [rsp+%d]	; alloc", storageName(c, slot), inst.alloc.known_offset);
-			c->storage.ptr[i] = slot;
-		} break;
 		case Ir_Store: {
-			if (isSpilled(c->storage.ptr[i])) {
-				fprintf(stderr, "TODO stack spillage");
-			} else {
-				const char *dest = valueName(c, inst.binop.lhs);
-				const char *src = valueName(c, inst.binop.rhs);
-				fprintf(c->out, "mov %s [%s], %s	; store", sizeOp(valueSize(c, inst.binop.rhs)), dest, src);
-			}
+			copyTo(c, loadTo(c, RAX, inst.binop.lhs), 0, "rsp", c->storage.ptr[inst.binop.rhs], inst.size);
 		} break;
 		case Ir_Load: {
-			if (isSpilled(c->storage.ptr[i])) {
-				fprintf(stderr, "TODO stack spillage");
-			} else {
-				Storage slot = regalloc(next_used_registers, I64, i);
-				fprintf(c->out, "mov %s, [%s]	; load", storageName(c, slot), valueName(c, inst.unop));
-				c->storage.ptr[i] = slot;
-			}
+			copyTo(c, "rsp", c->storage.ptr[i], loadTo(c, RAX, inst.unop), 0, inst.size);
+		} break;
+		case Ir_Access: {
+			copyTo(c, "rsp", c->storage.ptr[i],
+				"rsp", c->storage.ptr[inst.binop.lhs] + inst.binop.lhs, inst.size);
 		} break;
 		case Ir_Parameter: {
-			u8 reg = parameter_regs[parameters_found];
-			if (parameters_found == 2) {
-				// rdx must be available for intermediate storage
-				fprintf(c->out, "mov rbx, rdx");
-				reg = RBX;
+			if (!isMemory(inst.size)) {
+				assert(parameters_found < parameter_regs_count);
+
+				bool bigg = inst.size > 8;
+				u32 sizea = bigg ? 8 : inst.size;
+				fprintf(c->out, " mov [rsp+%lu], %s	; param\n", (ulong) c->storage.ptr[i],
+					registerSized(parameter_regs[parameters_found], sizea));
+				parameters_found++;
+				if (bigg) {
+					assert(parameters_found < parameter_regs_count);
+					fprintf(c->out, " mov [rsp+%lu], %s	; param\n", (ulong) c->storage.ptr[i] + 8,
+						registerSized(parameter_regs[parameters_found], inst.size - sizea));
+					parameters_found++;
+				}
 			}
-			c->storage.ptr[i] = reg + storageSize(inst.size);
-			next_used_registers[storageUnsized(reg)] = i;
-			parameters_found++;
 		} break;
-		case Ir_Phi: {
-			assert(!"TODO codegen phi");
+		case Ir_Constant:
+			fprintf(c->out, " mov %s %s, %llu\n", sizeOp(inst.size),
+					valueName(c, i), (ullong) inst.constant);
+			break;
+		case Ir_StackAlloc:
+			fprintf(c->out, " mov %s %s, %lu	; alloc\n", sizeOp(inst.size),
+					valueName(c, i), (ulong) inst.alloc.known_offset);
+			break;
+		case Ir_Reloc:
+			assert(inst.size == 8);
+			fprintf(c->out, " mov qword %s, ", valueName(c, i));
+			String name = c->module.ptr[inst.reloc.id].name;
+			if (name.len)
+				fprintf(c->out, "_%.*s", STRING_PRINTAGE(name));
+			else
+				fprintf(c->out, "__%lu", (ulong) inst.reloc.id);
+			fprintf(c->out, "%+lld\n", (long long) inst.reloc.offset);
+			break;
+		case Ir_PhiOut: {
+			if (inst.phi_out.on_true != IR_REF_NONE) {
+				copyTo(c, "rsp", c->storage.ptr[inst.phi_out.on_true],
+					"rsp", c->storage.ptr[inst.phi_out.source],
+					valueSize(c, inst.phi_out.source));
+			}
+			if (inst.phi_out.on_false != IR_REF_NONE)
+				PUSH(false_phis, i);
 		} break;
+		case Ir_PhiIn: break;
+		case Ir_StackDealloc: break;
 		case Ir_IntToFloat:
 		case Ir_FloatToInt: {
 			assert(!"TODO codegen float stuff");
 		} break;
-		case Ir_Constant:
-		case Ir_Reloc:
-		case Ir_StackDealloc:
-			memcpy(c->used_registers, next_used_registers, sizeof(next_used_registers));
-			continue;
 		case Ir_Call: {
-// 			u16 stack_param_allocated = 0;
-// 			u16 stack_offsets[CALLER_SAVED_COUNT];
-
-			for (u8 r = 0; r < CALLER_SAVED_COUNT; r++) {
-				u8 reg = caller_saved[r];
-				IrRef inst = c->used_registers[reg];
-				if (inst == IR_REF_NONE || isSpilled(c->storage.ptr[inst]))
-					continue;
-// 				stack_offsets[r] = stack_param_allocated;
-				fprintf(c->out, "push %s\n ", storageName(c, c->storage.ptr[inst]));
-// 				stack_param_allocated += c->ir.ptr[inst].size;
-			}
-			Storage slot = regalloc(next_used_registers, I64, i);
 			ValuesSpan params = inst.call.parameters;
 
+			u32 param_slot = 0;
 			for (u32 p = 0; p < params.len; p++) {
-				u8 r = storageSized(parameter_regs[p], valueSize(c, params.ptr[p]));
-				fprintf(c->out, "mov %s, %s\n ", register_names[r], valueName(c, params.ptr[p]));
-			}
-			fprintf(c->out, "call %s\n ", valueName(c, inst.call.function_ptr));
+				assert(param_slot < parameter_regs_count);
+				u16 sz = valueSize(c, params.ptr[p]);
+				assert(!isMemory(sz));
 
-			for (i8 r = CALLER_SAVED_COUNT - 1; r >= 0; r--) {
-				u8 reg = caller_saved[r];
-				IrRef inst = c->used_registers[reg];
-				if (inst == IR_REF_NONE || isSpilled(c->storage.ptr[inst]))
-					continue;
-				fprintf(c->out, "pop %s\n ", storageName(c, c->storage.ptr[inst]));
-// 				stack_param_allocated -= c->ir.ptr[inst].size;
+				bool bigg = sz > 8;
+				u32 sza = bigg ? 8 : sz;
+				fprintf(c->out, "  mov %s, [rsp+%lu]\n",
+					registerSized(parameter_regs[param_slot], sza),
+					(ulong) c->storage.ptr[i]);
+				param_slot++;
+				if (bigg) {
+					assert(param_slot < parameter_regs_count);
+					fprintf(c->out, "  mov %s, [rsp+%lu]\n",
+						registerSized(parameter_regs[param_slot], sz - sza),
+						(ulong) c->storage.ptr[i] + 8);
+					param_slot++;
+				}
 			}
-			fprintf(c->out, "mov %s, rax", storageName(c, slot));
-			c->storage.ptr[i] = slot;
+			fprintf(c->out, "  call qword %s\n", valueName(c, inst.call.function_ptr));
+			fprintf(c->out, "  mov %s, %s\n", valueName(c, i),
+				registerSized(RAX, inst.size));
 		} break;
 		}
-
-		fprintf(c->out, "\n ");
-
-		memcpy(c->used_registers, next_used_registers, sizeof(next_used_registers));
 	}
 
 	Exit exit = block->exit;
@@ -561,50 +551,59 @@ static void emitBlock(Codegen *c, Block *block) {
 		if (exit.unconditional->visited)
 			emitJump(c->out, "jmp", exit.unconditional);
 
-		emitBlock(c, exit.unconditional);
+		emitBlockForward(c, exit.unconditional);
 		break;
 	case Exit_Branch: {
 		const char *condition = valueName(c, exit.branch.condition);
-		fprintf(c->out, "test %s, -1\n", condition);
+		fprintf(c->out, " test dword %s, -1\n", condition);
 		emitJump(c->out, "jnz", exit.branch.on_true);
 
+
+		for (u32 k = 0; k < false_phis.len; k++) {
+			Inst inst  = c->ir.ptr[false_phis.ptr[k]];
+			fprintf(c->out, " mov %s, %s	; phi-out\n",
+				valueName(c, inst.phi_out.on_false),
+				loadTo(c, RAX, inst.phi_out.source));
+		}
 		if (exit.branch.on_false->visited)
 			emitJump(c->out, "jmp", exit.branch.on_false);
 
-		emitBlock(c, exit.branch.on_false);
-		emitBlock(c, exit.branch.on_true);
+		emitBlockForward(c, exit.branch.on_false);
+		emitBlockForward(c, exit.branch.on_true);
 	} break;
 	case Exit_Return:
-		if (exit.ret != IR_REF_NONE)
-			fprintf(c->out, "mov %s, %s\n ",
-					storageName(c, storageSized(RAX, valueSize(c, exit.ret))),
-					valueName(c, exit.ret));
-		fprintf(c->out, "add rsp, %llu	; return\n pop r15\n pop r14\n pop r13\n pop r12\n pop rbx\n ret\n\n", (unsigned long long) c->stack_allocated);
+		if (exit.ret != IR_REF_NONE) {
+			if (c->is_memory_return) {
+				copyTo(c, "r15", 0, "rsp", c->storage.ptr[exit.ret], valueSize(c, exit.ret));
+				fprintf(c->out, " mov rax, r15\n");
+			} else {
+				u32 ret_size = valueSize(c, exit.ret);
+				if (ret_size > 8) {
+					assert(!"TODO !!Big returns!!");
+				} else {
+					fprintf(c->out, " mov %s, %s\n",
+							registerSized(RAX, ret_size),
+							valueName(c, exit.ret));
+				}
+			}
+		}
+		fprintf(c->out, " ret %lu\n\n", (ulong) c->stack_allocated);
 		break;
 	case Exit_None: unreachable;
 	}
+
+	free(false_phis.ptr);
 }
 
 static void emitJump(FILE *out, const char *inst, const Block *dest) {
-	fprintf(out, " %s .%.*s%p\n\n", inst, STRING_PRINTAGE(dest->label), (void *) dest);
+	fprintf(out, " %s .%.*s%u\n\n", inst, STRING_PRINTAGE(dest->label), (u32) (intptr_t) dest);
 }
 
-static Storage regalloc(IrRef next_used_registers[GENERAL_PURPOSE_REGS_END], u16 size, IrRef inst) {
-	for (u32 i = 0; i < GENERAL_PURPOSE_REGS_END; i++) {
-		if (next_used_registers[i] == IR_REF_NONE) {
-			next_used_registers[i] = inst;
-			return i + storageSize(size);
-		}
-	}
-	fprintf(stderr, "Cannot spill registers yet.");
-	return 0;
-}
+// static bool isSpilled(Storage s) {
+// 	return s >= STACK_BEGIN;
+// }
 
-static bool isSpilled(Storage s) {
-	return s >= STACK_BEGIN;
-}
-
-static inline Storage storageSize(u16 size) {
+static inline Storage registerSize(u16 size) {
 	if (size == 1)
 		return RSIZE_BYTE;
 	if (size == 2)
@@ -617,16 +616,8 @@ static inline Storage storageSize(u16 size) {
 }
 
 
-static inline Storage storageSized(Storage stor, u16 size) {
-	if (stor >= STACK_BEGIN)
-		return stor;
-	return (stor & ~RSIZE_MASK) | storageSize(size);
-}
-
-static inline Storage storageUnsized(Storage stor) {
-	if (stor >= STACK_BEGIN)
-		return stor;
-	return stor & ~RSIZE_MASK;
+static inline const char *registerSized(Register stor, u16 size) {
+	return register_names[(stor & ~RSIZE_MASK) | registerSize(size)];
 }
 
 static const char *sizeOp(u16 size) {
@@ -645,44 +636,18 @@ static u16 valueSize(Codegen *c, IrRef ref) {
 	return c->ir.ptr[ref].size;
 }
 
+static bool isMemory(u16 size) {
+	return size > 16;
+}
+
 static const char *valueName(Codegen *c, IrRef ref) {
-	Inst inst = c->ir.ptr[ref];
-	const int max_num_chars = 24;
-	if (inst.kind == Ir_Constant) {
-		char *name = aalloc(c->arena, max_num_chars);
-		snprintf(name, max_num_chars, "%llu", (unsigned long long) inst.constant);
-		return name;
-	} else if (inst.kind == Ir_Reloc) {
-		String name = c->module.ptr[inst.reloc.id].name;
-		char *term;
-		if (name.len) {
-			term = aalloc(c->arena, name.len + max_num_chars);
-			term[0] = '_';
-			memcpy(term+1, name.ptr, name.len);
-			term[name.len+1] = 0;
-		} else {
-			term = aalloc(c->arena, max_num_chars * 2);
-			snprintf(term, max_num_chars, "__%lu", (unsigned long) inst.reloc.id);
-		}
-		snprintf(term + strlen(term), max_num_chars, "%+lld", (long long) inst.reloc.offset);
-		return term;
-	}
+	assert(ref != IR_REF_NONE);
 	return storageName(c, c->storage.ptr[ref]);
 }
 
-static inline u32 storageStackOffset(Storage s) {
-	return s - STACK_BEGIN;
-}
-
-static inline Storage stackOffsetStorage(u16 offset) {
-	return STACK_BEGIN + offset;
-}
-
+#define BUF 100
+static char buf[BUF] = {0};
 static const char *storageName(Codegen *c, Storage store) {
-	if (isSpilled(store)) {
-		char *name = aalloc(c->arena, 32);
-		snprintf(name, 32, "[rsp+%lu]", (unsigned long) storageStackOffset(store));
-		return name;
-	}
-	return register_names[store];
+	snprintf(buf, BUF, "[rsp+%lu]", (ulong) store);
+	return adupez(c->arena, buf);
 }

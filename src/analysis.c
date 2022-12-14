@@ -24,10 +24,11 @@ void calcLifetimes(IrList ir, ValuesSpan lastuses) {
 		case Ir_BitNot:
 			uses[inst.unop] = i;
 			break;
-		case Ir_Phi:
-			for (u32 p = 0; p < inst.phi.len; p++) {
-				uses[inst.phi.ptr[p]] = i;
-			}
+		case Ir_PhiIn:
+		case Ir_PhiOut:
+// 			for (u32 p = 0; p < inst.phi.len; p++) {
+// 				uses[inst.phi.ptr[p]] = i;
+// 			}
 			break;
 		case Ir_Call:
 			uses[inst.call.function_ptr] = i;

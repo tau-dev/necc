@@ -393,7 +393,7 @@ static Value parseExprBitOr(Parse *);
 static Value parseExprBitXor(Parse *);
 static Value parseExprBitAnd(Parse *);
 static Value parseExprEquality (Parse *);
-static Value parseExprGreaterLess(Parse *);
+static Value parseExprComparison(Parse *);
 static Value parseExprAddition(Parse *);
 static Value parseExprMultiplication(Parse *);
 static Value parseExprLeftUnary(Parse *);
@@ -402,7 +402,7 @@ static Value parseExprBase(Parse *);
 // TODO The order of parameters here is inconsistent.
 static void parseStructInitializer(Parse *, InitializationDest);
 static IrRef coerce(Value v, Type t, Parse *, const Token *);
-static IrRef toBoolean(Value v, Parse *, const Token *);
+static IrRef toBoolean(Parse *, Value v, const Token *);
 static IrRef coercerval(Value v, Type t, Parse *, const Token *, bool allow_casts);
 static Value immediateIntVal(Parse *, Type typ, u64 val);
 static void requiresVersion(Parse *, const char *desc, Version);
@@ -427,6 +427,7 @@ void parseFunction (Parse *parse, String func_name) {
 		},
 		.decl_location = parse->pos,
 		.def_kind = Static_Variable,
+		.def_state = Def_Defined,
 		.value_data = {func_name.len+1, terminated},
 	}));
 	bool is_new;
@@ -558,7 +559,7 @@ static void parseStatement (Parse *parse, bool *had_non_declaration) {
 		expect(parse, Tok_OpenParen);
 		Value condition = parseExpression(parse);
 		expect(parse, Tok_CloseParen);
-		genBranch(build, toBoolean(condition, parse, primary));
+		genBranch(build, toBoolean(parse, condition, primary));
 
 		head->exit.branch.on_true = startNewBlock(build, parse->code_arena, zString("while_body_"));
 		parseStatement(parse, had_non_declaration);
@@ -573,11 +574,13 @@ static void parseStatement (Parse *parse, bool *had_non_declaration) {
 		expect(parse, Tok_OpenParen);
 		Value condition = parseExpression(parse);
 		expect(parse, Tok_CloseParen);
-		genBranch(build, toBoolean(condition, parse, primary));
+		genBranch(build, toBoolean(parse, condition, primary));
 
 		Block *head = build->insertion_block;
 		head->exit.branch.on_true = startNewBlock(build, parse->code_arena, zString("if_true_"));
 		parseStatement(parse, had_non_declaration);
+		Block *on_true = build->insertion_block;
+		genJump(build, NULL);
 
 		Block *join = newBlock(parse->code_arena, zString("if_join_"));
 
@@ -590,6 +593,7 @@ static void parseStatement (Parse *parse, bool *had_non_declaration) {
 			head->exit.branch.on_false = join;
 			startBlock(build, join);
 		}
+		on_true->exit.unconditional = join;
 	} break;
 	case Tok_Key_Goto: {
 		// TODO Check: "A goto statement shall not jump from outside the
@@ -769,18 +773,24 @@ static Value parseExprElvis (Parse *parse) {
 		genBranch(build, rvalue(cond, parse).inst);
 		head->exit.branch.on_true = startNewBlock(build, parse->code_arena, STRING_EMPTY);
 		Value lhs = rvalue(parseExprAssignment(parse), parse);
+		IrRef src_l = genPhiOut(build, lhs.inst);
 		expect(parse, Tok_Colon);
+
 		head->exit.branch.on_false = startNewBlock(build, parse->code_arena, STRING_EMPTY);
 		Value rhs = rvalue(parseExprOr(parse), parse);
+		IrRef src_r = genPhiOut(build, rhs.inst);
 		genJump(build, NULL);
+
 		if (!typeCompatible(lhs.typ, rhs.typ))
 			parseerror(parse, primary, "(TODO phrasing) (TODO join arithmetic types) Types are not compatible");
 		Block *join = newBlock(parse->code_arena, STRING_EMPTY);
 		genJump(build, join);
 		head->exit.branch.on_true->exit.unconditional = join;
 
-		IrRef phi_targets[] = {lhs.inst, rhs.inst, IR_REF_NONE};
-		cond = (Value) {BASIC_INT, genPhi(build, parse->code_arena, phi_targets, typeSize(lhs.typ, &parse->target))};
+		IrRef dest = genPhiIn(build, typeSize(lhs.typ, &parse->target));
+		setPhiOut(build, src_l, dest, IR_REF_NONE);
+		setPhiOut(build, src_r, dest, IR_REF_NONE);
+		cond = (Value) {lhs.typ, dest};
 	}
 	return cond;
 }
@@ -789,30 +799,25 @@ static Value parseExprOr (Parse *parse) {
 	Value lhs = parseExprAnd(parse);
 	const Token *primary = parse->pos;
 	if (tryEat(parse, Tok_DoublePipe)) {
-		if (lhs.typ.kind != Kind_Basic)
-			parseerror(parse, primary, "operators to %s must be scalar types, a left-hand-side value of type %s is not allowed",
-					tokenName(Tok_DoublePipe), printTypeHighlighted(&parse->arena, lhs.typ));
 		const u16 int_size = typeSize(BASIC_INT, &parse->target);
 		IrBuild *build = &parse->build;
 		Block *head = build->insertion_block;
 
-		IrRef constant = genImmediateInt(build, 1, int_size);
-		genBranch(build, rvalue(lhs, parse).inst);
+		IrRef constant = genPhiOut(build, genImmediateInt(build, 1, int_size));
+		genBranch(build, toBoolean(parse, lhs, primary));
 		head->exit.branch.on_false = startNewBlock(build, parse->code_arena, STRING_EMPTY);
 
 		Value rhs = parseExprOr(parse);
-		if (rhs.typ.kind != Kind_Basic)
-			parseerror(parse, primary, "operators to %s must be scalar types, a right-hand-side value of type %s is not allowed",
-					tokenName(Tok_DoublePipe), printTypeHighlighted(&parse->arena, rhs.typ));
-		u32 rhs_size = typeSize(rhs.typ, &parse->target);
-		IrRef zero = genImmediateInt(build, 0, rhs_size);
-		IrRef cmp = genNot(build, genEquals(build, rvalue(rhs, parse).inst, zero, rhs_size));
+
+		IrRef rhs_val = genPhiOut(build, toBoolean(parse, rhs, primary));
 		Block *join = newBlock(parse->code_arena, STRING_EMPTY);
 		genJump(build, join);
 		head->exit.branch.on_true = join;
+		IrRef res = genPhiIn(build, int_size);
 
-		IrRef phi_targets[] = {constant, cmp, IR_REF_NONE};
-		lhs = (Value) {BASIC_INT, genPhi(build, parse->code_arena, phi_targets, int_size)};
+		setPhiOut(build, constant, res, IR_REF_NONE);
+		setPhiOut(build, rhs_val, res, IR_REF_NONE);
+		lhs = (Value) {BASIC_INT, res};
 	}
 	return lhs;
 }
@@ -822,30 +827,25 @@ static Value parseExprAnd (Parse *parse) {
 	Value lhs = parseExprBitOr(parse);
 	const Token *primary = parse->pos;
 	if (tryEat(parse, Tok_DoublePipe)) {
-		if (lhs.typ.kind != Kind_Basic)
-			parseerror(parse, primary, "operators to %s must be scalar types, a left-hand-side value of type %s is not allowed",
-					tokenName(Tok_DoubleAmpersand), printTypeHighlighted(&parse->arena, lhs.typ));
 		const u16 int_size = typeSize(BASIC_INT, &parse->target);
 		IrBuild *build = &parse->build;
 		Block *head = build->insertion_block;
 
-		IrRef constant = genImmediateInt(build, 0, int_size);
-		genBranch(build, rvalue(lhs, parse).inst);
+		IrRef constant = genPhiOut(build, genImmediateInt(build, 0, int_size));
+		genBranch(build, toBoolean(parse, lhs, primary));
 		head->exit.branch.on_true = startNewBlock(build, parse->code_arena, STRING_EMPTY);
 
-		Value rhs = parseExprAnd(parse);
-		if (rhs.typ.kind != Kind_Basic)
-			parseerror(parse, primary, "operators to %s must be scalar types, a right-hand-side value of type %s is not allowed",
-					tokenName(Tok_DoubleAmpersand), printTypeHighlighted(&parse->arena, rhs.typ));
-		u32 rhs_size = typeSize(rhs.typ, &parse->target);
-		IrRef zero = genImmediateInt(build, 0, rhs_size);
-		IrRef cmp = genNot(build, genEquals(build, rvalue(rhs, parse).inst, zero, rhs_size));
+		Value rhs = parseExprOr(parse);
+
+		IrRef rhs_val = genPhiOut(build, toBoolean(parse, rhs, primary));
 		Block *join = newBlock(parse->code_arena, STRING_EMPTY);
 		genJump(build, join);
 		head->exit.branch.on_false = join;
+		IrRef res = genPhiIn(build, int_size);
 
-		IrRef phi_targets[] = {constant, cmp, IR_REF_NONE};
-		lhs = (Value) {BASIC_INT, genPhi(build, parse->code_arena, phi_targets, int_size)};
+		setPhiOut(build, constant, IR_REF_NONE, res);
+		setPhiOut(build, rhs_val, res, IR_REF_NONE);
+		lhs = (Value) {BASIC_INT, res};
 	}
 	return lhs;
 }
@@ -889,7 +889,7 @@ static Value parseExprBitAnd (Parse *parse) {
 
 static Value parseExprEquality (Parse *parse) {
 	IrBuild *build = &parse->build;
-	Value lhs = parseExprGreaterLess(parse);
+	Value lhs = parseExprComparison(parse);
 
 	switch (parse->pos->kind) {
 	case Tok_DoubleEquals:
@@ -897,7 +897,7 @@ static Value parseExprEquality (Parse *parse) {
 		const Token *primary = parse->pos;
 		parse->pos++;
 		lhs = rvalue(lhs, parse);
-		Value rhs = rvalue(parseExprGreaterLess(parse), parse);
+		Value rhs = rvalue(parseExprComparison(parse), parse);
 		if (lhs.typ.kind == Kind_Pointer && lhs.typ.kind == Kind_Pointer) {
 			if (!lhs.typ.pointer->kind == Kind_Void &&
 				!rhs.typ.pointer->kind == Kind_Void &&
@@ -920,38 +920,37 @@ static Value parseExprEquality (Parse *parse) {
 	}
 }
 
-static Value parseExprGreaterLess (Parse *parse) {
+static Value parseExprComparison (Parse *parse) {
 	IrBuild *build = &parse->build;
 	Value lhs = parseExprAddition(parse);
-
-	switch (parse->pos->kind) {
-	case Tok_Less: {
-		parse->pos++;
-		lhs = rvalue(lhs, parse);
-		Value rhs = rvalue(parseExprAddition(parse), parse);
-		arithmeticConversions(parse, &lhs, &rhs);
-		return (Value) { BASIC_INT, genLessThan(build, lhs.inst, rhs.inst, typeSize(BASIC_INT, &parse->target)) };
-	}
-	case Tok_LessEquals: {
-		parse->pos++;
-		lhs = rvalue(lhs, parse);
-		Value rhs = rvalue(parseExprAddition(parse), parse);
-		arithmeticConversions(parse, &lhs, &rhs);
-		return (Value) { BASIC_INT, genLessThanOrEquals(build, lhs.inst, rhs.inst, typeSize(BASIC_INT, &parse->target)) };
-	}
-	case Tok_Greater: {
-		parse->pos++;
-		lhs = rvalue(lhs, parse);
-		Value rhs = rvalue(parseExprAddition(parse), parse);
-		arithmeticConversions(parse, &lhs, &rhs);
-		return (Value) { BASIC_INT, genLessThan(build, rhs.inst, lhs.inst, typeSize(BASIC_INT, &parse->target)) };
-	}
+	const Token *primary = parse->pos;
+	switch (primary->kind) {
+	case Tok_Less:
+	case Tok_LessEquals:
+	case Tok_Greater:
 	case Tok_GreaterEquals: {
 		parse->pos++;
 		lhs = rvalue(lhs, parse);
 		Value rhs = rvalue(parseExprAddition(parse), parse);
-		arithmeticConversions(parse, &lhs, &rhs);
-		return (Value) { BASIC_INT, genLessThan(build, rhs.inst, lhs.inst, typeSize(BASIC_INT, &parse->target)) };
+		if (lhs.typ.kind == Kind_Pointer && rhs.typ.kind == Kind_Pointer) {
+			;
+		} else if (lhs.typ.kind == Kind_Pointer) {
+			parseerror(parse, primary, "can not compare a pointer with an %s", printTypeHighlighted(&parse->arena, rhs.typ));
+		} else if (rhs.typ.kind == Kind_Pointer) {
+			parseerror(parse, primary, "can not compare a pointer with an %s", printTypeHighlighted(&parse->arena, lhs.typ));
+		} else {
+			arithmeticConversions(parse, &lhs, &rhs);
+		}
+		u16 size = typeSize(BASIC_INT, &parse->target);
+		IrRef res;
+		switch (primary->kind) {
+		case Tok_Less: res = genLessThan(build, lhs.inst, rhs.inst, size); break;
+		case Tok_LessEquals: res = genLessThanOrEquals(build, lhs.inst, rhs.inst, size); break;
+		case Tok_Greater: res = genLessThan(build, rhs.inst, lhs.inst, size); break;
+		case Tok_GreaterEquals: res = genLessThanOrEquals(build, rhs.inst, lhs.inst, size); break;
+		default: unreachable;
+		}
+		return (Value) { BASIC_INT, res };
 	}
 	default:
 		return lhs;
@@ -2195,11 +2194,14 @@ static IrRef coerce (Value v, Type t, Parse *p, const Token *primary) {
 	return coercerval(rvalue(v, p), t, p, primary, false);
 }
 
-static IrRef toBoolean(Value v, Parse *p, const Token *primary) {
+static IrRef toBoolean(Parse *p, Value v, const Token *primary) {
+	IrBuild *build = &p->build;
 	if (v.typ.kind != Kind_Basic)
 		parseerror(p, primary, "(TODO Explain this better) expected an expression of scalar type");
 
-	return coerce(v, BASIC_INT, p, primary);
+	u32 size = typeSize(v.typ, &p->target);
+	IrRef zero = genImmediateInt(build, 0, size);
+	return genNot(build, genEquals(build, rvalue(v, p).inst, zero, typeSize(BASIC_INT, &p->target)));
 }
 
 // Performs implicit conversions on rvalues.

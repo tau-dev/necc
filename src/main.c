@@ -23,6 +23,8 @@ typedef enum {
 	F_Crashing,
 	F_Debug,
 	F_Include,
+	F_StdInc,
+	F_NoStdInc,
 	F_EmitIr,
 	F_EmitAssembly,
 } Flag;
@@ -38,6 +40,8 @@ static Name flags[] = {
 	{"std", F_Standard},
 	{"crash", F_Crashing},
 	{"I", F_Include},
+	{"stdinc", F_StdInc},
+	{"nostdinc", F_NoStdInc},
 	{"ir", F_EmitIr},
 	{"as", F_EmitAssembly},
 	{0}
@@ -52,13 +56,12 @@ const char *help_string = "Usage:\n"
 	" -g, -debug      Emit debug information (TODO).\n"
 	" -std <version>  Select the used version of the C standard. Options:\n"
 	"                   c89, c99, c11/c17, c23/latest, gnu, ms, lax.\n"
-	"                   Default: lax.\n"
 	" -I <path>       Add <path> as an include directory.\n"
 	" -stdinc <path>  Add <path> as a standard library headers include directory.\n"
 	" -D <def>        Define a preprocessor macro. <def> may be a name, which will be defined as ‘1’, or a name followed by ‘=’ and the intended replacement list.\n"
 	" -nostdinc       Disable standard include paths.\n"
-	" -nostdlib       Do not link to the standard library.\n"
-	" -simple-types   Print types (in definition lists or error messages) in an easier-to-parse left-to-right syntax. (TODO)\n"
+	" -nostdlib       Do not link to the standard library. (TODO)\n"
+	" -simple-types   Print types (in declaration lists or error messages) in an easier-to-parse left-to-right syntax. (TODO)\n"
 	"\n"
 	"The following output options write to stdout by default, or may be followed by ‘=<FILNAME>’ to specify an output file. Default: ‘-as’.\n"
 	" -o, -out        Generate an executable. (TODO)\n"
@@ -103,7 +106,7 @@ static i32 find(const char *str, const Name *names) {
 }
 
 
-void emitX64AsmSimple(FILE *out, Arena *arena, Module module);
+void emitX64AsmSimple(FILE *out, Arena *arena, Module module, const Target *target);
 
 bool had_output = false;
 static const char *stdout_marker = "<stdout>";
@@ -154,14 +157,10 @@ int main (int argc, char **args) {
 	Arena arena = create_arena(16 * 1024);
 	const char *assembly_out = NULL;
 	const char *ir_out = NULL;
-
-	String sys_paths[] = {
-		zString("musl/arch/x86_64/"),
-		zString("musl/obj/include/"),
-		zString("musl/include/"),
-	};
+	bool stdinc = true;
 
 	LIST(String) user_paths = {0};
+	LIST(String) sys_paths = {0};
 
 
 	Options opt = {
@@ -202,6 +201,11 @@ int main (int argc, char **args) {
 				i++;
 				PUSH(user_paths, checkIncludePath(&arena, args[i]));
 				break;
+			case F_StdInc:
+				i++;
+				PUSH(sys_paths, checkIncludePath(&arena, args[i]));
+				break;
+			case F_NoStdInc: stdinc = false; break;
 			case F_Unknown:
 				fprintf(stderr, "%swarning: %sIgnoring unknown flag %s\n", YELLOW, RESET, args[i]);
 			}
@@ -221,10 +225,16 @@ int main (int argc, char **args) {
 		if (input.ptr[i] == '/')
 			break;
 	}
+
+	if (stdinc) {
+		PUSH(sys_paths, zString(MUSL_DIR "/arch/x86_64/"));
+		PUSH(sys_paths, zString(MUSL_DIR "/obj/include/"));
+		PUSH(sys_paths, zString(MUSL_DIR "/include/"));
+	}
 	PUSH(user_paths, ((String){i+1, input.ptr}));
 
 	Paths paths = {
-		.sys_include_dirs = ARRAY_SPAN(sys_paths),
+		.sys_include_dirs = {sys_paths.len, sys_paths.ptr},
 		.user_include_dirs = {user_paths.len, user_paths.ptr},
 	};
 
@@ -275,7 +285,7 @@ int main (int argc, char **args) {
 	}
 
 	if (assembly_out)
-		emitX64AsmSimple(openOut(assembly_out), &arena, module);
+		emitX64AsmSimple(openOut(assembly_out), &arena, module, &target_x64_linux_gcc);
 
 
 #ifndef NDEBUG

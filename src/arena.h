@@ -14,6 +14,8 @@ typedef struct Arena {
 
 Arena create_arena(size_t block_size);
 void *aalloc(Arena*, size_t size);
+char *adupe(Arena*, String s);
+char *adupez(Arena*, const char *s);
 void free_arena(Arena*);
 
 #define ALLOC(arena, type) ((type*) aalloc((arena), sizeof (type)))

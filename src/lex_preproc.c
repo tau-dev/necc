@@ -869,9 +869,8 @@ static bool expandInto (const ExpansionParams ex, Tokenization *dest, bool is_ar
 }
 
 // Allocates the argument list.
-// PERFOMANCE A single Tokenization for all pre-expansion should be
-// enough if expanded-buffer Replacements store offset and length.
-// Wait, is that the case?
+// PERFOMANCE A single Tokenization per argument list should be
+// enough if Replacements store offset and length.
 static Tokenization *takeArguments(const ExpansionParams ex, Macro *mac) {
 	assert(mac->is_function_like);
 	Tokenization *argument_bufs = calloc(mac->parameters.len, sizeof(Tokenization));
@@ -917,6 +916,7 @@ static MacroToken takeToken (const ExpansionParams ex, u32 *marker) {
 			repl->pos++;
 			if (t.parameter) {
 				if (t.tok.kind == Tok_PreprocDirective) {
+					// Stringify!
 					Tokenization arg = repl->toks[t.parameter-1];
 					u32 data_len = 0;
 					for (u32 i = 0; i < arg.count; i++) {

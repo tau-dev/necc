@@ -47,6 +47,17 @@ void *aalloc(Arena* arena, size_t size) {
 	return res;
 }
 
+char *adupe(Arena *arena, String s) {
+	char *d = aalloc(arena, s.len);
+	memcpy(d, s.ptr, s.len);
+	return d;
+}
+
+char *adupez(Arena *arena, const char *c) {
+	return adupe(arena, (String) {strlen(c)+1, c});
+}
+
+
 void free_arena(Arena* arena) {
 	while (arena->last_block != NULL) {
 		ArenaBlock *next = arena->last_block->next;

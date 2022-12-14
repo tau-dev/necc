@@ -153,6 +153,8 @@ IrRef genBitNot (IrBuild *build, IrRef a) {
 	if (inst[a].kind == Ir_Constant) {
 		i.kind = Ir_Constant;
 		i.constant = ~inst[a].constant;
+	} else if (inst[a].kind == Ir_BitNot) {
+		return inst[a].unop;
 	}
 	return append(build, i);
 }
@@ -296,18 +298,22 @@ IrRef genStore (IrBuild *build, IrRef dest, IrRef value) {
 	return store;
 }
 
-IrRef genPhi (IrBuild *build, Arena *arena, IrRef *insts, u16 size) {
-	IrRef *r = insts;
-	while (*r != IR_REF_NONE) r++;
-	u32 count = r - insts;
-	Inst inst = {Ir_Phi, size, .phi = ALLOCN(arena, IrRef, count)};
-	memcpy(inst.phi.ptr, insts, count * sizeof(insts[0]));
-	for (u32 i = 0; i < count; i++)
-		assert(build->ir.ptr[insts[i]].size == size);
-
-
-	return append(build, inst);
+IrRef genPhiIn (IrBuild *build, u16 size) {
+	return append(build, (Inst) {Ir_PhiIn, size});
 }
+
+
+IrRef genPhiOut (IrBuild *build, IrRef source) {
+	return append(build, (Inst) {Ir_PhiOut, build->ir.ptr[source].size, .phi_out = {source, IR_REF_NONE, IR_REF_NONE}});
+}
+
+void setPhiOut (IrBuild *build, IrRef phi, IrRef dest_true, IrRef dest_false) {
+	Inst *inst = &build->ir.ptr[phi];
+	assert(inst->kind == Ir_PhiOut);
+	inst->phi_out.on_true = dest_true;
+	inst->phi_out.on_false = dest_false;
+}
+
 
 void discardIrBuilder(IrBuild *builder) {
 	// TODO Free loose blocks
@@ -345,14 +351,14 @@ void printBlock (FILE *dest, Block *blk, IrList ir) {
 			}
 			fprintf(dest, ")\n");
 		} continue;
-		case Ir_Phi:
-			fprintf(dest, "phi ");
-			for (u32 i = 0; i < inst.phi.len; i++) {
-				fprintf(dest, "%lu", (ulong) inst.phi.ptr[i]); break;
-				if (i + 1 < inst.phi.len)
-					fprintf(dest, ", ");
-			}
+		case Ir_PhiOut:
+			fprintf(dest, "phi %lu ->%lu", (ulong) inst.phi_out.source, (ulong) inst.phi_out.on_true);
+			if (inst.phi_out.on_false != IR_REF_NONE)
+				fprintf(dest, " ->%lu", (ulong) inst.phi_out.on_false);
 			fprintf(dest, "\n");
+			continue;
+		case Ir_PhiIn:
+			fprintf(dest, "->phi");
 			continue;
 		case Ir_Parameter:
 			fprintf(dest, "param %lu\n", (ulong) inst.size);
