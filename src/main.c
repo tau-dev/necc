@@ -264,10 +264,11 @@ int main (int argc, char **args) {
 		StaticValue *val = &module.ptr[i];
 		if (opt_store_load && val->def_state == Def_Defined && val->def_kind == Static_Function) {
 			Blocks linearized = {0};
-			scheduleBlocksStraight(val->function_entry, &linearized, 3);
+			scheduleBlocksStraight(val->function_entry, &linearized);
 			innerBlockPropagate(val->function_ir, linearized);
-			resolveCopies(val->function_ir, linearized);
+			resolveCopies(val->function_ir);
 			decimateIr(&val->function_ir, linearized);
+// 			decimateIr(&val->function_ir, linearized);
 			free(linearized.ptr);
 		}
 	}

@@ -18,7 +18,6 @@
 
 static IrRef copyUsed (IrList source, IrRef i, IrList *dest, IrRef *relocs) {
 	if (relocs[i] != IR_REF_NONE) return relocs[i];
-	relocs[i] = 0;
 
 	Inst inst = source.ptr[i];
 	switch (inst.kind) {
@@ -29,6 +28,17 @@ static IrRef copyUsed (IrList source, IrRef i, IrList *dest, IrRef *relocs) {
 	UNOP_CASES:
 		copyUsed(source, inst.unop, dest, relocs);
 		break;
+	case Ir_Store:
+		if (inst.mem.ordered_after != IR_REF_NONE)
+			copyUsed(source, inst.mem.ordered_after, dest, relocs);
+		copyUsed(source, inst.mem.address, dest, relocs);
+		copyUsed(source, inst.mem.source, dest, relocs);
+		break;
+	case Ir_Load:
+		if (inst.mem.ordered_after != IR_REF_NONE)
+			copyUsed(source, inst.mem.ordered_after, dest, relocs);
+		copyUsed(source, inst.mem.address, dest, relocs);
+		break;
 	case Ir_StackAlloc:
 		copyUsed(source, inst.alloc.size, dest, relocs);
 		break;
@@ -36,6 +46,8 @@ static IrRef copyUsed (IrList source, IrRef i, IrList *dest, IrRef *relocs) {
 		copyUsed(source, inst.phi_out.source, dest, relocs);
 		break;
 	case Ir_Call:
+		if (inst.call.ordered_after != IR_REF_NONE)
+			copyUsed(source, inst.call.ordered_after, dest, relocs);
 		copyUsed(source, inst.call.function_ptr, dest, relocs);
 		ValuesSpan params = inst.call.parameters;
 		for (u32 p = 0; p < params.len; p++)
@@ -61,6 +73,14 @@ static void applyRelocs (IrList ir, IrRef i, IrRef *relocs) {
 	UNOP_CASES:
 		inst->unop = relocs[inst->unop];
 		break;
+	case Ir_Store:
+		inst->mem.source = relocs[inst->mem.source];
+		FALLTHROUGH;
+	case Ir_Load:
+		inst->mem.address = relocs[inst->mem.address];
+		if (inst->mem.ordered_after != IR_REF_NONE)
+			inst->mem.ordered_after = relocs[inst->mem.ordered_after];
+		break;
 	case Ir_StackAlloc:
 		inst->alloc.size = relocs[inst->alloc.size];
 		break;
@@ -72,6 +92,8 @@ static void applyRelocs (IrList ir, IrRef i, IrRef *relocs) {
 			inst->phi_out.on_false = relocs[inst->phi_out.on_false];
 		break;
 	case Ir_Call:
+		if (inst->call.ordered_after != IR_REF_NONE)
+			inst->call.ordered_after = relocs[inst->call.ordered_after];
 		inst->call.function_ptr = relocs[inst->call.function_ptr];
 		ValuesSpan params = inst->call.parameters;
 		for (u32 p = 0; p < params.len; p++)
@@ -96,8 +118,16 @@ void decimateIr (IrList *ir, Blocks blocks) {
 		for (u32 j = 0; j < insts.len; j++)
 			insts.ptr[j] = copyUsed(*ir, insts.ptr[j], &out, relocs);
 
-		for (u32 j = 0; j < mems.len; j++)
-			mems.ptr[j] = relocs[mems.ptr[j]];
+		u32 dest_idx = 0;
+		for (u32 j = 0; j < mems.len; j++) {
+			assert(mems.ptr[j] != IR_REF_NONE);
+
+			if (relocs[mems.ptr[j]] != IR_REF_NONE) {
+				mems.ptr[dest_idx] = relocs[mems.ptr[j]];
+				dest_idx++;
+			}
+		}
+		blk->mem_instructions.len = dest_idx;
 
 		if (blk->exit.kind == Exit_Branch)
 			blk->exit.branch.condition = copyUsed(*ir, blk->exit.branch.condition, &out, relocs);
@@ -128,6 +158,14 @@ void calcLifetimes (IrList ir, ValuesSpan lastuses) {
 		UNOP_CASES:
 			uses[inst.unop] = i;
 			break;
+		case Ir_Store:
+			uses[inst.mem.source] = i;
+			FALLTHROUGH;
+		case Ir_Load:
+			uses[inst.mem.address] = i;
+			if (inst.mem.ordered_after != IR_REF_NONE)
+				uses[inst.mem.ordered_after] = i;
+			break;
 		case Ir_StackAlloc:
 			uses[inst.alloc.size] = i;
 			break;
@@ -147,12 +185,22 @@ void calcLifetimes (IrList ir, ValuesSpan lastuses) {
 }
 
 
-void scheduleBlocksStraight (Block *blk, Blocks *dest, u32 id) {
+static void scheduleBlockStraight (Block *blk, Block *prev, Blocks *dest, u32 id) {
+	if (prev)
+		PUSH(blk->incoming, prev);
 	if (blk->visited == id) return;
+
 	blk->visited = id;
 	PUSH (*dest, blk);
 
-	RECURSE_NEXT_BLOCKS(scheduleBlocksStraight, blk, dest, id);
+	RECURSE_NEXT_BLOCKS(scheduleBlockStraight, blk, blk, dest, id);
+}
+
+
+void scheduleBlocksStraight (Block *blk, Blocks *dest) {
+	static u32 invocation = 1;
+	scheduleBlockStraight(blk, NULL, dest, invocation);
+	invocation++;
 }
 
 
@@ -169,6 +217,14 @@ void calcUsage (IrList ir, u16 *usage) {
 		UNOP_CASES:
 			usage[inst.unop]++;
 			break;
+		case Ir_Store:
+			usage[inst.mem.source]++;
+			FALLTHROUGH;
+		case Ir_Load:
+			usage[inst.mem.address]++;
+			if (inst.mem.ordered_after != IR_REF_NONE)
+				usage[inst.mem.ordered_after]++;
+			break;
 		case Ir_StackAlloc:
 			usage[inst.alloc.size]++;
 			break;
@@ -176,6 +232,8 @@ void calcUsage (IrList ir, u16 *usage) {
 			usage[inst.phi_out.source]++;
 			break;
 		case Ir_Call:
+			if (inst.call.ordered_after != IR_REF_NONE)
+				usage[inst.call.ordered_after]++;
 			usage[inst.call.function_ptr]++;
 			ValuesSpan params = inst.call.parameters;
 			for (u32 p = 0; p < params.len; p++)
@@ -190,31 +248,69 @@ void calcUsage (IrList ir, u16 *usage) {
 
 static void decopy (IrList ir, IrRef *ref) {
 	while (ir.ptr[*ref].kind == Ir_Copy)
-		*ref = ir.ptr[*ref].unop;
+		*ref = ir.ptr[*ref].binop.lhs;
+}
+
+static void decopyOrder (IrList ir, IrRef *ref) {
+	while (*ref != IR_REF_NONE && ir.ptr[*ref].kind == Ir_Copy)
+		*ref = ir.ptr[*ref].binop.rhs;
 }
 
 
+// Remove memory instructions and side-effecting instructions from their
+// lists if they were replaced by copies.
+static void cleanUpCopyReplacements(IrList ir, Block *blk) {
+	IrRefList mem = blk->mem_instructions;
+	IrRefList se = blk->ordered_instructions;
 
-void resolveCopies (IrList ir, Blocks blocks) {
+	u32 dest_idx = 0;
+	for (u32 k = 0; k < mem.len; k++) {
+		if (ir.ptr[mem.ptr[k]].kind != Ir_Copy) {
+			mem.ptr[dest_idx] = mem.ptr[k];
+			dest_idx++;
+		}
+	}
+	blk->mem_instructions.len = dest_idx;
+	dest_idx = 0;
+	for (u32 k = 0; k < se.len; k++) {
+		if (ir.ptr[se.ptr[k]].kind != Ir_Copy) {
+			se.ptr[dest_idx] = se.ptr[k];
+			dest_idx++;
+		} else {
+			unreachable; // We are not currently replacing stores or calls.
+		}
+	}
+	blk->ordered_instructions.len = dest_idx;
+}
+
+void resolveCopies (IrList ir) {
 	for (u32 i = 0; i < ir.len; i++) {
-		Inst inst = ir.ptr[i];
-		switch (inst.kind) {
+		Inst *inst = &ir.ptr[i];
+		switch (inst->kind) {
 		BINOP_CASES:
-			decopy(ir, &ir.ptr[i].binop.lhs);
-			decopy(ir, &ir.ptr[i].binop.rhs);
+			decopy(ir, &inst->binop.lhs);
+			decopy(ir, &inst->binop.rhs);
 			break;
 		UNOP_CASES:
-			decopy(ir, &ir.ptr[i].unop);
+			decopy(ir, &inst->unop);
+			break;
+		case Ir_Store:
+			decopy(ir, &inst->mem.source);
+			FALLTHROUGH;
+		case Ir_Load:
+			decopy(ir, &inst->mem.address);
+			decopyOrder(ir, &inst->mem.ordered_after);
 			break;
 		case Ir_StackAlloc:
-			decopy(ir, &ir.ptr[i].alloc.size);
+			decopy(ir, &inst->alloc.size);
 			break;
 		case Ir_PhiOut:
-			decopy(ir, &ir.ptr[i].phi_out.source);
+			decopy(ir, &inst->phi_out.source);
 			break;
 		case Ir_Call:
-			decopy(ir, &ir.ptr[i].call.function_ptr);
-			ValuesSpan params = inst.call.parameters;
+			decopyOrder(ir, &inst->call.ordered_after);
+			decopy(ir, &inst->call.function_ptr);
+			ValuesSpan params = inst->call.parameters;
 			for (u32 p = 0; p < params.len; p++)
 				decopy(ir, &params.ptr[p]);
 			break;
@@ -222,14 +318,8 @@ void resolveCopies (IrList ir, Blocks blocks) {
 		}
 	}
 
-	for (u32 i = 0; i < blocks.len; i++) {
-		IrRefList mem = blocks.ptr[i]->mem_instructions;
-		IrRefList se = blocks.ptr[i]->ordered_instructions;
-		for (u32 k = 0; k < mem.len; k++)
-			decopy(ir, &mem.ptr[k]);
-		for (u32 k = 0; k < se.len; k++)
-			decopy(ir, &se.ptr[k]);
-	}
+// 	for (u32 i = 0; i < blocks.len; i++)
+// 		cleanUpCopyReplacements(ir, blocks.ptr[i]);
 }
 
 typedef u32 PropId;
@@ -251,35 +341,20 @@ bool doesAlias(IrList ir, IrRef possible, IrRef target) {
 
 void innerBlockPropagate (IrList ir, Blocks blocks) {
 	Inst *insts = ir.ptr;
-	PropId *generation = calloc(ir.len, sizeof(PropId));
 
-	PropId current = 1;
 	for (u32 b = 0; b < blocks.len; b++) {
 		IrRefList mem = blocks.ptr[b]->mem_instructions;
 
-		u32 last_store = 0;
-		u32 last_stored = 0;
 		for (u32 i = 0; i < mem.len; i++) {
 			IrRef ref = mem.ptr[i];
 			Inst inst = insts[ref];
-			switch (inst.kind) {
-			case Ir_Store:
-				last_store = inst.binop.lhs;
-				last_stored = inst.binop.rhs;
-				break;
-			case Ir_Call:
-				last_store = IR_REF_NONE;
-				break;
-			case Ir_Load:
-				if (inst.unop == last_store)
-					replaceWithCopy(ir, ref, last_stored);
-				break;
-			default: unreachable;
+
+			if (inst.kind == Ir_Load && inst.mem.ordered_after != IR_REF_NONE) {
+				Inst store = insts[inst.mem.ordered_after];
+				if (store.kind == Ir_Store && store.mem.address == inst.mem.address)
+					replaceWithCopy(ir, ref, store.mem.source, store.mem.ordered_after);
 			}
 		}
-		current++;
+		cleanUpCopyReplacements(ir, blocks.ptr[b]);
 	}
-
-
-	free(generation);
 }

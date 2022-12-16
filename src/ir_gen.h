@@ -31,7 +31,7 @@ IrRef genStore(IrBuild *, IrRef dest, IrRef value);
 IrRef genPhiIn(IrBuild *build, u16 size);
 IrRef genPhiOut(IrBuild *build, IrRef source);
 void setPhiOut(IrBuild *build, IrRef phi, IrRef dest_true, IrRef dest_false);
-void replaceWithCopy(IrList ir, IrRef original, IrRef replacement);
+void replaceWithCopy(IrList ir, IrRef original, IrRef replacement, IrRef ordered_after);
 void genReturnVal(IrBuild *, IrRef val);
 void genBranch(IrBuild *, IrRef condition);
 void genJump(IrBuild *, Block *blk);

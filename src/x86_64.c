@@ -63,7 +63,6 @@ typedef struct {
 	Module module;
 
 	u16 *usage;
-	u8 *visited;
 	Storage *storage;
 	IrRef used_registers[GENERAL_PURPOSE_REGS_END];
 	u32 stack_allocated;
@@ -285,21 +284,25 @@ static void emitFunctionForward (Arena *arena, FILE *out, Module module, StaticV
 	Codegen c = {
 		.arena = arena,
 		.out = out,
-		.ir = ir,
 		.is_memory_return = mem_return,
-		.usage = calloc(ir.len, sizeof(u16)),
-		.visited = calloc(ir.len, 1),
 		.storage = calloc(ir.len, sizeof(Storage)),
 		.module = module,
 		.parameters_found = mem_return,
 	};
 
-	calcUsage(c.ir, c.usage);
+	Blocks linearized = {0};
+	scheduleBlocksStraight(entry, &linearized);
+	assert(linearized.len);
+	decimateIr(&ir, linearized);
+	reloc.function_ir = ir;
+	c.ir = ir;
+	free(linearized.ptr);
+
+// 	calcUsage(ir, c.usage);
+
 
 	for (u32 i = 0; i < ir.len; i++) {
 		Inst inst = ir.ptr[i];
-		if (!c.usage[i])
-			continue;
 
 		if (inst.kind == Ir_StackAlloc) {
 			ir.ptr[i].alloc.known_offset = c.stack_allocated;
@@ -317,7 +320,7 @@ static void emitFunctionForward (Arena *arena, FILE *out, Module module, StaticV
 	u32 mem_params = c.stack_allocated + 8;
 	for (u32 i = 0; i < ir.len; i++) {
 		Inst inst = ir.ptr[i];
-		if (c.usage[i] && inst.kind == Ir_Parameter && isMemory(inst.size)) {
+		if (inst.kind == Ir_Parameter && isMemory(inst.size)) {
 			c.storage[i] = mem_params;
 			mem_params += inst.size;
 		}
@@ -330,8 +333,6 @@ static void emitFunctionForward (Arena *arena, FILE *out, Module module, StaticV
 	emitBlockForward(&c, entry);
 
 	free(c.storage);
-	free(c.usage);
-	free(c.visited);
 }
 
 const Register parameter_regs[] = {
@@ -359,7 +360,6 @@ static void copyTo (Codegen *c, const char *to, u32 to_offset, const char *from,
 
 
 static const char *loadTo (Codegen *c, Register reg, IrRef i) {
-	emitInstForward(c, i);
 	const char *dest = registerSized(reg, c->ir.ptr[i].size);
 	fprintf(c->out, " mov %s, %s\n", dest, storageName(c, c->storage[i]));
 	return dest;
@@ -367,7 +367,6 @@ static const char *loadTo (Codegen *c, Register reg, IrRef i) {
 
 
 static void triple (Codegen *c, const char *msg, IrRef lhs, IrRef rhs, IrRef dest) {
-	emitInstForward(c, rhs);
 	const char *rax = loadTo(c, RAX, lhs);
 	fprintf(c->out, " %s %s, %s\n mov %s, %s\n", msg, rax, valueName(c, rhs), valueName(c, dest), rax);
 }
@@ -388,15 +387,14 @@ static void emitBlockForward (Codegen *c, Block *block) {
 	}
 	IrRefList false_phis = {0};
 
-	for (u32 i = 0; i < block->ordered_instructions.len; i++) {
-		IrRef ref = block->ordered_instructions.ptr[i];
+	for (u32 i = block->first_inst; i <= block->last_inst; i++) {
+		IrRef ref = i;
+
 		emitInstForward(c, ref);
 
 		Inst inst = c->ir.ptr[ref];
-		if (inst.kind == Ir_PhiOut && inst.phi_out.on_false != IR_REF_NONE) {
-			emitInstForward(c, inst.phi_out.source);
+		if (inst.kind == Ir_PhiOut && inst.phi_out.on_false != IR_REF_NONE)
 			PUSH(false_phis, ref);
-		}
 	}
 
 	Exit exit = block->exit;
@@ -419,6 +417,7 @@ static void emitBlockForward (Codegen *c, Block *block) {
 				valueName(c, inst.phi_out.on_false),
 				loadTo(c, RAX, inst.phi_out.source));
 		}
+
 		if (exit.branch.on_false->visited == visit_id)
 			emitJump(c->out, "jmp", exit.branch.on_false);
 
@@ -452,9 +451,6 @@ static void emitBlockForward (Codegen *c, Block *block) {
 
 static void emitInstForward(Codegen *c, IrRef i) {
 	assert(i != IR_REF_NONE);
-	fprintf(stderr, "=>%lu\n", (ulong) i);
-	if (c->visited[i]) return;
-	c->visited[i] = true;
 
 	Inst inst = c->ir.ptr[i];
 
@@ -463,8 +459,6 @@ static void emitInstForward(Codegen *c, IrRef i) {
 	case Ir_Sub: triple(c, "sub", inst.binop.lhs, inst.binop.rhs, i); break;
 	case Ir_Mul: triple(c, "imul", inst.binop.lhs, inst.binop.rhs, i); break;
 	case Ir_Div:
-		emitInstForward(c, inst.binop.lhs);
-		emitInstForward(c, inst.binop.rhs);
 		fprintf(c->out, " xor rdx, rdx\n");
 		loadTo(c, RAX, inst.binop.lhs);
 		fprintf(c->out, " idiv %s %s\n mov %s, %s\n",
@@ -475,14 +469,12 @@ static void emitInstForward(Codegen *c, IrRef i) {
 	case Ir_BitXor: triple(c, "xor", inst.binop.lhs, inst.binop.rhs, i); break;
 	case Ir_BitAnd: triple(c, "and", inst.binop.lhs, inst.binop.rhs, i); break;
 	case Ir_BitNot: {
-		emitInstForward(c, inst.unop);
 		const char *reg = loadTo(c, RAX, inst.unop);
 		fprintf(c->out, "not %s\n"
 		     " mov %s, %s\n", reg, valueName(c, i), reg);
 
 	} break;
 	case Ir_LessThan: {
-		emitInstForward(c, inst.binop.lhs);
 		fprintf(c->out, " cmp %s, %s\n"
 		     " setl al\n"
 		     " movzx rsi, al\n"
@@ -493,7 +485,6 @@ static void emitInstForward(Codegen *c, IrRef i) {
 		     registerSized(RSI, inst.size));
 	} break;
 	case Ir_LessThanOrEquals: {
-		emitInstForward(c, inst.binop.lhs);
 		fprintf(c->out, " cmp %s, %s\n"
 		     " setle al\n"
 		     " movzx rsi, al\n"
@@ -504,7 +495,6 @@ static void emitInstForward(Codegen *c, IrRef i) {
 		     registerSized(RSI, inst.size));
 	} break;
 	case Ir_Equals: {
-		emitInstForward(c, inst.binop.lhs);
 		fprintf(c->out, " cmp %s, %s\n"
 		     " sete al\n"
 		     " movzx rsi, al\n"
@@ -515,34 +505,29 @@ static void emitInstForward(Codegen *c, IrRef i) {
 		     registerSized(RSI, inst.size));
 	} break;
 	case Ir_Truncate: {
-		emitInstForward(c, inst.unop);
 		const char *reg = registerSized(RAX, c->ir.ptr[i].size);
 		fprintf(c->out, " mov %s, %s\n", reg, valueName(c, inst.unop));
 		fprintf(c->out, " mov %s %s, %s\n", sizeOp(c->ir.ptr[i].size), valueName(c, i), reg);
 	} break;
 	case Ir_SignExtend: {
-		emitInstForward(c, inst.unop);
 		const char *reg = registerSized(RSI, inst.size);
 		fprintf(c->out, " movsx%s %s, %s %s\n mov %s, %s\n",
 			(valueSize(c, inst.unop) > 2 ? "d" : ""), reg, sizeOp(valueSize(c, inst.unop)), valueName(c, inst.unop),
 			valueName(c, i), reg);
 	} break;
 	case Ir_ZeroExtend: {
-		emitInstForward(c, inst.unop);
 		fprintf(c->out, " xor rax, rax\n mov %s, %s\n mov %s, %s\n",
 			registerSized(RAX, valueSize(c, inst.unop)),  valueName(c, inst.unop),
 			valueName(c, i), registerSized(RAX, inst.size));
 	} break;
 
 	case Ir_Store: {
-		emitInstForward(c, inst.binop.rhs);
-		copyTo(c, loadTo(c, RAX, inst.binop.lhs), 0, "rsp", c->storage[inst.binop.rhs], inst.size);
+		copyTo(c, loadTo(c, RAX, inst.mem.address), 0, "rsp", c->storage[inst.mem.source], inst.size);
 	} break;
 	case Ir_Load: {
-		copyTo(c, "rsp", c->storage[i], loadTo(c, RAX, inst.unop), 0, inst.size);
+		copyTo(c, "rsp", c->storage[i], loadTo(c, RAX, inst.mem.address), 0, inst.size);
 	} break;
 	case Ir_Access: {
-		emitInstForward(c, inst.binop.lhs);
 		copyTo(c, "rsp", c->storage[i],
 			"rsp", c->storage[inst.binop.lhs] + inst.binop.rhs, inst.size);
 	} break;
@@ -583,7 +568,6 @@ static void emitInstForward(Codegen *c, IrRef i) {
 		break;
 	case Ir_PhiOut: {
 		if (inst.phi_out.on_true != IR_REF_NONE) {
-			emitInstForward(c, inst.phi_out.source);
 			copyTo(c, "rsp", c->storage[inst.phi_out.on_true],
 				"rsp", c->storage[inst.phi_out.source],
 				valueSize(c, inst.phi_out.source));
@@ -600,9 +584,6 @@ static void emitInstForward(Codegen *c, IrRef i) {
 		ValuesSpan params = inst.call.parameters;
 
 		u32 param_slot = 0;
-		for (u32 p = 0; p < params.len; p++) {
-			emitInstForward(c, params.ptr[i]);
-		}
 		for (u32 p = 0; p < params.len; p++) {
 			assert(param_slot < parameter_regs_count);
 			IrRef param = params.ptr[p];

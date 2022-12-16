@@ -62,6 +62,8 @@ Block *newBlock (IrBuild *build, Arena *arena, String label) {
 void startBlock (IrBuild *build, Block *block) {
 	block->first_inst = build->ir.len;
 	build->insertion_block = block;
+	build->prev_mem_op = IR_REF_NONE;
+	build->prev_store_op = IR_REF_NONE;
 }
 
 Block *startNewBlock (IrBuild *build, Arena *arena, String label) {
@@ -274,7 +276,10 @@ IrRef genZeroExt (IrBuild *build, IrRef source, u16 target) {
 }
 
 IrRef genCall (IrBuild *build, IrRef func, ValuesSpan args, u16 size) {
-	IrRef call = append(build, (Inst) {Ir_Call, size, .call = {func, args}});
+	IrRef call = append(build, (Inst) {Ir_Call, size, .call = {func, args, build->prev_mem_op}});
+	build->prev_mem_op = call;
+	build->prev_store_op = call;
+
 	PUSH (build->insertion_block->mem_instructions, call);
 	PUSH (build->insertion_block->ordered_instructions, call);
 	return call;
@@ -285,16 +290,23 @@ IrRef genGlobal (IrBuild *build, u32 id) {
 }
 
 IrRef genLoad (IrBuild *build, IrRef ref, u16 size) {
-	IrRef load = append(build, (Inst) {Ir_Load, size, .unop = ref});
+	IrRef load = append(build, (Inst) {Ir_Load, size,
+		.mem = { .address = ref, .ordered_after = build->prev_store_op }
+	});
+	build->prev_mem_op = load;
 	PUSH (build->insertion_block->mem_instructions, load);
-	PUSH (build->insertion_block->ordered_instructions, load);
 	return load;
 }
 
 IrRef genStore (IrBuild *build, IrRef dest, IrRef value) {
 	Inst val = build->ir.ptr[value];
 	// TODO Assert dest->size == target pointer size
-	IrRef store = append(build, (Inst) {Ir_Store, val.size, .binop = {dest, value}});
+	IrRef store = append(build, (Inst) {Ir_Store, val.size,
+		.mem = { .address = dest, .source = value, .ordered_after = build->prev_mem_op }
+	});
+	build->prev_mem_op = store;
+	build->prev_store_op = store;
+
 	PUSH (build->insertion_block->mem_instructions, store);
 	PUSH (build->insertion_block->ordered_instructions, store);
 	return store;
@@ -318,9 +330,10 @@ void setPhiOut (IrBuild *build, IrRef phi, IrRef dest_true, IrRef dest_false) {
 	inst->phi_out.on_false = dest_false;
 }
 
-void replaceWithCopy (IrList ir, IrRef original, IrRef replacement) {
+void replaceWithCopy (IrList ir, IrRef original, IrRef replacement, IrRef ordered_after) {
 	ir.ptr[original].kind = Ir_Copy;
-	ir.ptr[original].unop = replacement;
+	ir.ptr[original].binop.lhs = replacement;
+	ir.ptr[original].binop.rhs = ordered_after;
 }
 
 
@@ -384,10 +397,10 @@ void printBlock (FILE *dest, Block *blk, IrList ir) {
 			fprintf(dest, "discard %lu\n", (ulong) inst.unop);
 			continue;
 		case Ir_Load:
-			fprintf(dest, "load i%lu, [%lu]\n", (ulong) inst.size * 8, (ulong) inst.unop);
+			fprintf(dest, "load i%lu, [%lu]\n", (ulong) inst.size * 8, (ulong) inst.mem.address);
 			continue;
 		case Ir_Store:
-			fprintf(dest, "store [%lu] %lu\n", (ulong) inst.binop.lhs, (ulong) inst.binop.rhs);
+			fprintf(dest, "store [%lu] %lu\n", (ulong) inst.mem.address, (ulong) inst.mem.source);
 			continue;
 		case Ir_BitNot:
 			fprintf(dest, "not %lu\n", (ulong) inst.unop);

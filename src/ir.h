@@ -22,6 +22,7 @@ typedef LIST(Block*) Blocks;
 typedef struct {
 	IrRef function_ptr;
 	ValuesSpan parameters;
+	IrRef ordered_after;
 } Call;
 
 
@@ -90,6 +91,21 @@ typedef struct Inst {
 			IrRef size;
 			u32 known_offset; // STYLE Without this, instructions could be immutable
 		} alloc;
+		struct {
+			IrRef address;
+			IrRef source; // Only used for loads
+			// Defines an ordering of memory accesses. This is not
+			// actually useful for stores, which are put into
+			// ordered_instructions. I cannot tell what to do about that
+			// now; I need a list of side-effecting instructions that
+			// need to happen, without constraining their ordering.
+			//
+			// The program source defines a total ordering on
+			// operations; we have to work to relax that order. Loads
+			// that are unreferenced can just be dropped, but it takes
+			// analyses to find stores and calls may be elided.
+			IrRef ordered_after;
+		} mem;
 		// Apparently this kind of representation is called "parameterized basic
 		// blocks". It does not matter very much.
 		struct {
@@ -111,11 +127,9 @@ typedef struct Inst {
 	case Ir_Equals: \
 	case Ir_LessThan: \
 	case Ir_LessThanOrEquals: \
-	case Ir_Access: \
-	case Ir_Store
+	case Ir_Access
 
 #define UNOP_CASES \
-	case Ir_Load: \
 	case Ir_BitNot: \
 	case Ir_Truncate: \
 	case Ir_SignExtend: \
@@ -151,7 +165,7 @@ typedef struct Block {
 	IrRef first_inst;
 	IrRef last_inst; // Used for unoptimized output, irrelevant when scheduler applies
 	IrRefList mem_instructions; // Loads and stores
-	IrRefList ordered_instructions; // Calls, loads, stores, phi_outs
+	IrRefList ordered_instructions; // Calls, stores, phi_outs
 	Exit exit;
 
 	u32 id;
@@ -167,5 +181,7 @@ typedef struct IrBuild {
 
 	u32 block_count;
 	Block *insertion_block;
+	IrRef prev_mem_op;
+	IrRef prev_store_op;
 } IrBuild;
 
