@@ -3,7 +3,7 @@
 
 #include "arena.h"
 
-#define BLOCK_HEADER sizeof(void*)
+#define BLOCK_HEADER sizeof(ArenaBlock*)
 
 
 /*
@@ -30,6 +30,7 @@ void *aalloc(Arena* arena, size_t size) {
 	size_t alignment = alignof(max_align_t);
 	size = (size + alignment - 1) / alignment * alignment;
 
+#ifdef NDEBUG
 	if (arena->last_used + size >= arena->block_size) {
 		ArenaBlock *new = malloc(arena->block_size + BLOCK_HEADER);
 		if (!new) {
@@ -41,6 +42,12 @@ void *aalloc(Arena* arena, size_t size) {
 		arena->last_block = new;
 		arena->last_used = 0;
 	}
+#else
+	ArenaBlock *new = malloc(size + BLOCK_HEADER);
+	new->next = arena->last_block;
+	arena->last_block = new;
+	arena->last_used = 0;
+#endif
 
 	void *res = arena->last_block->data + arena->last_used;
 	arena->last_used += size;

@@ -16,6 +16,7 @@ typedef u32 IrRef;
 typedef SPAN(IrRef) ValuesSpan;
 typedef LIST(IrRef) IrRefList;
 typedef LIST(Inst) IrList;
+typedef LIST(Block*) Blocks;
 
 
 typedef struct {
@@ -28,13 +29,14 @@ typedef enum {
 	Ir_Reloc,
 	Ir_Constant,
 	Ir_Call,
-	Ir_PhiOut,
-	Ir_PhiIn, // No operands
 	Ir_Parameter,
+	Ir_PhiOut, // Not referred to
+	Ir_PhiIn,
 	Ir_StackAlloc,
-	Ir_StackDealloc,
+	Ir_StackDealloc, // Not referred to
+	Ir_Copy,
 	Ir_Load,
-	Ir_Store,
+	Ir_Store, // Not referred to
 
 	Ir_Access,
 	Ir_Truncate,
@@ -88,11 +90,6 @@ typedef struct Inst {
 			IrRef size;
 			u32 known_offset; // STYLE Without this, instructions could be immutable
 		} alloc;
-		struct {
-			IrRef source;
-			IrRef dest;
-			IrRef len;
-		} copy;
 		// Apparently this kind of representation is called "parameterized basic
 		// blocks". It does not matter very much.
 		struct {
@@ -102,6 +99,28 @@ typedef struct Inst {
 		} phi_out;
 	};
 } Inst;
+
+#define BINOP_CASES \
+	case Ir_Add: \
+	case Ir_Sub: \
+	case Ir_Mul: \
+	case Ir_Div: \
+	case Ir_BitOr: \
+	case Ir_BitXor: \
+	case Ir_BitAnd: \
+	case Ir_Equals: \
+	case Ir_LessThan: \
+	case Ir_LessThanOrEquals: \
+	case Ir_Access: \
+	case Ir_Store
+
+#define UNOP_CASES \
+	case Ir_Load: \
+	case Ir_BitNot: \
+	case Ir_Truncate: \
+	case Ir_SignExtend: \
+	case Ir_ZeroExtend
+
 
 typedef struct {
 	IrRef condition;
@@ -131,10 +150,14 @@ typedef struct Block {
 	String label; // null-terminated
 	IrRef first_inst;
 	IrRef last_inst; // Used for unoptimized output, irrelevant when scheduler applies
-	IrRefList mem_instructions; // Loads, stores, and copys
-	IrRefList side_effecting_instructions; // Calls, stores and copys
+	IrRefList mem_instructions; // Loads and stores
+	IrRefList ordered_instructions; // Calls, loads, stores, phi_outs
 	Exit exit;
-	bool visited;
+
+	u32 id;
+	u32 visited;
+	Block *dominator;
+	Blocks incoming;
 } Block;
 
 

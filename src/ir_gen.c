@@ -53,9 +53,9 @@ void genJump (IrBuild *build, Block *dest) {
 		startBlock(build, dest);
 }
 
-Block *newBlock (Arena *arena, String label) {
+Block *newBlock (IrBuild *build, Arena *arena, String label) {
 	Block *new_block = ALLOC(arena, Block);
-	*new_block = (Block) { .label = label };
+	*new_block = (Block) { .label = label, .id = build->block_count++ };
 	return new_block;
 }
 
@@ -65,7 +65,7 @@ void startBlock (IrBuild *build, Block *block) {
 }
 
 Block *startNewBlock (IrBuild *build, Arena *arena, String label) {
-	Block *blk = newBlock(arena, label);
+	Block *blk = newBlock(build, arena, label);
 	startBlock(build, blk);
 	return blk;
 }
@@ -275,7 +275,8 @@ IrRef genZeroExt (IrBuild *build, IrRef source, u16 target) {
 
 IrRef genCall (IrBuild *build, IrRef func, ValuesSpan args, u16 size) {
 	IrRef call = append(build, (Inst) {Ir_Call, size, .call = {func, args}});
-	PUSH (build->insertion_block->side_effecting_instructions, call);
+	PUSH (build->insertion_block->mem_instructions, call);
+	PUSH (build->insertion_block->ordered_instructions, call);
 	return call;
 }
 
@@ -286,6 +287,7 @@ IrRef genGlobal (IrBuild *build, u32 id) {
 IrRef genLoad (IrBuild *build, IrRef ref, u16 size) {
 	IrRef load = append(build, (Inst) {Ir_Load, size, .unop = ref});
 	PUSH (build->insertion_block->mem_instructions, load);
+	PUSH (build->insertion_block->ordered_instructions, load);
 	return load;
 }
 
@@ -294,7 +296,7 @@ IrRef genStore (IrBuild *build, IrRef dest, IrRef value) {
 	// TODO Assert dest->size == target pointer size
 	IrRef store = append(build, (Inst) {Ir_Store, val.size, .binop = {dest, value}});
 	PUSH (build->insertion_block->mem_instructions, store);
-	PUSH (build->insertion_block->side_effecting_instructions, store);
+	PUSH (build->insertion_block->ordered_instructions, store);
 	return store;
 }
 
@@ -304,7 +306,9 @@ IrRef genPhiIn (IrBuild *build, u16 size) {
 
 
 IrRef genPhiOut (IrBuild *build, IrRef source) {
-	return append(build, (Inst) {Ir_PhiOut, build->ir.ptr[source].size, .phi_out = {source, IR_REF_NONE, IR_REF_NONE}});
+	u32 inst = append(build, (Inst) {Ir_PhiOut, build->ir.ptr[source].size, .phi_out = {source, IR_REF_NONE, IR_REF_NONE}});
+	PUSH(build->insertion_block->ordered_instructions, inst);
+	return inst;
 }
 
 void setPhiOut (IrBuild *build, IrRef phi, IrRef dest_true, IrRef dest_false) {
@@ -312,6 +316,11 @@ void setPhiOut (IrBuild *build, IrRef phi, IrRef dest_true, IrRef dest_false) {
 	assert(inst->kind == Ir_PhiOut);
 	inst->phi_out.on_true = dest_true;
 	inst->phi_out.on_false = dest_false;
+}
+
+void replaceWithCopy (IrList ir, IrRef original, IrRef replacement) {
+	ir.ptr[original].kind = Ir_Copy;
+	ir.ptr[original].unop = replacement;
 }
 
 
@@ -324,11 +333,11 @@ void discardIrBuilder(IrBuild *builder) {
 typedef unsigned long ulong;
 typedef unsigned int uint;
 void printBlock (FILE *dest, Block *blk, IrList ir) {
-	if (blk->visited)
+	if (blk->visited == 31)
 		return;
-	blk->visited = true;
+	blk->visited = 31;
 
-	fprintf(dest, " %.*s%p:\n", STRING_PRINTAGE(blk->label), (void *) blk);
+	fprintf(dest, " %.*s%lu:\n", STRING_PRINTAGE(blk->label), (ulong) blk->id);
 
 	for (size_t i = blk->first_inst; i <= blk->last_inst; i++) {
 		fprintf(dest, " %3lu = ", (ulong) i);
@@ -352,13 +361,15 @@ void printBlock (FILE *dest, Block *blk, IrList ir) {
 			fprintf(dest, ")\n");
 		} continue;
 		case Ir_PhiOut:
-			fprintf(dest, "phi %lu ->%lu", (ulong) inst.phi_out.source, (ulong) inst.phi_out.on_true);
+			fprintf(dest, "phi %lu", (ulong) inst.phi_out.source);
+			if (inst.phi_out.on_true != IR_REF_NONE)
+				fprintf(dest, " true->%lu", (ulong) inst.phi_out.on_true);
 			if (inst.phi_out.on_false != IR_REF_NONE)
-				fprintf(dest, " ->%lu", (ulong) inst.phi_out.on_false);
+				fprintf(dest, " false->%lu", (ulong) inst.phi_out.on_false);
 			fprintf(dest, "\n");
 			continue;
 		case Ir_PhiIn:
-			fprintf(dest, "->phi");
+			fprintf(dest, "->phi\n");
 			continue;
 		case Ir_Parameter:
 			fprintf(dest, "param %lu\n", (ulong) inst.size);
@@ -366,11 +377,14 @@ void printBlock (FILE *dest, Block *blk, IrList ir) {
 		case Ir_StackAlloc:
 			fprintf(dest, "stack %lu\n", (ulong) inst.alloc.size);
 			continue;
+		case Ir_Copy:
+			fprintf(dest, "copy %lu\n", (ulong) inst.unop);
+			continue;
 		case Ir_StackDealloc:
 			fprintf(dest, "discard %lu\n", (ulong) inst.unop);
 			continue;
 		case Ir_Load:
-			fprintf(dest, "load i%ud, %lu\n", (uint) inst.size, (ulong) inst.unop);
+			fprintf(dest, "load i%lu, [%lu]\n", (ulong) inst.size * 8, (ulong) inst.unop);
 			continue;
 		case Ir_Store:
 			fprintf(dest, "store [%lu] %lu\n", (ulong) inst.binop.lhs, (ulong) inst.binop.rhs);
@@ -379,16 +393,16 @@ void printBlock (FILE *dest, Block *blk, IrList ir) {
 			fprintf(dest, "not %lu\n", (ulong) inst.unop);
 			continue;
 		case Ir_Truncate:
-			fprintf(dest, "trunc i%ud, %lu\n", (uint) inst.size, (ulong) inst.unop);
+			fprintf(dest, "trunc i%lu, %lu\n", (ulong) inst.size * 8, (ulong) inst.unop);
 			continue;
 		case Ir_SignExtend:
-			fprintf(dest, "signex i%ud, %lu\n", (uint) inst.size, (ulong) inst.unop);
+			fprintf(dest, "signex i%lu, %lu\n", (ulong) inst.size * 8, (ulong) inst.unop);
 			continue;
 		case Ir_ZeroExtend:
-			fprintf(dest, "zeroex i%ud, %lu\n", (uint) inst.size, (ulong) inst.unop);
+			fprintf(dest, "zeroex i%lu, %lu\n", (ulong) inst.size * 8, (ulong) inst.unop);
 			continue;
 		case Ir_Access:
-			fprintf(dest, "access i%ud, %lu @ %lu\n", (uint) inst.size, (ulong) inst.binop.lhs, (ulong) inst.binop.rhs);
+			fprintf(dest, "access i%lu, %lu @ %lu\n", (ulong) inst.size * 8, (ulong) inst.binop.lhs, (ulong) inst.binop.rhs);
 			continue;
 		case Ir_IntToFloat:
 			fprintf(dest, "int->float %lu\n", (ulong) inst.unop);
@@ -413,14 +427,14 @@ void printBlock (FILE *dest, Block *blk, IrList ir) {
 	Exit exit = blk->exit;
 	switch (exit.kind) {
 	case Exit_Unconditional:
-		fprintf(dest, "       jmp %.*s\n", STRING_PRINTAGE(exit.unconditional->label));
+		fprintf(dest, "       jmp %.*s%lu\n", STRING_PRINTAGE(exit.unconditional->label), (ulong) blk->id);
 		printBlock(dest, exit.unconditional, ir);
 		break;
 	case Exit_Branch:
-		fprintf(dest, "       branch %lu ? %.*s%p : %.*s%p\n",
+		fprintf(dest, "       branch %lu ? %.*s%lu : %.*s%lu\n",
 			(ulong) exit.branch.condition,
-			STRING_PRINTAGE(exit.branch.on_true->label), (void *) exit.branch.on_true,
-			STRING_PRINTAGE(exit.branch.on_false->label), (void *) exit.branch.on_false);
+			STRING_PRINTAGE(exit.branch.on_true->label), (ulong) exit.branch.on_true->id,
+			STRING_PRINTAGE(exit.branch.on_false->label), (ulong) exit.branch.on_false->id);
 		printBlock(dest, exit.branch.on_true, ir);
 		printBlock(dest, exit.branch.on_false, ir);
 		break;

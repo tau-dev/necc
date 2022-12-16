@@ -323,7 +323,7 @@ void parse (Arena *code_arena, Tokenization tokens, Options opt, Module *module)
 	for (u32 i = 0; i < module->len; i++) {
 		StaticValue *val = &module->ptr[i];
 		if (val->def_state == Def_Tentative)
-			val->value_data = (String) ALLOCN(&parse.arena, char, typeSize(val->type, &parse.target));
+			val->value_data = (String) ALLOCN(parse.code_arena, char, typeSize(val->type, &parse.target));
 		else if (val->is_used && val->def_state == Def_Undefined && !val->is_public)
 			parseerror(&parse, val->decl_location, "TODO(phrasing) static identifier was never defined");
 	}
@@ -496,7 +496,7 @@ static Block *getLabeledBlock (Parse *parse, String label) {
 	Symbol *sym = getSymbol(parse, label);
 
 	if (sym->label.block == NULL) {
-		sym->label.block = newBlock(parse->code_arena, label);
+		sym->label.block = newBlock(&parse->build, parse->code_arena, label);
 		PUSH(parse->func_goto_labels, sym);
 	}
 	return sym->label.block;
@@ -519,7 +519,7 @@ static void parseStatement (Parse *parse, bool *had_non_declaration) {
 				redefinition(parse, parse->pos, sym->label.def_location, t.val.identifier);
 		} else {
 			sym->label.def_location = parse->pos;
-			sym->label.block = newBlock(parse->code_arena, t.val.identifier);
+			sym->label.block = newBlock(&parse->build, parse->code_arena, t.val.identifier);
 		}
 
 		genJump(build, sym->label.block);
@@ -554,7 +554,7 @@ static void parseStatement (Parse *parse, bool *had_non_declaration) {
 	case Tok_Key_While: {
 		parse->pos++;
 
-		Block *head = newBlock(parse->code_arena, zString("while_head_"));
+		Block *head = newBlock(&parse->build, parse->code_arena, zString("while_head_"));
 		genJump(build, head);
 		expect(parse, Tok_OpenParen);
 		Value condition = parseExpression(parse);
@@ -564,7 +564,7 @@ static void parseStatement (Parse *parse, bool *had_non_declaration) {
 		head->exit.branch.on_true = startNewBlock(build, parse->code_arena, zString("while_body_"));
 		parseStatement(parse, had_non_declaration);
 
-		Block *join = newBlock(parse->code_arena, zString("while_join_"));
+		Block *join = newBlock(&parse->build, parse->code_arena, zString("while_join_"));
 		genJump(build, join);
 		head->exit.branch.on_false = join;
 	} break;
@@ -582,7 +582,7 @@ static void parseStatement (Parse *parse, bool *had_non_declaration) {
 		Block *on_true = build->insertion_block;
 		genJump(build, NULL);
 
-		Block *join = newBlock(parse->code_arena, zString("if_join_"));
+		Block *join = newBlock(&parse->build, parse->code_arena, zString("if_join_"));
 
 		if (parse->pos->kind == Tok_Key_Else) {
 			parse->pos++;
@@ -783,7 +783,7 @@ static Value parseExprElvis (Parse *parse) {
 
 		if (!typeCompatible(lhs.typ, rhs.typ))
 			parseerror(parse, primary, "(TODO phrasing) (TODO join arithmetic types) Types are not compatible");
-		Block *join = newBlock(parse->code_arena, STRING_EMPTY);
+		Block *join = newBlock(&parse->build, parse->code_arena, STRING_EMPTY);
 		genJump(build, join);
 		head->exit.branch.on_true->exit.unconditional = join;
 
@@ -810,7 +810,7 @@ static Value parseExprOr (Parse *parse) {
 		Value rhs = parseExprOr(parse);
 
 		IrRef rhs_val = genPhiOut(build, toBoolean(parse, rhs, primary));
-		Block *join = newBlock(parse->code_arena, STRING_EMPTY);
+		Block *join = newBlock(&parse->build, parse->code_arena, STRING_EMPTY);
 		genJump(build, join);
 		head->exit.branch.on_true = join;
 		IrRef res = genPhiIn(build, int_size);
@@ -838,7 +838,7 @@ static Value parseExprAnd (Parse *parse) {
 		Value rhs = parseExprOr(parse);
 
 		IrRef rhs_val = genPhiOut(build, toBoolean(parse, rhs, primary));
-		Block *join = newBlock(parse->code_arena, STRING_EMPTY);
+		Block *join = newBlock(&parse->build, parse->code_arena, STRING_EMPTY);
 		genJump(build, join);
 		head->exit.branch.on_false = join;
 		IrRef res = genPhiIn(build, int_size);

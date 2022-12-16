@@ -6,6 +6,7 @@
 #include "arena.h"
 #include "ir_gen.h"
 #include "ansii.h"
+#include "analysis.h"
 
 
 Module module = {0};
@@ -27,6 +28,8 @@ typedef enum {
 	F_NoStdInc,
 	F_EmitIr,
 	F_EmitAssembly,
+	F_OptSimple,
+	F_OptStoreLoad,
 } Flag;
 
 static Name flags[] = {
@@ -44,6 +47,9 @@ static Name flags[] = {
 	{"nostdinc", F_NoStdInc},
 	{"ir", F_EmitIr},
 	{"as", F_EmitAssembly},
+	{"O", F_OptSimple},
+	{"O1", F_OptSimple},
+	{"Ostore-load", F_OptStoreLoad},
 	{0}
 };
 
@@ -77,6 +83,10 @@ const char *help_string = "Usage:\n"
 	"                   Declaration lists are a sequence of lines consisting of ‘<filename>:<line>:<column>:<def-kind>:<name>:<type>’,\n"
 	"                   where a non-top-level <name> is qualified by a ‘.’-separated path of its containers,\n"
 	"                   and <def-kind> is either ‘type’, ‘macro’, ‘decl’, ‘tentative-def’ or ‘def’.\n"
+	"\n"
+	"Optimizations:\n"
+	" -O, -O1         Perform simple optimizations: -Ostore-load.\n"
+	" -Ostore-load    Fold simple store-load sequences.\n"
 	"\n"
 	"For debugging the compiler:\n"
 	" -ir             Print the intermediate representation.\n"
@@ -155,17 +165,17 @@ static String checkIncludePath(Arena *, const char *path);
 int main (int argc, char **args) {
 	String input = {0};
 	Arena arena = create_arena(16 * 1024);
-	const char *assembly_out = NULL;
-	const char *ir_out = NULL;
-	bool stdinc = true;
-
-	LIST(String) user_paths = {0};
-	LIST(String) sys_paths = {0};
-
 
 	Options opt = {
 		.target = target_x64_linux_gcc,
 	};
+	const char *assembly_out = NULL;
+	const char *ir_out = NULL;
+	bool stdinc = true;
+	bool opt_store_load = false;
+
+	LIST(String) user_paths = {0};
+	LIST(String) sys_paths = {0};
 
 	for (int i = 1; i < argc; i++) {
 		if (args[i][0] == '-') {
@@ -206,6 +216,10 @@ int main (int argc, char **args) {
 				PUSH(sys_paths, checkIncludePath(&arena, args[i]));
 				break;
 			case F_NoStdInc: stdinc = false; break;
+			case F_OptSimple:
+				opt_store_load = true;
+				break;
+			case F_OptStoreLoad: opt_store_load = true; break;
 			case F_Unknown:
 				fprintf(stderr, "%swarning: %sIgnoring unknown flag %s\n", YELLOW, RESET, args[i]);
 			}
@@ -239,10 +253,26 @@ int main (int argc, char **args) {
 	};
 
 
-	Tokenization tokens = lex(&arena, input, paths, &target_x64_linux_gcc);
+	// The Real Work happens now.
 
+	Tokenization tokens = lex(&arena, input, paths, &target_x64_linux_gcc);
 	parse(&arena, tokens, opt, &module);
 
+
+	// Analyses and transformations:
+	for (u32 i = 0; i < module.len; i++) {
+		StaticValue *val = &module.ptr[i];
+		if (opt_store_load && val->def_state == Def_Defined && val->def_kind == Static_Function) {
+			Blocks linearized = {0};
+			scheduleBlocksStraight(val->function_entry, &linearized, 3);
+			innerBlockPropagate(val->function_ir, linearized);
+			resolveCopies(val->function_ir, linearized);
+			decimateIr(&val->function_ir, linearized);
+			free(linearized.ptr);
+		}
+	}
+
+	// Output:
 	if (ir_out) {
 		FILE *dest = openOut(ir_out);
 		for (u32 i = 0; i < module.len; i++) {
@@ -251,6 +281,7 @@ int main (int argc, char **args) {
 				fprintf(dest, "public ");
 
 			if (val.def_state != Def_Defined) {
+// 				assert(val.name.len); // TODO Where do these come from?
 				fprintf(dest, "extern %.*s\n", STRING_PRINTAGE(val.name));
 			} else if (val.def_kind == Static_Function) {
 				fprintf(dest, "%s:\n", printDeclarator(&arena, val.type, val.name));
