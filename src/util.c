@@ -2,6 +2,9 @@
 #include "wyhash.h"
 #include "stdio.h"
 #include "ansii.h"
+#ifdef __unix__
+#include <unistd.h>
+#endif
 
 #define SLOT_UNUSED 0
 #define SLOT_TOMBSTONE 128
@@ -14,6 +17,13 @@ Provides functions for strings, hash maps and error reporting.
 
 */
 
+const char *ifTerminal(const char *val) {
+#ifdef __unix__
+	if (isatty(2))
+		return val;
+#endif
+	return "";
+}
 
 bool eql (const char* a, String b) {
 	// PERFORMANCE Remove strlen
@@ -34,6 +44,8 @@ static void printError (SourceFile source, u32 offset, const char *msg, ...) {
     va_start(args, msg);
     vfprintf(stderr, msg, args);
     va_end(args);
+    fprintf(stderr, ".\n");
+    exit(1);
 }
 
 SourceFile *readAllAlloc (String path, String filename) {
@@ -111,11 +123,17 @@ void printMsg (Log level, SourceFile source, u32 offset) {
 		(unsigned long) loc.line, (unsigned long) loc.col);
 
 	const char *const messages[] = {
-		[Log_Err]  = RED "error:   " RESET,
-		[Log_Warn] = YELLOW "warning: " RESET,
-		[Log_Info] = CYAN "info:    " RESET,
+		[Log_Err]  = "error:   ",
+		[Log_Warn] = "warning: ",
+		[Log_Info] = "info:    ",
 	};
-	fprintf(stderr, messages[level & ~Log_Fatal]);
+	const char *const highlights[] = {
+		[Log_Err]  = RED,
+		[Log_Warn] = YELLOW,
+		[Log_Info] = CYAN,
+
+	};
+	fprintf(stderr, "%s%s%s", highlights[level & ~Log_Fatal], messages[level & ~Log_Fatal], RESET);
 }
 
 void printErr (SourceFile source, u32 offset) {
@@ -129,7 +147,7 @@ void printInfo (SourceFile source, u32 offset) {
 }
 
 void generalFatal(const char *msg, ...) {
-	fprintf(stderr, RED "error:   " RESET);
+	fprintf(stderr, "%s%serror:   %s", BOLD, RED, RESET);
 	va_list args;
     va_start(args, msg);
     vfprintf(stderr, msg, args);
@@ -138,7 +156,7 @@ void generalFatal(const char *msg, ...) {
 }
 
 
-void printto (char **insert, const char *end, char *fmt, ...) {
+void printto (char **insert, const char *end, const char *fmt, ...) {
 	if (*insert >= end)
 		return;
 	va_list args;
@@ -155,6 +173,8 @@ void printto (char **insert, const char *end, char *fmt, ...) {
 
 
 static u32 find (const StringMap *map, u64 hash, String str) {
+	assert(str.ptr);
+	assert(str.len);
 	if (map->used == 0)
 		return FOUND_NONE;
 

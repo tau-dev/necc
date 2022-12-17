@@ -16,6 +16,7 @@ Combined lexer and preprocessor.
 
 bool isSpace(char);
 bool isAlpha(char c);
+bool isHexDigit(char c);
 bool isDigit(char c);
 bool isAlnum(char c);
 
@@ -92,6 +93,27 @@ Keyword names[] = {
 #define NAMES_COUNT (sizeof(names) / sizeof(names[0]))
 
 
+char escape_codes[256] = {
+	['0'] = 0,
+	['\\'] = '\\',
+	['\"'] = '\"',
+	['r'] = '\r',
+	['v'] = '\v',
+	['t'] = '\t',
+	['n'] = '\n',
+};
+
+char de_escape_codes[256] = {
+	[0] = '0',
+	['\\'] = '\\',
+	['\"'] = '\"',
+	['\r'] = 'r',
+	['\v'] = 'v',
+	['\t'] = 't',
+	['\n'] = 'n',
+};
+
+
 int keyword_cmp(const void *a, const void *b) {
 	return strcmp(((Keyword*)a)->name, ((Keyword*)b)->name);
 }
@@ -104,6 +126,7 @@ Token fromWord (String word) {
 			return ret;
 		}
 	}
+	assert(word.len);
 	return (Token) {Tok_Identifier, .val.identifier = word};
 }
 
@@ -249,6 +272,15 @@ Token getToken (Arena *str_arena, SourceFile src, const char **p) {
 			tok.kind = Tok_Bang;
 		}
 		break;
+	case '%':
+		if (pos[1] == '=') {
+			pos++;
+			tok.kind = Tok_PercentEquals;
+		} else {
+			tok.kind = Tok_Percent;
+		}
+		// TODO Digraphs
+		break;
 	case '=':
 		if (pos[1] == '=') {
 			pos++;
@@ -261,6 +293,9 @@ Token getToken (Arena *str_arena, SourceFile src, const char **p) {
 		if (pos[1] == '&') {
 			pos++;
 			tok.kind = Tok_DoubleAmpersand;
+		} else if (pos[1] == '=') {
+			pos++;
+			tok.kind = Tok_AmpersandEquals;
 		} else {
 			tok.kind = Tok_Ampersand;
 		}
@@ -270,6 +305,9 @@ Token getToken (Arena *str_arena, SourceFile src, const char **p) {
 		if (pos[1] == '|' || (pos[1] == '?' && pos[2] == '?' && pos[3] == '!')) {
 			pos++;
 			tok.kind = Tok_DoublePipe;
+		} else if (pos[1] == '=') {
+			pos++;
+			tok.kind = Tok_PipeEquals;
 		} else {
 			tok.kind = Tok_Pipe;
 		}
@@ -333,12 +371,29 @@ Token getToken (Arena *str_arena, SourceFile src, const char **p) {
 		String val = processStringLiteral(str_arena, (String) {pos - begin, begin});
 		tok = (Token) {Tok_String, .val.string = val};
 	} break;
+	case '\'': {
+	char_literal:
+		pos++;
+		// TODO That look-back is not actually safe.
+		tok = (Token) {Tok_Integer, .val.literal = {
+			.integer = pos[0],
+			.int_type = pos[-2] == 'L' ? Int_int | Int_unsigned : Int_char,
+		}};
+		if (pos[0] == '\'') {
+			pos++;
+			tok.val.literal.integer = escape_codes[(uchar)pos[0]];
+		}
+		pos++;
+	} break;
 	default:
 		if (isAlpha(pos[0])) {
+			if (pos[0] == 'L' && pos[1] == '\'') {
+				pos++;
+				goto char_literal;
+			}
 			const char *start = pos;
 			while (isAlnum(*pos))
 				pos++;
-
 			tok = fromWord((String) {pos - start, start});
 
 			// TODO __FILE__ and __LINE__ should actually be handled by macro expansion.
@@ -351,8 +406,10 @@ Token getToken (Arena *str_arena, SourceFile src, const char **p) {
 				// time would be quadratic complexity. Bad, but maybe
 				// does not occur very often...? Actually, assert-heavy
 				// code probably does. Ugh, I'll have to count every
-				// newline I skip...
+				// newline I skip... but only in the top-level lexer
+				// loop, which is maybe not that bad.
 				tok.val.literal.integer = 0;
+				tok.val.literal.int_type = Int_int;
 			}
 			pos--;
 		} else if (isDigit(pos[0]) || pos[0] == '.') {
@@ -368,7 +425,7 @@ Token getToken (Arena *str_arena, SourceFile src, const char **p) {
 				pos += 2;
 			}
 
-			while (isDigit(*pos) || (is_hex && *pos >= 'a' && *pos <= 'f'))
+			while (isDigit(*pos) || (is_hex && isHexDigit(*pos)))
 				pos++;
 
 			if (*pos == '.') {
@@ -485,10 +542,9 @@ Tokenization lex (Arena *generated_strings, String filename, Paths paths, Target
 	Tokenization t = {0};
 
 	SourceFile *initial_source = readAllAlloc(zString(""), filename);
-	if (initial_source == NULL) {
-		fprintf(stderr, RED "error: " RESET "could not open file \"%.*s\"\n", STRING_PRINTAGE(filename));
-		exit(1);
-	}
+	if (initial_source == NULL)
+		generalFatal("could not open file \"%.*s\"\n", STRING_PRINTAGE(filename));
+
 	PUSH(t.files, initial_source);
 	SourceFile source = *initial_source;
 
@@ -1053,6 +1109,9 @@ static MacroToken concatenate (const ExpansionParams ex, Token first, u32 *marke
 	char *insert = rep;
 	strPrintToken(&insert, rep+len, first);
 	strPrintToken(&insert, rep+len, second.tok);
+	int *c = NULL;
+	if (insert > rep + len)
+		*c = 1;
 	*insert = 0;
 
 	const char *src = rep;
@@ -1439,7 +1498,7 @@ static bool evalPreprocExpression(ExpansionParams params, Tokenization *buf) {
 				Macro *m = mapGet(params.macros, tok.val.identifier);
 				if (m) {
 					if (m->parameters.len > 0)
-						lexerror(params.source, pos, "TODO Implement function-like macros");
+						lexerror(params.source, pos, "TODO Expand function-like macros in preprocessor constant expressions");
 					PUSH(*params.stack, ((Replacement) {m}));
 					expandInto(params, buf, false);
 					continue;
@@ -1498,6 +1557,8 @@ const char *token_names[Tok_EOF+1] = {
 	[Tok_AsteriskEquals] = "*=",
 	[Tok_Slash] = "/",
 	[Tok_SlashEquals] = "/=",
+	[Tok_Percent] = "%",
+	[Tok_PercentEquals] = "%=",
 	[Tok_Less] = "<",
 	[Tok_LessEquals] = "<=",
 	[Tok_DoubleLess] = "<<",
@@ -1506,8 +1567,10 @@ const char *token_names[Tok_EOF+1] = {
 	[Tok_DoubleGreater] = ">>",
 	[Tok_Ampersand] = "&",
 	[Tok_DoubleAmpersand] = "&&",
+	[Tok_AmpersandEquals] = "&=",
 	[Tok_Pipe] = "|",
 	[Tok_DoublePipe] = "||",
+	[Tok_PipeEquals] = "|=",
 	[Tok_Hat] = "^",
 	[Tok_Tilde] = "~",
 
@@ -1551,8 +1614,9 @@ u32 strPrintTokenLen (Token t) {
 	case Tok_Identifier: return t.val.identifier.len;
 	case Tok_PreprocDirective: return t.val.identifier.len + 1;
 	case Tok_String: return t.val.string.len * 2 + 2;
-	case Tok_Integer: return t.val.literal.int_type <= Int_int ? 12 : 24;
+	case Tok_Integer: return 25;
 	default:
+		assert(tokenName(t.kind));
 		return strlen(tokenName(t.kind));
 	}
 }
@@ -1566,7 +1630,7 @@ void strPrintToken (char **dest, const char *end, Token t) {
 		printto(dest, end, "%.*s", STRING_PRINTAGE(t.val.identifier));
 		return;
 	case Tok_String:
-		printto(dest, end, "%.*s", STRING_PRINTAGE(t.val.string));
+		printto(dest, end, "\"%.*s\"", STRING_PRINTAGE(t.val.string));
 		return;
 	case Tok_Integer:
 		printto(dest, end, "%lld", t.val.literal.integer);
@@ -1594,6 +1658,9 @@ bool isAlpha (char c) {
 	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_';
 }
 
+bool isHexDigit (char c) {
+	return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+}
 bool isDigit (char c) {
 	return c >= '0' && c <= '9';
 }
@@ -1661,7 +1728,12 @@ String processStringLiteral(Arena *arena, String src) {
 	char *res = aalloc(arena, src.len + 1);
 	u32 len = 0;
 	for (u32 i = 0; i < src.len; i++) {
-		res[len] = src.ptr[i];
+		if (src.ptr[i] == '\\') {
+			i++;
+			res[len] = escape_codes[(uchar) src.ptr[i]];
+		} else {
+			res[len] = src.ptr[i];
+		}
 		len++;
 	}
 	return (String) {len, res};

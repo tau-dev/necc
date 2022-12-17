@@ -50,6 +50,7 @@ typedef enum {
 	Ir_Sub,
 	Ir_Mul,
 	Ir_Div,
+	Ir_Mod,
 	Ir_BitAnd,
 	Ir_BitOr,
 	Ir_BitNot,

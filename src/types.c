@@ -83,6 +83,9 @@ u32 typeSize (Type t, const Target *target) {
 		unreachable;
 	case Kind_Array:
 		return t.array.count * typeSize(*t.array.inner, target);
+	case Kind_VLArray:
+		assert(t.array.count == IR_REF_NONE);
+		return 0;
 	default: assert(!"TODO Calculate other type sizes.");
 	}
 }
@@ -110,6 +113,8 @@ u32 addMemberOffset (u32 *offset, Type t, const Target *target) {
 bool fnTypeCompatible (FunctionType a, FunctionType b) {
 	if (!typeCompatible(*a.rettype, *b.rettype))
 		return false;
+	if (a.missing_prototype || b.missing_prototype)
+		return true;
 	if (a.parameters.len != b.parameters.len)
 		return false;
 
@@ -277,7 +282,11 @@ void printTypeHead (Type t, char **pos, const char *end) {
 	case Kind_FunctionPtr:
 		t.kind = Kind_Function;
 		printTypeHead(t, pos, end);
+#ifdef NDEBUG
 		printto(pos, end, "(*");
+#else
+		printto(pos, end, "(fn*");
+#endif
 		break;
 	case Kind_Array:
 		printTypeHead(*t.array.inner, pos, end);

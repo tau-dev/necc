@@ -11,6 +11,7 @@ IrRef genAdd(IrBuild *, IrRef, IrRef);
 IrRef genSub(IrBuild *, IrRef, IrRef);
 IrRef genMul(IrBuild *, IrRef, IrRef);
 IrRef genDiv(IrBuild *, IrRef, IrRef);
+IrRef genMod(IrBuild *, IrRef, IrRef);
 IrRef genOr(IrBuild *, IrRef, IrRef);
 IrRef genXor(IrBuild *, IrRef, IrRef);
 IrRef genAnd(IrBuild *, IrRef, IrRef);

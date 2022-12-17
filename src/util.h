@@ -104,7 +104,7 @@ typedef struct {
 
 
 
-void printto (char **insert, const char *end, char *fmt, ...);
+void printto (char **insert, const char *end, const char *fmt, ...);
 
 void **mapGetOrCreate(StringMap *, String);
 void *mapGet(const StringMap *, String);

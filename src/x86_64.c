@@ -465,6 +465,13 @@ static void emitInstForward(Codegen *c, IrRef i) {
 				sizeOp(inst.size), valueName(c, inst.binop.rhs), valueName(c, i),
 				registerSized(RAX, inst.size));
 		break;
+	case Ir_Mod:
+		fprintf(c->out, " xor rdx, rdx\n");
+		loadTo(c, RAX, inst.binop.lhs);
+		fprintf(c->out, " idiv %s %s\n mov %s, %s\n",
+				sizeOp(inst.size), valueName(c, inst.binop.rhs), valueName(c, i),
+				registerSized(RDX, inst.size));
+		break;
 	case Ir_BitOr: triple(c, "or", inst.binop.lhs, inst.binop.rhs, i); break;
 	case Ir_BitXor: triple(c, "xor", inst.binop.lhs, inst.binop.rhs, i); break;
 	case Ir_BitAnd: triple(c, "and", inst.binop.lhs, inst.binop.rhs, i); break;

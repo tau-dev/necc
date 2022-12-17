@@ -58,6 +58,7 @@ typedef struct {
 	Type *rettype;
 	DeclList parameters;
 	bool is_vararg;
+	bool missing_prototype;
 } FunctionType;
 
 typedef struct {

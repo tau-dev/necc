@@ -91,6 +91,8 @@ static IrRef genBinOp (IrBuild *build, InstKind op, IrRef a, IrRef b) {
 			i.constant = inst[a].constant * inst[b].constant; break;
 		case Ir_Div:
 			i.constant = inst[a].constant / inst[b].constant; break;
+		case Ir_Mod:
+			i.constant = inst[a].constant % inst[b].constant; break;
 		case Ir_BitAnd:
 			i.constant = inst[a].constant & inst[b].constant; break;
 		case Ir_BitOr:
@@ -122,8 +124,9 @@ static IrRef genBinOp (IrBuild *build, InstKind op, IrRef a, IrRef b) {
 	{
 		i.kind = Ir_Reloc;
 		i64 delta = op == Ir_Add ? (i64)inst[i.binop.rhs].constant : -(i64)inst[i.binop.rhs].constant;
-		i.reloc.id = inst[i.binop.lhs].reloc.id;
-		i.reloc.offset = inst[i.binop.lhs].reloc.offset + delta;
+		u32 prev = i.binop.lhs;
+		i.reloc.id = inst[prev].reloc.id;
+		i.reloc.offset = inst[prev].reloc.offset + delta;
 	}
 	return append(build, i);
 }
@@ -147,6 +150,10 @@ IrRef genMul (IrBuild *build, IrRef a, IrRef b) {
 
 IrRef genDiv (IrBuild *build, IrRef a, IrRef b) {
 	return genBinOp(build, Ir_Div, a, b);
+}
+
+IrRef genMod (IrBuild *build, IrRef a, IrRef b) {
+	return genBinOp(build, Ir_Mod, a, b);
 }
 
 IrRef genOr (IrBuild *build, IrRef a, IrRef b) {
@@ -454,6 +461,7 @@ void printBlock (FILE *dest, Block *blk, IrList ir) {
 		case Ir_Sub: fprintf(dest, "sub"); break;
 		case Ir_Mul: fprintf(dest, "mul"); break;
 		case Ir_Div: fprintf(dest, "div"); break;
+		case Ir_Mod: fprintf(dest, "mod"); break;
 		case Ir_BitAnd: fprintf(dest, "and"); break;
 		case Ir_BitOr: fprintf(dest, "or"); break;
 		case Ir_BitXor: fprintf(dest, "xor"); break;
