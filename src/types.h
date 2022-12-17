@@ -134,6 +134,7 @@ u32 typeSize(Type t, const Target *target);
 u32 typeAlignment(Type t, const Target *target);
 u32 addMemberOffset(u32 *offset, Type t, const Target *target);
 bool isFlexibleArrayMember(Members m, u32 index);
+int rankDiff(BasicType a, BasicType b);
 
 char *printDeclarator(Arena *a, Type t, String name);
 char *printType(Arena *a, Type t);

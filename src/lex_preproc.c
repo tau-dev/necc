@@ -107,6 +107,20 @@ Token fromWord (String word) {
 	return (Token) {Tok_Identifier, .val.identifier = word};
 }
 
+_Noreturn void lexerrorOffset (SourceFile source, u32 offset, const char *msg, ...) {
+    printErr(source, offset);
+
+    va_list args;
+    va_start(args, msg);
+    vfprintf(stderr, msg, args);
+    va_end(args);
+    fprintf(stderr, ".\n");
+
+// #ifndef NDEBUG
+// 	PRINT_STACK_TRACE;
+// #endif
+	exit(1);
+}
 
 _Noreturn void lexerror (SourceFile source, const char *pos, const char *msg, ...) {
     printErr(source, pos - source.content.ptr);
@@ -348,11 +362,13 @@ Token getToken (Arena *str_arena, SourceFile src, const char **p) {
 			// like decimal-type suffixes and digit separators anyways.
 			const char *start = pos;
 
+			bool is_hex = false;
 			if (pos[0] == '0' && pos[1] == 'x') {
+				is_hex = true;
 				pos += 2;
 			}
 
-			while (isDigit(*pos))
+			while (isDigit(*pos) || (is_hex && *pos >= 'a' && *pos <= 'f'))
 				pos++;
 
 			if (*pos == '.') {
@@ -369,7 +385,7 @@ Token getToken (Arena *str_arena, SourceFile src, const char **p) {
 
 				tok = (Token) {Tok_Real, .val.real = strtod(start, NULL)};
 			} else {
-				tok = (Token) {Tok_Integer, .val.literal.integer = strtoll(start, NULL, 10)};
+				tok = (Token) {Tok_Integer, .val.literal.integer = strtoll(start, NULL, 0)};
 
 				bool is_unsigned = pos[0] == 'u' || pos[0] == 'U';
 				if (is_unsigned)
@@ -428,6 +444,7 @@ typedef struct Replacement {
 	// Otherwise, this is an array of the function-like macro's arguments.
 	// STYLE The files field of the Tokenization is not used here.
 	Tokenization *toks;
+	bool followed_by_concat;
 } Replacement;
 
 typedef LIST(Replacement) MacroStack;
@@ -493,7 +510,7 @@ Tokenization lex (Arena *generated_strings, String filename, Paths paths, Target
 	};
 
 	bool first_line_in_file = true;
-	while (*pos) {
+	while (true) {
 		bool file_begin = pos == source.content.ptr;
 		bool line_begin;
 		Token tok;
@@ -529,6 +546,7 @@ Tokenization lex (Arena *generated_strings, String filename, Paths paths, Target
 				}
 				String name = {pos - start, start};
 				void **entry = mapGetOrCreate(&macros, name);
+				// TODO Disallow `defined` or
 // 				if (*entry != NULL)
 // 					fprintf(stderr, "redefining %.*s (TODO Check that definitions are identical)\n", STRING_PRINTAGE(name));
 
@@ -599,6 +617,14 @@ Tokenization lex (Arena *generated_strings, String filename, Paths paths, Target
 							t.parameter = param - mac->parameters.ptr + 1;
 					}
 					PUSH(macro_assembly, t);
+				}
+				if (macro_assembly.len) {
+					MacroToken first = macro_assembly.ptr[0];
+					if (first.tok.kind == Tok_PreprocConcatenate)
+						lexerrorOffset(source, first.file_offset, "a %s##%s preprocessing token may not occur at the beginning of a macro definition");
+					MacroToken last = macro_assembly.ptr[macro_assembly.len-1];
+					if (last.tok.kind == Tok_PreprocConcatenate)
+						lexerrorOffset(source, last.file_offset, "a %s##%s preprocessing token may not occur at the end of a macro definition");
 				}
 				mac->tokens.ptr = macro_assembly.ptr;
 				mac->tokens.len = macro_assembly.len;
@@ -765,8 +791,10 @@ Tokenization lex (Arena *generated_strings, String filename, Paths paths, Target
 		}
 		appendOneToken(&t, tok, (TokenPosition) {source_pos, source.idx});
 
-		if (tok.kind == Tok_EOF && source.idx == 0)
+		if (tok.kind == Tok_EOF) {
+			assert(source.idx == 0);
 			break;
+		}
 	}
 
 	free(prepreoc_evaluation_buf.tokens);
@@ -902,8 +930,13 @@ static Tokenization *takeArguments(const ExpansionParams ex, Macro *mac) {
 	return argument_bufs;
 }
 
-void strPrintToken(char **dest, const char *end, Token t);
-u32 strPrintTokenLen(Token t);
+// STYLE The following code has very dense logic and probably needs more
+// comments.
+
+static MacroToken toMacroToken(Tokenization *tok, u32 pos);
+static MacroToken concatenate(const ExpansionParams ex, Token first, u32 *marker);
+static Token stringify(Arena *arena, Tokenization t);
+
 static MacroToken takeToken (const ExpansionParams ex, u32 *marker) {
 	MacroStack *stack = ex.stack;
 	while (stack->len) {
@@ -914,49 +947,59 @@ static MacroToken takeToken (const ExpansionParams ex, u32 *marker) {
 
 			MacroToken t = macro->tokens.ptr[repl->pos];
 			repl->pos++;
+
+			// PERFORMANCE Remove this lookahead (mark it in the #define parsing).
+			bool followed_by_concat = repl->pos < macro->tokens.len &&
+					macro->tokens.ptr[repl->pos].tok.kind == Tok_PreprocConcatenate;
+
 			if (t.parameter) {
 				if (t.tok.kind == Tok_PreprocDirective) {
-					// Stringify!
-					Tokenization arg = repl->toks[t.parameter-1];
-					u32 data_len = 0;
-					for (u32 i = 0; i < arg.count; i++) {
-						// TODO Missing spacing
-						data_len += strPrintTokenLen(arg.tokens[i]);
-					}
-					char *start = aalloc(ex.strings_arena, data_len);
-					char *c = start;
-					char *end = c + data_len;
-					for (u32 i = 0; i < arg.count; i++) {
-						// TODO Missing spacing
-						strPrintToken(&c, end, arg.tokens[i]);
-					}
-
+					if (followed_by_concat)
+						lexerror(ex.source, ex.source.content.ptr + ex.source_file_offset,
+								"(TODO location, phrasing) stringified parameter can not followed by concatenation");;
 					collapseMacroStack(stack, marker);
-
-					t.tok = (Token) {Tok_String, .val.string = {data_len, start}};
+					Tokenization arg = repl->toks[t.parameter-1];
+					t.tok = stringify(ex.strings_arena, arg);
 					return t;
 				}
-
 				Replacement arg = {
 					.toks = &repl->toks[t.parameter-1],
+					.followed_by_concat = followed_by_concat,
 				};
-				if (*marker == stack->len)
-					(*marker)++;
-				PUSH(*stack, arg);
-				collapseMacroStack(stack, marker);
+				if (arg.toks->count) {
+					if (*marker == stack->len)
+						(*marker)++;
+					PUSH(*stack, arg);
+				} else {
+					if (followed_by_concat) {
+						repl->pos++;
+						t = macro->tokens.ptr[repl->pos];
+						repl->pos++;
+						if (!t.parameter || repl->toks[t.parameter-1].count) {
+							collapseMacroStack(stack, marker);
+							return t;
+						}
+					}
+					collapseMacroStack(stack, marker);
+				}
 			} else {
-				collapseMacroStack(stack, marker);
-				return t;
+				if (followed_by_concat) {
+					return concatenate(ex, t.tok, marker);
+				} else {
+					collapseMacroStack(stack, marker);
+					return t;
+				}
 			}
 		} else {
-			assert(repl->pos < repl->toks->count);
-			u32 pos = repl->pos++;
+			MacroToken t = toMacroToken(repl->toks, repl->pos);
+			repl->pos++;
+			if (repl->pos < repl->toks->count)
+				return t;
 			collapseMacroStack(stack, marker);
-			return (MacroToken) {
-				.tok = repl->toks->tokens[pos],
-				.file_ref = repl->toks->positions[pos].macro_file_ref,
-				.file_offset = repl->toks->positions[pos].macro_file_offset,
-			};
+			if (repl->followed_by_concat)
+				return concatenate(ex, t.tok, marker);
+			else
+				return t;
 		}
 	}
 
@@ -969,6 +1012,69 @@ static MacroToken takeToken (const ExpansionParams ex, u32 *marker) {
 		.file_ref = ex.source.idx,
 		.file_offset = pos,
 	};
+}
+
+void strPrintToken(char **dest, const char *end, Token t);
+u32 strPrintTokenLen(Token t);
+
+static MacroToken concatenate (const ExpansionParams ex, Token first, u32 *marker) {
+	Replacement *repl = &ex.stack->ptr[ex.stack->len - 1];
+	Macro *macro = repl->mac;
+	MacroToken operator = macro->tokens.ptr[repl->pos];
+	repl->pos++;
+	MacroToken second = macro->tokens.ptr[repl->pos];
+	repl->pos++;
+	collapseMacroStack(ex.stack, marker);
+
+	// TODO Allow a chain of concatenations.
+	if (second.parameter) {
+		Replacement arg = {
+			.toks = &repl->toks[second.parameter-1],
+			.pos = 1,
+		};
+		if (arg.toks->count == 0) {
+			operator.tok = first;
+			return operator;
+		}
+
+		// Concat to the first token from the argument,
+		// push the rest of the argument onto the
+		// replacement stack.
+		second = toMacroToken(arg.toks, 0);
+
+		if (arg.toks->count > 1) {
+			if (*marker == ex.stack->len)
+				(*marker)++;
+			PUSH(*ex.stack, arg);
+		}
+	}
+	u32 len = strPrintTokenLen(first) + strPrintTokenLen(second.tok) + 1;
+	char *rep = aalloc(ex.strings_arena, len);
+	char *insert = rep;
+	strPrintToken(&insert, rep+len, first);
+	strPrintToken(&insert, rep+len, second.tok);
+	*insert = 0;
+
+	const char *src = rep;
+	operator.tok = getToken(ex.strings_arena, ex.source, &src);
+	return operator;
+}
+
+static Token stringify (Arena *arena, Tokenization arg) {
+	u32 data_len = 0;
+	for (u32 i = 0; i < arg.count; i++)
+		data_len += strPrintTokenLen(arg.tokens[i]) + arg.tokens[i].preceded_by_space;
+
+	char *start = aalloc(arena, data_len);
+	char *c = start;
+	char *end = c + data_len;
+	for (u32 i = 0; i < arg.count; i++) {
+		if (arg.tokens[i].preceded_by_space)
+			printto(&c, end, " ");
+		strPrintToken(&c, end, arg.tokens[i]);
+	}
+
+	return (Token) {Tok_String, .val.string = {data_len, start}};
 }
 
 // Pop completed replacements from the stack until hitting a token.
@@ -993,13 +1099,21 @@ static void collapseMacroStack (MacroStack *stack, u32 *marker) {
 		} else {
 			if (repl->pos < repl->toks->count)
 				return;
-			// PERFOMANCE It would be correct, but very confusing,
-			// to drop this check on parameters.
+			// PERFOMANCE It would be correct to drop this check on
+			// parameters, but it would be a lot of work to explain why.
 			if (*marker == stack->len)
 				(*marker)--;
 			stack->len--;
 		}
 	}
+}
+
+static MacroToken toMacroToken (Tokenization *tok, u32 pos) {
+	return (MacroToken) {
+		.tok = tok->tokens[pos],
+		.file_ref = tok->positions[pos].macro_file_ref,
+		.file_offset = tok->positions[pos].macro_file_offset,
+	};
 }
 
 
@@ -1370,6 +1484,7 @@ const char *token_names[Tok_EOF+1] = {
 
 	[Tok_Bang] = "!",
 	[Tok_BangEquals] = "!=",
+	[Tok_Question] = "?",
 	[Tok_Equals] = "=",
 	[Tok_DoubleEquals] = "==",
 	[Tok_Arrow] = "->",

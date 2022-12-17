@@ -1,6 +1,15 @@
 #include "analysis.h"
 #include "ir_gen.h"
 
+
+/*
+
+Routines for analyzing and transforming the IR (the latter part should
+be moved into a separate file at some point).
+
+*/
+
+
 #define RECURSE_NEXT_BLOCKS(visitor, blk, ...)  \
 	switch (blk->exit.kind) { \
 	case Exit_Unconditional: \

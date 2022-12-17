@@ -154,6 +154,16 @@ bool typeCompatible (Type a, Type b) {
 }
 
 
+int rankDiff(BasicType a, BasicType b) {
+	a &= ~Int_unsigned;
+	b &= ~Int_unsigned;
+	if ((a == Int_char && b == Int_suchar) || (a == Int_suchar && b == Int_char))
+		return 0;
+	else
+		return a - b;
+}
+
+
 #define MAX_TYPE_STRING_LENGTH 1024
 
 static void printComplete (char **pos, const char *end, Type t, String name) {

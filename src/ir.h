@@ -54,9 +54,11 @@ typedef enum {
 	Ir_BitOr,
 	Ir_BitNot,
 	Ir_BitXor,
-	Ir_Equals,
 	Ir_LessThan,
 	Ir_LessThanOrEquals,
+	Ir_Equals,
+	Ir_ShiftLeft,
+	Ir_ShiftRight,
 } InstKind;
 
 typedef enum {
@@ -127,6 +129,8 @@ typedef struct Inst {
 	case Ir_Equals: \
 	case Ir_LessThan: \
 	case Ir_LessThanOrEquals: \
+	case Ir_ShiftLeft: \
+	case Ir_ShiftRight: \
 	case Ir_Access
 
 #define UNOP_CASES \

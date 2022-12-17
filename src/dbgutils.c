@@ -48,8 +48,8 @@ void tokz(Token t) {
 		if (c) {
 			appendz(c);
 		} else {
-			char buf[10] = {0};
-			snprintf(buf, 10, "[%d]", (int) t.kind);
+			char buf[16] = {0};
+			snprintf(buf, 16, "[unkown:%d]", (int) t.kind);
 			appendz(buf);
 		}
 	}

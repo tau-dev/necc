@@ -75,12 +75,13 @@ Block *startNewBlock (IrBuild *build, Arena *arena, String label) {
 
 static IrRef genBinOp (IrBuild *build, InstKind op, IrRef a, IrRef b) {
 	Inst *inst = build->ir.ptr;
-	assert(inst[a].size == inst[b].size);
+	// a apparently has to be the bigger operand:
 	Inst i = {op, inst[a].size, .binop = {a, b}};
 
-	bool commutative = op == Ir_Add || op == Ir_Mul || op == Ir_BitAnd || op == Ir_BitOr || op == Ir_BitXor;
+	bool commutative = op == Ir_Add || op == Ir_Mul || op == Ir_BitAnd || op == Ir_BitOr || op == Ir_BitXor || op == Ir_Equals;
 	if (inst[a].kind == Ir_Constant && inst[b].kind == Ir_Constant) {
 		i.kind = Ir_Constant;
+		// TODO Check overflow.
 		switch (op) {
 		case Ir_Add:
 			i.constant = inst[a].constant + inst[b].constant; break;
@@ -96,17 +97,25 @@ static IrRef genBinOp (IrBuild *build, InstKind op, IrRef a, IrRef b) {
 			i.constant = inst[a].constant | inst[b].constant; break;
 		case Ir_BitXor:
 			i.constant = inst[a].constant ^ inst[b].constant; break;
+		case Ir_Equals:
+			i.constant = inst[a].constant == inst[b].constant; break;
 		case Ir_LessThan:
 			i.constant = inst[a].constant < inst[b].constant; break;
 		case Ir_LessThanOrEquals:
 			i.constant = inst[a].constant <= inst[b].constant; break;
+		case Ir_ShiftLeft:
+			i.constant = inst[a].constant << inst[b].constant; break;
+		case Ir_ShiftRight:
+			i.constant = inst[a].constant >> inst[b].constant; break;
 		default:
 			unreachable;
 		}
+		return append(build, i);
 	} else if (commutative && inst[a].kind == Ir_Constant) {
 		i.binop.lhs = b;
 		i.binop.rhs = a;
 	}
+
 	if ((op == Ir_Add || op == Ir_Sub) &&
 		inst[i.binop.lhs].kind == Ir_Reloc &&
 		inst[i.binop.rhs].kind == Ir_Constant)
@@ -120,10 +129,14 @@ static IrRef genBinOp (IrBuild *build, InstKind op, IrRef a, IrRef b) {
 }
 
 IrRef genAdd (IrBuild *build, IrRef a, IrRef b) {
+	Inst *inst = build->ir.ptr;
+	assert(inst[a].size == inst[b].size);
 	return genBinOp(build, Ir_Add, a, b);
 }
 
 IrRef genSub (IrBuild *build, IrRef a, IrRef b) {
+	Inst *inst = build->ir.ptr;
+	assert(inst[a].size == inst[b].size);
 	return genBinOp(build, Ir_Sub, a, b);
 }
 
@@ -137,15 +150,29 @@ IrRef genDiv (IrBuild *build, IrRef a, IrRef b) {
 }
 
 IrRef genOr (IrBuild *build, IrRef a, IrRef b) {
+	Inst *inst = build->ir.ptr;
+	assert(inst[a].size == inst[b].size);
 	return genBinOp(build, Ir_BitOr, a, b);
 }
 
 IrRef genXor (IrBuild *build, IrRef a, IrRef b) {
+	Inst *inst = build->ir.ptr;
+	assert(inst[a].size == inst[b].size);
 	return genBinOp(build, Ir_BitXor, a, b);
 }
 
 IrRef genAnd (IrBuild *build, IrRef a, IrRef b) {
+	Inst *inst = build->ir.ptr;
+	assert(inst[a].size == inst[b].size);
 	return genBinOp(build, Ir_BitAnd, a, b);
+}
+
+IrRef genShiftLeft (IrBuild *build, IrRef a, IrRef b) {
+	return genBinOp(build, Ir_ShiftLeft, a, b);
+}
+
+IrRef genShiftRight (IrBuild *build, IrRef a, IrRef b) {
+	return genBinOp(build, Ir_ShiftRight, a, b);
 }
 
 
@@ -433,6 +460,8 @@ void printBlock (FILE *dest, Block *blk, IrList ir) {
 		case Ir_LessThan: fprintf(dest, "cmp<"); break;
 		case Ir_LessThanOrEquals: fprintf(dest, "cmp<="); break;
 		case Ir_Equals: fprintf(dest, "cmp=="); break;
+		case Ir_ShiftLeft: fprintf(dest, "shift<<"); break;
+		case Ir_ShiftRight: fprintf(dest, "shift>>"); break;
 		}
 		fprintf(dest, " %lu %lu\n", (ulong) inst.binop.lhs, (ulong) inst.binop.rhs);
 	}
@@ -440,7 +469,7 @@ void printBlock (FILE *dest, Block *blk, IrList ir) {
 	Exit exit = blk->exit;
 	switch (exit.kind) {
 	case Exit_Unconditional:
-		fprintf(dest, "       jmp %.*s%lu\n", STRING_PRINTAGE(exit.unconditional->label), (ulong) blk->id);
+		fprintf(dest, "       jmp %.*s%lu\n", STRING_PRINTAGE(exit.unconditional->label), (ulong) exit.unconditional->id);
 		printBlock(dest, exit.unconditional, ir);
 		break;
 	case Exit_Branch:

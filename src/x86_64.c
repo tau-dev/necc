@@ -504,6 +504,22 @@ static void emitInstForward(Codegen *c, IrRef i) {
 		     valueName(c, i),
 		     registerSized(RSI, inst.size));
 	} break;
+	case Ir_ShiftLeft: {
+		loadTo(c, RCX, inst.binop.rhs);
+		const char *reg = loadTo(c, R8, inst.binop.rhs);
+		fprintf(c->out, " xor rax, rax\n"
+			" shld %s, rax\n"
+			" mov %s, %s\n",
+		    reg, valueName(c, i), reg);
+	} break;
+	case Ir_ShiftRight: {
+		loadTo(c, RCX, inst.binop.rhs);
+		const char *reg = loadTo(c, R8, inst.binop.rhs);
+		fprintf(c->out, " xor rax, rax\n"
+			" shrd %s, rax\n"
+			" mov %s, %s\n",
+		    reg, valueName(c, i), reg);
+	} break;
 	case Ir_Truncate: {
 		const char *reg = registerSized(RAX, c->ir.ptr[i].size);
 		fprintf(c->out, " mov %s, %s\n", reg, valueName(c, inst.unop));
