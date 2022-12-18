@@ -30,6 +30,7 @@ typedef enum {
 	F_EmitAssembly,
 	F_OptSimple,
 	F_OptStoreLoad,
+	F_Werror,
 } Flag;
 
 static Name flags[] = {
@@ -50,6 +51,8 @@ static Name flags[] = {
 	{"O", F_OptSimple},
 	{"O1", F_OptSimple},
 	{"Ostore-load", F_OptStoreLoad},
+	{"Werr", F_Werror},
+	{"Werror", F_Werror},
 	{0}
 };
 
@@ -68,6 +71,7 @@ const char *help_string = "Usage:\n"
 	" -nostdinc       Disable standard include paths.\n"
 	" -nostdlib       Do not link to the standard library. (TODO)\n"
 	" -simple-types   Print types (in declaration lists or error messages) in an easier-to-parse left-to-right syntax. (TODO)\n"
+	" -Werr, -Werror  Fail the compilation when a warning is generated.\n"
 	"\n"
 	"The following output options write to stdout by default, or may be followed by ‘=<FILNAME>’ to specify an output file. Default: ‘-as’.\n"
 	" -o, -out        Generate an executable. (TODO)\n"
@@ -168,7 +172,10 @@ int main (int argc, char **args) {
 
 	Options opt = {
 		.target = target_x64_linux_gcc,
+		.warn_on_wrapping = true,
+		.warn_char_subscript = true,
 	};
+
 	const char *assembly_out = NULL;
 	const char *ir_out = NULL;
 	bool stdinc = true;
@@ -220,6 +227,7 @@ int main (int argc, char **args) {
 				opt_store_load = true;
 				break;
 			case F_OptStoreLoad: opt_store_load = true; break;
+			case F_Werror: opt.error_on_warnings = true; break;
 			case F_Unknown:
 				fprintf(stderr, "%swarning: %sIgnoring unknown flag %s\n", YELLOW, RESET, args[i]);
 			}
@@ -241,6 +249,7 @@ int main (int argc, char **args) {
 	}
 
 	if (stdinc) {
+		PUSH(sys_paths, zString(MUSL_DIR "/arch/generic/"));
 		PUSH(sys_paths, zString(MUSL_DIR "/arch/x86_64/"));
 		PUSH(sys_paths, zString(MUSL_DIR "/obj/include/"));
 		PUSH(sys_paths, zString(MUSL_DIR "/include/"));
@@ -256,8 +265,10 @@ int main (int argc, char **args) {
 	// The Real Work happens now.
 
 	Tokenization tokens = lex(&arena, input, paths, &target_x64_linux_gcc);
-	parse(&arena, tokens, opt, &module);
+	parse(&arena, tokens, &opt, &module);
 
+	if (opt.emitted_warnings && opt.error_on_warnings)
+		generalFatal("generated warnings");
 
 	// Analyses and transformations:
 	for (u32 i = 0; i < module.len; i++) {

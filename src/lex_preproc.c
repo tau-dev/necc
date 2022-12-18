@@ -17,6 +17,7 @@ Combined lexer and preprocessor.
 bool isSpace(char);
 bool isAlpha(char c);
 bool isHexDigit(char c);
+int hexToInt(char c);
 bool isDigit(char c);
 bool isAlnum(char c);
 
@@ -43,6 +44,8 @@ typedef struct {
 Keyword names[] = {
 	{"if", Tok_Key_If},
 	{"else", Tok_Key_Else},
+	{"switch", Tok_Key_Switch},
+	{"case", Tok_Key_Case},
 	{"goto", Tok_Key_Goto},
 	{"while", Tok_Key_While},
 	{"do", Tok_Key_Do},
@@ -207,7 +210,12 @@ Token getToken (Arena *str_arena, SourceFile src, const char **p) {
 			tok.kind = Tok_LessEquals;
 		} else if (pos[1] == '<') {
 			pos++;
-			tok.kind = Tok_DoubleLess;
+			if (pos[1] == '=') {
+				pos++;
+				tok.kind = Tok_DoubleLessEquals;
+			} else {
+				tok.kind = Tok_DoubleLess;
+			}
 		} else {
 			tok.kind = Tok_Less;
 		}
@@ -218,7 +226,12 @@ Token getToken (Arena *str_arena, SourceFile src, const char **p) {
 			tok.kind = Tok_GreaterEquals;
 		} else if (pos[1] == '>') {
 			pos++;
-			tok.kind = Tok_DoubleGreater;
+			if (pos[1] == '=') {
+				pos++;
+				tok.kind = Tok_DoubleGreaterEquals;
+			} else {
+				tok.kind = Tok_DoubleGreater;
+			}
 		} else {
 			tok.kind = Tok_Greater;
 		}
@@ -374,16 +387,27 @@ Token getToken (Arena *str_arena, SourceFile src, const char **p) {
 	case '\'': {
 	char_literal:
 		pos++;
-		// TODO That look-back is not actually safe.
+		// TODO Get unicode vals.
 		tok = (Token) {Tok_Integer, .val.literal = {
 			.integer = pos[0],
-			.int_type = pos[-2] == 'L' ? Int_int | Int_unsigned : Int_char,
+			.int_type = Int_int,
 		}};
-		if (pos[0] == '\'') {
+		if (pos[0] == '\\') {
 			pos++;
-			tok.val.literal.integer = escape_codes[(uchar)pos[0]];
+			if (pos[0] == 'x') {
+				assert(isHexDigit(pos[1]));
+				assert(isHexDigit(pos[2]));
+				tok.val.literal.integer = hexToInt(pos[1])*16 + hexToInt(pos[2]);
+				if (tok.val.literal.integer >= 128)
+					tok.val.literal.integer -= 256;
+				pos += 2;
+			} else {
+				tok.val.literal.integer = escape_codes[(uchar)pos[0]];
+			}
 		}
 		pos++;
+		// TODO Error reporting
+		if (pos[0] != '\'') unreachable;
 	} break;
 	default:
 		if (isAlpha(pos[0])) {
@@ -733,6 +757,8 @@ Tokenization lex (Arena *generated_strings, String filename, Paths paths, Target
 					}
 					for (u32 i = 0; i < paths.sys_include_dirs.len && new_source == NULL; i++) {
 						new_source = readAllAlloc(paths.sys_include_dirs.ptr[i], includefilename);
+						if (new_source)
+							new_source->is_standard_header = true;
 					}
 					if (new_source == NULL)
 						lexerror(source, begin, "could not open include file \"%.*s\"", STRING_PRINTAGE(includefilename));
@@ -911,6 +937,7 @@ static bool expandInto (const ExpansionParams ex, Tokenization *dest, bool is_ar
 						.macro_file_ref = ex.source.idx,
 						.macro_file_offset = ex.source_file_offset,
 					});
+					collapseMacroStack(ex.stack, &level_of_argument_source);
 					continue;
 				}
 				arguments = takeArguments(ex, mac);
@@ -940,6 +967,7 @@ static bool expandInto (const ExpansionParams ex, Tokenization *dest, bool is_ar
 					break;
 				}
 			}
+			collapseMacroStack(ex.stack, &level_of_argument_source);
 			appendOneToken(dest, t.tok, (TokenPosition) {
 				.source_file_ref = t.file_ref,
 				.source_file_offset = t.file_offset,
@@ -1012,8 +1040,7 @@ static MacroToken takeToken (const ExpansionParams ex, u32 *marker) {
 				if (t.tok.kind == Tok_PreprocDirective) {
 					if (followed_by_concat)
 						lexerror(ex.source, ex.source.content.ptr + ex.source_file_offset,
-								"(TODO location, phrasing) stringified parameter can not followed by concatenation");;
-					collapseMacroStack(stack, marker);
+								"(TODO location, phrasing) stringified parameter can not followed by concatenation");
 					Tokenization arg = repl->toks[t.parameter-1];
 					t.tok = stringify(ex.strings_arena, arg);
 					return t;
@@ -1031,32 +1058,29 @@ static MacroToken takeToken (const ExpansionParams ex, u32 *marker) {
 						repl->pos++;
 						t = macro->tokens.ptr[repl->pos];
 						repl->pos++;
-						if (!t.parameter || repl->toks[t.parameter-1].count) {
-							collapseMacroStack(stack, marker);
+						if (!t.parameter || repl->toks[t.parameter-1].count)
 							return t;
-						}
 					}
-					collapseMacroStack(stack, marker);
+					// Argument was empty, retry.
 				}
 			} else {
-				if (followed_by_concat) {
+				if (followed_by_concat)
 					return concatenate(ex, t.tok, marker);
-				} else {
-					collapseMacroStack(stack, marker);
+				else
 					return t;
-				}
 			}
 		} else {
 			MacroToken t = toMacroToken(repl->toks, repl->pos);
 			repl->pos++;
 			if (repl->pos < repl->toks->count)
 				return t;
-			collapseMacroStack(stack, marker);
+
 			if (repl->followed_by_concat)
 				return concatenate(ex, t.tok, marker);
 			else
 				return t;
 		}
+		collapseMacroStack(stack, marker);
 	}
 
 	bool have_space = tryGobbleSpace(ex.source, ex.src);
@@ -1562,9 +1586,11 @@ const char *token_names[Tok_EOF+1] = {
 	[Tok_Less] = "<",
 	[Tok_LessEquals] = "<=",
 	[Tok_DoubleLess] = "<<",
+	[Tok_DoubleLessEquals] = "<<=",
 	[Tok_Greater] = ">",
 	[Tok_GreaterEquals] = ">=",
 	[Tok_DoubleGreater] = ">>",
+	[Tok_DoubleGreaterEquals] = ">>=",
 	[Tok_Ampersand] = "&",
 	[Tok_DoubleAmpersand] = "&&",
 	[Tok_AmpersandEquals] = "&=",
@@ -1659,8 +1685,20 @@ bool isAlpha (char c) {
 }
 
 bool isHexDigit (char c) {
-	return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+	if (c >= '0' && c <= '9')
+		return true;
+	c |= 32;
+	return c >= 'a' && c <= 'f';
 }
+
+int hexToInt (char c) {
+	if (c >= '0' && c <= '9')
+		return c - '0';
+	c |= 32;
+	assert(c >= 'a' && c <= 'f');
+	return c - 'a';
+}
+
 bool isDigit (char c) {
 	return c >= '0' && c <= '9';
 }

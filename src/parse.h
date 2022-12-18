@@ -22,6 +22,7 @@ typedef struct {
 	// ReferenceClass. ir holds the direct value only for
 	// Reference_RValue, pointer to the actual value otherwise.
 	u8 category;
+	u8 no_discard;
 } Value;
 
 typedef enum {
@@ -120,6 +121,6 @@ typedef LIST(StaticValue) Module;
 static inline bool isByref(Value val) { return val.category; }
 static inline bool isLvalue(Value val) { return val.category != Ref_RValue; }
 
-void parse(Arena *arena, Tokenization tokens, Options opt, Module *module);
+void parse(Arena *arena, Tokenization tokens, Options *opt, Module *module);
 
 

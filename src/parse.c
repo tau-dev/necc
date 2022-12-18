@@ -24,7 +24,7 @@ static Type chartype = {Kind_Basic, .basic = Int_char};
 static Type const_chartype = {Kind_Basic, .qualifiers = Qualifier_Const, .basic = Int_char};
 
 
-bool crash_on_error = false;
+
 // TODO Move this into Parse
 StringMap symbols = {0};
 
@@ -36,6 +36,7 @@ typedef struct {
 	const Tokenization tokens;
 	const Token *pos;
 	const Target target;
+	Options *opt;
 
 	u32 scope_depth;
 	// At the top level, these may be null.
@@ -67,7 +68,7 @@ typedef struct {
 	SPAN(char) reloc_data;
 } InitializationDest;
 
-static void vcomperror (Log level, const Tokenization *t, const Token *tok, const Token *parse_pos, const char *msg, va_list args) {
+static void vcomperror (Log level, bool crash_on_error, const Tokenization *t, const Token *tok, const Token *parse_pos, const char *msg, va_list args) {
 	(void) parse_pos;
 	u32 idx = tok - t->tokens;
 	TokenPosition pos = t->positions[idx];
@@ -77,7 +78,7 @@ static void vcomperror (Log level, const Tokenization *t, const Token *tok, cons
 
     vfprintf(stderr, msg, args);
     fprintf(stderr, ".\n");
-	if (pos.macro_file_offset) {
+	if (pos.macro_file_offset && !(level & Log_Noexpand)) {
     	printInfo(*t->files.ptr[pos.macro_file_ref], pos.macro_file_offset);
     	fprintf(stderr, "(macro-expanded from here)\n");
 	}
@@ -94,34 +95,30 @@ static void vcomperror (Log level, const Tokenization *t, const Token *tok, cons
 	}
 }
 
-_Noreturn void comperror (const Tokenization *t, const Token *tok, const char *msg, ...) {
+
+_Noreturn static void parseerror (const Parse *p, const Token *main, const char *msg, ...) {
     va_list args;
     va_start(args, msg);
-    vcomperror(Log_Err | Log_Fatal, t, tok, NULL, msg, args);
+    vcomperror(Log_Err | Log_Fatal, p->opt->crash_on_error, &p->tokens, main ? main : p->pos-1, p->pos, msg, args);
     va_end(args);
     exit(1);
 }
 
-_Noreturn void parseerror (const Parse *p, const Token *main, const char *msg, ...) {
+static void parsemsg (Log level, const Parse *p, const Token *main, const char *msg, ...) {
     va_list args;
     va_start(args, msg);
-    vcomperror(Log_Err | Log_Fatal, &p->tokens, main ? main : p->pos-1, p->pos, msg, args);
+    vcomperror(level, p->opt->crash_on_error, &p->tokens, main ? main : p->pos, p->pos, msg, args);
     va_end(args);
-    exit(1);
+    if ((level & ~Log_Fatal & ~Log_Noexpand) == Log_Warn)
+    	p->opt->emitted_warnings = true;
 }
 
-void parsemsg (Log level, const Parse *p, const Token *main, const char *msg, ...) {
-    va_list args;
-    va_start(args, msg);
-    vcomperror(level, &p->tokens, main ? main : p->pos, p->pos, msg, args);
-    va_end(args);
-}
-void redefinition (const Parse *p, const Token *main, const Token *previous, String name) {
+static void redefinition (const Parse *p, const Token *main, const Token *previous, String name) {
     parsemsg(Log_Err, p, main, "redefinition of %.*s", name);
     parsemsg(Log_Info | Log_Fatal, p, previous, "previous definition was here");
 }
 
-_Noreturn void unexpectedToken (const Parse *p, TokenKind expected) {
+_Noreturn static void unexpectedToken (const Parse *p, TokenKind expected) {
 	parseerror(p, p->pos, "expected %s before the %s token", tokenName(expected), tokenName(p->pos->kind));
 }
 
@@ -141,6 +138,12 @@ bool tryEat (Parse *parse, TokenKind kind) {
 	return false;
 }
 
+bool fromStandardHeader (Parse *parse, const Token *primary) {
+	assert(primary);
+	const Tokenization *t = &parse->tokens;
+	u32 p = primary - t->tokens;
+	return t->files.ptr[t->positions[p].source_file_ref]->is_standard_header;
+}
 
 typedef enum {
 	Decl_Named,
@@ -153,7 +156,9 @@ static Declaration parseDeclarator(Parse *, Type base_type, Namedness);
 static nodiscard bool allowedNoDeclarator(Parse *, Type base_type);
 // static Declaration parseDeclarator (Parse* parse, const Token **tok, Type base_type);
 static void parseInitializer(Parse *, InitializationDest);
-static Type arithmeticConversions (Parse *parse, Value *lhs, Value *rhs);
+static Value arithAdd(Parse *parse, const Token *primary, Value lhs, Value rhs);
+static Value arithSub(Parse *parse, const Token *primary, Value lhs, Value rhs);
+static Type arithmeticConversions (Parse *parse, const Token *primary, Value *lhs, Value *rhs);
 static Type parseValueType (Parse *, Value (*operator)(Parse *));
 static Type parseTypeBase(Parse *, u8 *storage);
 static Type parseTypeName(Parse *, u8 *storage);
@@ -169,18 +174,18 @@ static void popScope(Parse *, Scope);
 static nodiscard Scope pushScope(Parse *);
 
 // Parses all top level declarations into a Module.
-void parse (Arena *code_arena, Tokenization tokens, Options opt, Module *module) {
+void parse (Arena *code_arena, Tokenization tokens, Options *opt, Module *module) {
 	// Used only as a scratch buffer for constructing constants at the
 	// top level. Kind of inefficient, but very straightforward.
 	IrBuild global_ir = {0};
 	startNewBlock(&global_ir, code_arena, zString("dummy"));
-	crash_on_error = opt.crash_on_error;
 
 	Parse parse = {
 		.arena = create_arena(16 * 1024),
 		.code_arena = code_arena,
 		.tokens = tokens,
-		.target = opt.target,
+		.target = opt->target,
+		.opt = opt,
 		.pos = tokens.tokens,
 		.module = module,
 	};
@@ -268,13 +273,13 @@ void parse (Arena *code_arena, Tokenization tokens, Options opt, Module *module)
 			} else if (decl.type.kind != Kind_Function) {
 				if (existing) {
 					if (val->is_public && storage == Storage_Static) {
-						parseerror(&parse, primary,
+						parsemsg(Log_Err, &parse, primary,
 								"‘%.*s’ cannot be declared static after it was declared extern",
 								STRING_PRINTAGE(decl.name));
 						parsemsg(Log_Info | Log_Fatal, &parse, val->decl_location, "previously declared here");
 					}
 					if (!val->is_public && storage == Storage_Unspecified) {
-						parseerror(&parse, primary,
+						parsemsg(Log_Err, &parse, primary,
 								"‘%.*s’ cannot be declared extern after it was declared static",
 								STRING_PRINTAGE(decl.name));
 						parsemsg(Log_Info | Log_Fatal, &parse, val->decl_location, "previously declared here");
@@ -402,7 +407,7 @@ static Value parseExprRightUnary(Parse *);
 static Value parseExprBase(Parse *);
 // TODO The order of parameters here is inconsistent.
 static void parseStructInitializer(Parse *, InitializationDest);
-static Value intPromote(Value v, Parse *);
+static Value intPromote(Value v, Parse *, const Token*);
 static IrRef coerce(Value v, Type t, Parse *, const Token *);
 static IrRef toBoolean(Parse *, Value v, const Token *);
 static IrRef coercerval(Value v, Type t, Parse *, const Token *, bool allow_casts);
@@ -464,12 +469,15 @@ void parseFunction (Parse *parse, String func_name) {
 
 	popScope(parse, enclosing);
 
-	for (u32 i = 0; i < parse->func_goto_labels.capacity; i++) {
+	for (u32 i = 0; i < parse->func_goto_labels.len; i++) {
 		Symbol *sym = parse->func_goto_labels.ptr[i];
 		Block *b = sym->label.block;
 		if (b && b->exit.kind == Exit_None)
 			parseerror(parse, sym->label.def_location, "a `goto` references label `%.*s`, which is not declared in this function", STRING_PRINTAGE(b->label));
+		sym->label.block = NULL;
+		sym->label.def_location = NULL;
 	}
+	parse->func_goto_labels.len = 0;
 }
 
 static void parseCompound (Parse *parse) {
@@ -617,6 +625,17 @@ static void parseStatement (Parse *parse, bool *had_non_declaration) {
 		}
 		on_true->exit.unconditional = join;
 	} break;
+	case Tok_Key_Switch: {
+		parse->pos++;
+		expect(parse, Tok_OpenParen);
+		Value v = parseExpression(parse);
+		expect(parse, Tok_CloseParen);
+		if (v.typ.kind != Kind_Basic)
+			parseerror(parse, primary, "can only switch on expressions of integer type, not on an %s",
+					printTypeHighlighted(&parse->arena, v.typ));
+		v = intPromote(v, parse, primary);
+
+	} break;
 	case Tok_Key_Goto: {
 		// TODO Check: "A goto statement shall not jump from outside the
 		// scope of an identifier having a variably modified type to
@@ -692,40 +711,6 @@ static void parseStatement (Parse *parse, bool *had_non_declaration) {
 		*had_non_declaration = true;
 }
 
-static Value arithAdd(Parse *parse, const Token *primary, Value lhs, Value rhs) {
-	assert(!isLvalue(lhs));
-	assert(!isLvalue(rhs));
-	if (lhs.typ.kind == Kind_Pointer || rhs.typ.kind == Kind_Pointer) {
-		return pointerAdd(&parse->build, lhs, rhs, parse, primary);
-	} else {
-		Type common = arithmeticConversions(parse, &lhs, &rhs);
-		return (Value) {common, genAdd(&parse->build, lhs.inst, rhs.inst)};
-	}
-}
-
-static Value arithSub(Parse *parse, const Token *primary, Value lhs, Value rhs) {
-	assert(!isLvalue(lhs));
-	assert(!isLvalue(rhs));
-	IrBuild *build = &parse->build;
-	if (lhs.typ.kind == Kind_Pointer) {
-		IrRef stride = genImmediateInt(build,
-				typeSize(*lhs.typ.pointer, &parse->target), parse->target.ptr_size);
-
-		if (rhs.typ.kind == Kind_Pointer) {
-			IrRef diff = genSub(build, lhs.inst, rhs.inst);
-			return (Value) {BASIC_INT, genDiv(build, diff, stride)};
-		} else {
-			IrRef idx = genMul(build, coercerval(rhs, BASIC_INT, parse, primary, false), stride);
-			return (Value) {lhs.typ, genSub(build, lhs.inst, idx)};
-		}
-	} else {
-		if (rhs.typ.kind == Kind_Pointer)
-			parseerror(parse, primary, "cannot subtract pointer from %s", printType(&parse->arena, rhs.typ));
-		Type common = arithmeticConversions(parse, &lhs, &rhs);
-		return (Value) {common, genSub(build, lhs.inst, rhs.inst)};
-	}
-}
-
 
 static Value parseExpression (Parse *parse) {
 	Attributes attr = parseAttributes(parse);
@@ -751,6 +736,9 @@ static Value parseExprAssignment (Parse *parse) {
 	case Tok_PlusEquals:
 	case Tok_MinusEquals:
 	case Tok_AmpersandEquals:
+	case Tok_PipeEquals:
+	case Tok_DoubleLessEquals:
+	case Tok_DoubleGreaterEquals:
 		parse->pos++;
 		if (v.typ.kind == Kind_Function)
 			parseerror(parse, primary, "cannot assign to a function");
@@ -772,8 +760,22 @@ static Value parseExprAssignment (Parse *parse) {
 				assigned = arithSub(parse, primary, loaded, assigned);
 				break;
 			case Tok_AmpersandEquals: {
-				Type common = arithmeticConversions(parse, &loaded, &assigned);
+				Type common = arithmeticConversions(parse, primary, &loaded, &assigned);
 				assigned = (Value) {common, genAnd(&parse->build, loaded.inst, assigned.inst)};
+			} break;
+			case Tok_PipeEquals: {
+				Type common = arithmeticConversions(parse, primary, &loaded, &assigned);
+				assigned = (Value) {common, genOr(&parse->build, loaded.inst, assigned.inst)};
+			} break;
+			case Tok_DoubleLessEquals:
+			case Tok_DoubleGreaterEquals: {
+				loaded = intPromote(loaded, parse, primary);
+				assigned = intPromote(assigned, parse, primary);
+
+				if (primary->kind == Tok_DoubleLessEquals)
+					assigned = (Value) {loaded.typ, genShiftLeft(&parse->build, loaded.inst, assigned.inst)};
+				else
+					assigned = (Value) {loaded.typ, genShiftRight(&parse->build, loaded.inst, assigned.inst)};
 			} break;
 			default:
 				parseerror(parse, primary, "TODO Compound assignments");
@@ -885,10 +887,10 @@ static Value parseExprAnd (Parse *parse) {
 // right-to-left; most of them are commutative tho.
 static Value parseExprBitOr (Parse *parse) {
 	Value lhs = parseExprBitXor(parse);
-// 	const Token *primary = parse->pos;
+	const Token *primary = parse->pos;
 	if (tryEat(parse, Tok_Pipe)) {
 		Value rhs = parseExprBitOr(parse);
-		Type common = arithmeticConversions(parse, &lhs, &rhs);
+		Type common = arithmeticConversions(parse, primary, &lhs, &rhs);
 		return (Value) {common, genOr(&parse->build, lhs.inst, rhs.inst)};
 	}
 	return lhs;
@@ -896,10 +898,10 @@ static Value parseExprBitOr (Parse *parse) {
 
 static Value parseExprBitXor (Parse *parse) {
 	Value lhs = parseExprBitAnd(parse);
-// 	const Token *primary = parse->pos;
+	const Token *primary = parse->pos;
 	if (tryEat(parse, Tok_Hat)) {
 		Value rhs = parseExprBitXor(parse);
-		Type common = arithmeticConversions(parse, &lhs, &rhs);
+		Type common = arithmeticConversions(parse, primary, &lhs, &rhs);
 		return (Value) {common, genXor(&parse->build, lhs.inst, rhs.inst)};
 	}
 	return lhs;
@@ -907,10 +909,10 @@ static Value parseExprBitXor (Parse *parse) {
 
 static Value parseExprBitAnd (Parse *parse) {
 	Value lhs = parseExprEquality(parse);
-// 	const Token *primary = parse->pos;
+	const Token *primary = parse->pos;
 	if (tryEat(parse, Tok_Ampersand)) {
 		Value rhs = parseExprBitAnd(parse);
-		Type common = arithmeticConversions(parse, &lhs, &rhs);
+		Type common = arithmeticConversions(parse, primary, &lhs, &rhs);
 		return (Value) {common, genAnd(&parse->build, lhs.inst, rhs.inst)};
 	}
 	return lhs;
@@ -937,7 +939,7 @@ static Value parseExprEquality (Parse *parse) {
 						printTypeHighlighted(&parse->arena, lhs.typ), printTypeHighlighted(&parse->arena, rhs.typ));
 			}
 		} else {
-			arithmeticConversions(parse, &lhs, &rhs);
+			arithmeticConversions(parse, primary, &lhs, &rhs);
 		}
 
 		IrRef eql = genEquals(build, lhs.inst, rhs.inst, typeSize(BASIC_INT, &parse->target));
@@ -969,7 +971,7 @@ static Value parseExprComparison (Parse *parse) {
 		} else if (rhs.typ.kind == Kind_Pointer) {
 			parseerror(parse, primary, "can not compare a pointer with an %s", printTypeHighlighted(&parse->arena, lhs.typ));
 		} else {
-			arithmeticConversions(parse, &lhs, &rhs);
+			arithmeticConversions(parse, primary, &lhs, &rhs);
 		}
 		u16 size = typeSize(BASIC_INT, &parse->target);
 		IrRef res;
@@ -995,8 +997,8 @@ static Value parseExprShift (Parse *parse) {
 		if (primary->kind != Tok_DoubleLess && primary->kind != Tok_DoubleGreater)
 			return lhs;
 		parse->pos++;
-		lhs = intPromote(lhs, parse);
-		Value rhs = intPromote(parseExprAddition(parse), parse);
+		lhs = intPromote(lhs, parse, primary);
+		Value rhs = intPromote(parseExprAddition(parse), parse, primary);
 
 		// TODO Type checking
 		if (primary->kind == Tok_DoubleLess) {
@@ -1037,7 +1039,7 @@ static Value parseExprMultiplication (Parse *parse) {
 		lhs = rvalue(lhs, parse);
 		Value rhs = rvalue(parseExprLeftUnary(parse), parse);
 
-		Type common = arithmeticConversions(parse, &lhs, &rhs);
+		Type common = arithmeticConversions(parse, primary, &lhs, &rhs);
 		if (primary->kind == Tok_Asterisk)
 			lhs = (Value) {common, genMul(&parse->build, lhs.inst, rhs.inst)};
 		else if (primary->kind == Tok_Percent)
@@ -1074,15 +1076,23 @@ static Value parseExprLeftUnary (Parse *parse) {
 		genStore(build, v.inst, result.inst);
 		return result;
 	}
-	case Tok_Asterisk:
-		return dereference(parse, parseExprLeftUnary(parse));
+	case Tok_Asterisk: {
+		Value v = parseExprLeftUnary(parse);
+		if (v.typ.kind == Kind_FunctionPtr) {
+			v.typ.kind = Kind_Function;
+			return v;
+		}
+		if (v.typ.kind != Kind_Pointer)
+			parseerror(parse, primary, "cannot dereference value of type %s; expected a pointer type", printTypeHighlighted(&parse->arena, v.typ));
+		return dereference(parse, v);
+	}
 	case Tok_Bang: {
 		Value v = rvalue(parseExprLeftUnary(parse), parse);
 		IrRef zero = genImmediateInt(build, 0, typeSize(v.typ, &parse->target));
 		return (Value) {BASIC_INT, genEquals(build, v.inst, zero, parse->target.typesizes[Int_int])};
 	}
 	case Tok_Tilde: {
-		Value v = intPromote(parseExprLeftUnary(parse), parse);
+		Value v = intPromote(parseExprLeftUnary(parse), parse, primary);
 		return (Value) {v.typ, genNot(build, v.inst)};
 	}
 	case Tok_Ampersand: {
@@ -1120,7 +1130,7 @@ static Value parseExprLeftUnary (Parse *parse) {
 	case Tok_Plus:
 	case Tok_Minus: {
 		// TODO Promote
-		Value v = intPromote(parseExprLeftUnary(parse), parse);
+		Value v = intPromote(parseExprLeftUnary(parse), parse, primary);
 
 		if (primary->kind == Tok_Minus) {
 			u32 zero = genImmediateInt(build, 0, typeSize(v.typ, &parse->target));
@@ -1187,7 +1197,7 @@ static Value parseExprRightUnary (Parse *parse) {
 					if (have_prototype && arguments.len < params.len) {
 						inst = coerce(arg, params.ptr[arguments.len].type, parse, primary);
 					} else {
-						inst = intPromote(arg, parse).inst;
+						inst = intPromote(arg, parse, primary).inst;
 					}
 					PUSH_A(parse->code_arena, arguments, inst);
 				} while (tryEat(parse, Tok_Comma));
@@ -1211,8 +1221,13 @@ static Value parseExprRightUnary (Parse *parse) {
 			v = rvalue(v, parse);
 			Value index = rvalue(parseExpression(parse), parse);
 			expect(parse, Tok_CloseBracket);
+			if (parse->opt->warn_char_subscript && index.typ.kind == Kind_Basic && index.typ.basic == Int_char) {
+				parsemsg(Log_Warn | Log_Noexpand, parse, primary, "the character type of the index may platform-dependently be signed");
+				parsemsg(Log_Info, parse, primary, "you may want to cast it to a char of explicit signedness");
+			}
+
 			if (!(v.typ.kind == Kind_Pointer || index.typ.kind == Kind_Pointer))
-				parseerror(parse, primary, "either the subscript or the subuscripted value must be a pointer");
+				parseerror(parse, primary, "either the subscript or the subscripted value must be a pointer");
 			v = dereference(parse, pointerAdd(build, v, index, parse, primary));
 		} else if (tryEat(parse, Tok_DoublePlus) || tryEat(parse, Tok_DoubleMinus)) {
 			int delta = primary->kind == Tok_DoublePlus ? 1 : -1;
@@ -1413,7 +1428,7 @@ static Value parseExprBase (Parse *parse) {
 					// (not just with the selecting type).
 					if (got) {
 						parsemsg(Log_Err, parse, type_token, "no two generic assiciations may specify compatible types");
-						parsemsg(Log_Info, parse, NULL, "TODO Show previous label");
+						parsemsg(Log_Info | Log_Fatal, parse, NULL, "TODO Show previous label");
 					}
 					got = true;
 					result = parseExprAssignment(parse);
@@ -1580,87 +1595,6 @@ static void parseStructInitializer (Parse *parse, InitializationDest dest) {
 	}
 }
 
-static Value intPromote(Value val, Parse *p) {
-	val = rvalue(val, p);
-	const Token *primary = NULL; // TODO
-	if (val.typ.kind != Kind_Basic)
-		parseerror(p, primary, "expected a scalar type");
-
-	if (rankDiff(val.typ.basic, Int_int) >= 0)
-		return val;
-	const Type unsignedint = {Kind_Basic, .basic = Int_int | Int_unsigned};
-
-	if (val.typ.basic & Int_unsigned)
-		return (Value) {unsignedint, coerce(val, unsignedint, p, primary)};
-	else
-		return (Value) {BASIC_INT, coerce(val, BASIC_INT, p, primary)};
-}
-
-
-static Type arithmeticConversions (Parse *parse, Value *a, Value *b) {
-	// TODO
-	const Token *primary = NULL;
-
-	*a = intPromote(*a, parse);
-	*b = intPromote(*b, parse);
-
-	// a shall have the type rank of lower than or equal to b
-	if (rankDiff(a->typ.basic, b->typ.basic) > 0) {
-		Value *tmp = a;
-		a = b;
-		b = tmp;
-	}
-	Type lower = a->typ;
-	Type higher = b->typ;
-
-	/*
-	From https://en.cppreference.com/w/c/language/conversion:
-	If the types have the same signedness (both signed or both unsigned), the operand whose type has the lesser conversion rank1 is implicitly converted to the other type.
-	Else, the operands have different signedness:
-		If the unsigned type has conversion rank greater than or equal to the rank of the signed type, then the operand with the signed type is implicitly converted to the unsigned type.
-		Else, the unsigned type has conversion rank less than the signed type:
-			If the signed type can represent all values of the unsigned type, then the operand with the unsigned type is implicitly converted to the signed type.
-			Else, both operands undergo implicit conversion to the unsigned type counterpart of the signed operand's type.
-    */
-
-	/*
-	if (lhs.typ.basic & Int_unsigned == rhs.typ.basic & Int_unsigned) {
-		common = rhs.typ;
-	} else {
-		if (rhs.typ.basic & Int_unsigned) {
-			common = rhs.typ;
-		} else {
-			assert(lhs.typ.basic & Int_unsigned);
-			if (typeSize(lhs.typ, &parse->target) < typeSize(rhs.typ, &parse->target)) {
-				common = rhs.typ;
-			} else {
-				common = rhs.typ;
-				common.basic |= Int_unsigned;
-			}
-		}
-	}
-	*/
-
-	Type common = higher;
-
-	if ((lower.basic & Int_unsigned) && !(higher.basic & Int_unsigned)
-		&& rankDiff(lower.basic, higher.basic) != 0
-		&& typeSize(lower, &parse->target) == typeSize(higher, &parse->target))
-	{
-		common.basic |= Int_unsigned;
-		*b = (Value) {common, coercerval(*b, common, parse, primary, false)};
-	}
-	*a = (Value) {common, coercerval(*a, common, parse, primary, false)};
-
-	if (typeSize(lower, &parse->target) == typeSize(higher, &parse->target)
-		&& (lower.basic & Int_unsigned) != (higher.basic & Int_unsigned))
-	{
-		parsemsg(Log_Warn, parse, primary, "losing value range when converting operands to common type %s",
-				printTypeHighlighted(&parse->arena, common));
-		parsemsg(Log_Info, parse, primary, "explicitly cast to a common type to suppress this warning");
-	}
-	return common;
-}
 
 static Type parseValueType (Parse *parse, Value (*operator)(Parse *parse)) {
 	Block *current = parse->build.insertion_block;
@@ -2006,7 +1940,7 @@ static bool tryParseTypeBase (Parse *parse, Type *type, u8 *storage_dest) {
 	if (modifiable) {
 		if (base.basic == Int_int) {
 			if (longness[0] && shortness)
-				comperror(&parse->tokens, longness[0], "integer cannot be %sshort%s and %long%s at the same time", BOLD, RESET, BOLD, RESET);
+				parseerror(parse, longness[0], "integer cannot be %sshort%s and %long%s at the same time", BOLD, RESET, BOLD, RESET);
 			if (longness[0]) {
 				if (longness[1])
 					base.basic = Int_longlong;
@@ -2297,6 +2231,115 @@ static void parseTypedefDecls(Parse *parse, Type base_type) {
 	expect(parse, Tok_Semicolon);
 }
 
+
+// ===> Type operations, semantic analysis
+
+
+static Value arithAdd(Parse *parse, const Token *primary, Value lhs, Value rhs) {
+	assert(!isLvalue(lhs));
+	assert(!isLvalue(rhs));
+	if (lhs.typ.kind == Kind_Pointer || rhs.typ.kind == Kind_Pointer) {
+		return pointerAdd(&parse->build, lhs, rhs, parse, primary);
+	} else {
+		Type common = arithmeticConversions(parse, primary, &lhs, &rhs);
+		return (Value) {common, genAdd(&parse->build, lhs.inst, rhs.inst)};
+	}
+}
+
+static Value arithSub(Parse *parse, const Token *primary, Value lhs, Value rhs) {
+	assert(!isLvalue(lhs));
+	assert(!isLvalue(rhs));
+	IrBuild *build = &parse->build;
+	if (lhs.typ.kind == Kind_Pointer) {
+		IrRef stride = genImmediateInt(build,
+				typeSize(*lhs.typ.pointer, &parse->target), parse->target.ptr_size);
+
+		if (rhs.typ.kind == Kind_Pointer) {
+			IrRef diff = genSub(build, lhs.inst, rhs.inst);
+			return (Value) {BASIC_INT, genDiv(build, diff, stride)};
+		} else {
+			IrRef idx = genMul(build, coercerval(rhs, BASIC_INT, parse, primary, false), stride);
+			return (Value) {lhs.typ, genSub(build, lhs.inst, idx)};
+		}
+	} else {
+		if (rhs.typ.kind == Kind_Pointer)
+			parseerror(parse, primary, "cannot subtract pointer from %s", printType(&parse->arena, rhs.typ));
+		Type common = arithmeticConversions(parse, primary, &lhs, &rhs);
+		return (Value) {common, genSub(build, lhs.inst, rhs.inst)};
+	}
+}
+
+
+static Type arithmeticConversions (Parse *parse, const Token *primary, Value *a, Value *b) {
+	*a = intPromote(*a, parse, primary);
+	*b = intPromote(*b, parse, primary);
+
+	i32 rank_diff = rankDiff(a->typ.basic, b->typ.basic);
+	// a shall have the type rank of lower than or equal to b, or be signed if equal rank
+	if (rank_diff > 0 || (rank_diff == 0 && (b->typ.basic & Int_unsigned))) {
+		Value *tmp = a;
+		a = b;
+		b = tmp;
+		rank_diff = - rank_diff;
+	}
+	Type lower = a->typ;
+	Type higher = b->typ;
+
+
+	/*
+	From https://en.cppreference.com/w/c/language/conversion:
+	If the types have the same signedness (both signed or both unsigned), the operand whose type has the lesser conversion rank1 is implicitly converted to the other type.
+	Else, the operands have different signedness:
+		If the unsigned type has conversion rank greater than or equal to the rank of the signed type, then the operand with the signed type is implicitly converted to the unsigned type.
+		Else, the unsigned type has conversion rank less than the signed type:
+			If the signed type can represent all values of the unsigned type, then the operand with the unsigned type is implicitly converted to the signed type.
+			Else, both operands undergo implicit conversion to the unsigned type counterpart of the signed operand's type.
+
+    So the logic is:
+
+	if (lhs.typ.basic & Int_unsigned == higher.basic & Int_unsigned) {
+		common = higher;
+	} else {
+		if (higher.basic & Int_unsigned) {
+			common = higher; // Warn
+		} else { // lower.basic & Int_unsigned, rank(lower) < rank(higher
+			if (can_represent_all) {
+				common = higher;
+			} else {
+				common = higher;
+				common.basic |= Int_unsigned;
+				// Warn
+			}
+		}
+	}
+
+	Therefore, unsigned->signed is only performed if it the signed can hold the
+	unsigned's value range (as other strategies could cause undefined behavior).
+	*/
+
+	Type common = higher;
+	if ((lower.basic & Int_unsigned) != (higher.basic & Int_unsigned)) {
+		bool signed_cannot_represent = typeSize(lower, &parse->target) == typeSize(higher, &parse->target);
+		if ((lower.basic & Int_unsigned) && signed_cannot_represent)
+			common.basic |= Int_unsigned;
+
+		if ((common.basic & Int_unsigned) && parse->opt->warn_on_wrapping) {
+			IrRef signed_one = higher.basic & Int_unsigned ? a->inst : b->inst;
+			Inst signed_inst = parse->build.ir.ptr[signed_one];
+
+			if (signed_inst.kind != Ir_Constant || (i64) signed_inst.constant < 0) {
+				parsemsg(Log_Warn, parse, primary, "wrapping negative value range when converting operands to common type %s",
+						printTypeHighlighted(&parse->arena, common));
+				parsemsg(Log_Info | Log_Noexpand, parse, primary, "explicitly cast operands to an unsigned type to suppress this warning");
+			}
+		}
+	}
+	*a = (Value) {common, coercerval(*a, common, parse, primary, false)};
+
+	return common;
+}
+
+
 static Value pointerAdd (IrBuild *ir, Value lhs, Value rhs, Parse *op_parse, const Token *token) {
 	assert(!isLvalue(lhs));
 	assert(!isLvalue(rhs));
@@ -2327,6 +2370,23 @@ static Value dereference (Parse *parse, Value v) {
 	v.typ = *v.typ.pointer;
 	v.category = Ref_LValue;
 	return v;
+}
+
+
+static Value intPromote(Value val, Parse *p, const Token *primary) {
+	val = rvalue(val, p);
+
+	if (val.typ.kind != Kind_Basic)
+		parseerror(p, primary, "expected a scalar type");
+
+	if (rankDiff(val.typ.basic, Int_int) >= 0)
+		return val;
+	const Type unsignedint = {Kind_Basic, .basic = Int_int | Int_unsigned};
+
+	if (val.typ.basic & Int_unsigned)
+		return (Value) {unsignedint, coerce(val, unsignedint, p, primary)};
+	else
+		return (Value) {BASIC_INT, coerce(val, BASIC_INT, p, primary)};
 }
 
 

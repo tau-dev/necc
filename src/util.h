@@ -90,6 +90,7 @@ typedef struct {
 	String content;
 	u32 idx;
 	u32 included_count;
+	bool is_standard_header;
 } SourceFile;
 
 typedef struct {
@@ -121,7 +122,8 @@ typedef enum {
 	Log_Err,
 	Log_Warn,
 	Log_Info,
-	Log_Fatal = 0x1000,
+	Log_Noexpand = 0x100,
+	Log_Fatal = 0x200,
 } Log;
 
 void printMsg(Log, SourceFile, u32);

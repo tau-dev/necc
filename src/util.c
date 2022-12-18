@@ -115,6 +115,9 @@ SourceLocation findSourcePos (const char *source, const char *pos) {
 	return (SourceLocation) {line, col};
 }
 
+
+static Log plainLevel (Log l) { return l & ~Log_Fatal & ~Log_Noexpand; }
+
 void printMsg (Log level, SourceFile source, u32 offset) {
 	SourceLocation loc = findSourcePos(
 			source.content.ptr, source.content.ptr + offset);
@@ -133,7 +136,7 @@ void printMsg (Log level, SourceFile source, u32 offset) {
 		[Log_Info] = CYAN,
 
 	};
-	fprintf(stderr, "%s%s%s", highlights[level & ~Log_Fatal], messages[level & ~Log_Fatal], RESET);
+	fprintf(stderr, "%s%s%s", highlights[plainLevel(level)], messages[plainLevel(level)], RESET);
 }
 
 void printErr (SourceFile source, u32 offset) {

@@ -13,4 +13,10 @@ typedef struct {
 	Target target;
 	bool crash_on_error;
 	bool gen_debug;
+
+	bool warn_on_wrapping;
+	bool warn_char_subscript;
+
+	bool emitted_warnings;
+	bool error_on_warnings;
 } Options;

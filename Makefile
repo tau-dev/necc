@@ -5,7 +5,7 @@ C_HDRS := $(wildcard src/*.h)
 C_FLAGS := -lm -std=c11 -Werror -Wall -Wextra -Wno-unused-command-line-argument -pedantic -Wpedantic -Wno-missing-field-initializers
 C_DBG_FLAGS := -g -O0 -fsanitize=address -fsanitize=undefined
 # C_DBG_FLAGS := -g -O0
-C_REL_FLAGS := -O3 -fstrict-aliasing -flto -DNDEBUG -w
+C_REL_FLAGS := -O3 -fstrict-aliasing -flto=auto -DNDEBUG -w
 
 OBJS := $(patsubst src/%.c,bin/%.o,$(C_SRCS))
 

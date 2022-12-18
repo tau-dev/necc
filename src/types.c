@@ -99,7 +99,8 @@ bool isFlexibleArrayMember (Members m, u32 index) {
 
 u32 typeAlignment (Type t, const Target *target) {
 	u32 size = typeSize(t, target);
-	return size < 8 ? size : 8;
+	return size == 0 ? 1 :
+			size < 8 ? size : 8;
 }
 
 u32 addMemberOffset (u32 *offset, Type t, const Target *target) {
