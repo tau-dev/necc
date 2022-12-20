@@ -194,6 +194,7 @@ void calcLifetimes (IrList ir, ValuesSpan lastuses) {
 }
 
 
+// TODO Schedule ordered by id.
 static void scheduleBlockStraight (Block *blk, Block *prev, Blocks *dest, u32 id) {
 	if (prev)
 		PUSH(blk->incoming, prev);
@@ -202,7 +203,20 @@ static void scheduleBlockStraight (Block *blk, Block *prev, Blocks *dest, u32 id
 	blk->visited = id;
 	PUSH (*dest, blk);
 
-	RECURSE_NEXT_BLOCKS(scheduleBlockStraight, blk, blk, dest, id);
+	switch (blk->exit.kind) {
+	case Exit_Unconditional:
+		scheduleBlockStraight(blk->exit.unconditional, blk, dest, id);
+		break;
+	case Exit_Branch:
+// 		if (blk->exit.branch.on_false->id < blk->exit.branch.on_true)
+		scheduleBlockStraight(blk->exit.branch.on_false, blk, dest, id);
+		scheduleBlockStraight(blk->exit.branch.on_true, blk, dest, id);
+		break;
+	case Exit_Return: break;
+	case Exit_None: unreachable;
+	}
+
+// 	RECURSE_NEXT_BLOCKS(scheduleBlockStraight, blk, blk, dest, id);
 }
 
 

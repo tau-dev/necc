@@ -13,21 +13,18 @@ Routines for analyzing and printing types.
 
 // Used in the phrasings "supported with $version" and "target uses $version".
 
-const char *version_names[Version_Lax + 1] = {
-	[Version_C89] = "C89",
-	[Version_C99] = "C99",
-	// lol. The compiler does not care to distinguish between C11 and
-	// C17; semantics always follow C17 (therefore the enum name;
-	// __STDC_VERSION__ is 201710L), but all relevant features are
-	// already present in C11.
-	[Version_C17] = "C11",
-	[Version_C23] = "C23",
-
-	[Version_GNU] = "GNU extensions",
-	[Version_MSVC] = "MSVC extensions",
-
-	[Version_Lax] = "lax conformance checks",
-};
+const char *versionName(Version v) {
+	switch (v) {
+	case Version_C89:        return "C89";
+	case Version_C99:        return "C99";
+	case Version_C17:        return "C11";
+	case Version_C23:        return "C23";
+	case Version_GNU:        return "GNU";
+	case Version_MSVC:       return "MSVC";
+	case Version_Lax:        return "lax";
+	default:                 return "???";
+	}
+}
 
 
 // Size typeSize (Type t, const Target *target) {
@@ -36,12 +33,16 @@ const char *version_names[Version_Lax + 1] = {
 // 	}
 // }
 
-// Result of 0 means incomplete type.
 
 Type resolveType (Type t) {
 	return t.kind == Kind_Struct_Named || t.kind == Kind_Union_Named ? t.nametagged->type : t;
 }
 
+bool arrayUnknownSize (Type t) {
+	return t.kind == Kind_VLArray && t.array.count == IR_REF_NONE;
+}
+
+// Result of 0 means incomplete type.
 u32 typeSize (Type t, const Target *target) {
 	switch (t.kind) {
 	case Kind_Union_Named:
@@ -75,6 +76,8 @@ u32 typeSize (Type t, const Target *target) {
 	case Kind_Basic:
 		assert(t.basic != (Int_char | Int_unsigned) && t.basic != (Int_bool | Int_unsigned));
 		return target->typesizes[t.basic & ~Int_unsigned];
+	case Kind_Enum:
+		return target->typesizes[Int_int];
 	case Kind_Pointer:
 	case Kind_FunctionPtr:
 		assert(target->typesizes[target->ptrdiff.basic] == target->ptr_size);
@@ -254,10 +257,10 @@ void printTypeBase(Type t, char **pos, const char *end) {
 		}
 	} break;
 	case Kind_Union:
-		printto(pos, end, "anon. union");
+		printto(pos, end, "union [anonymous]");
 		break;
 	case Kind_Struct:
-		printto(pos, end, "anonymous struct");
+		printto(pos, end, "struct [anonymous]");
 		break;
 	case Kind_Struct_Named:
 		printto(pos, end, "struct %.*s", STRING_PRINTAGE(t.nametagged->name));
@@ -266,7 +269,7 @@ void printTypeBase(Type t, char **pos, const char *end) {
 		printto(pos, end, "struct %.*s", STRING_PRINTAGE(t.nametagged->name));
 		break;
 	case Kind_Enum:
-		printto(pos, end, "enum {???}");
+		printto(pos, end, "enum [anonymous]");
 		break;
 	}
 }

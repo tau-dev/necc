@@ -65,7 +65,7 @@ const char *lexz(Tokenization t, const Token *current, const Token *parse_pos, u
 	int ctx_len = 8;
 	if (count) ctx_len = (count + 1) / 2;
 
-	i32 begin = (i32) (current ? current - t.tokens : t.count) - ctx_len;
+	i32 begin = (current ? current - t.tokens : t.count) - ctx_len;
 	u32 end = begin + 2*ctx_len;
 	if (end > t.count) {
 		begin -= end - t.count;

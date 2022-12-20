@@ -30,7 +30,6 @@ typedef enum {
 	Sym_EnumConstant,
 	// Allocated on the stack
 	Sym_Value_Auto,
-	// Statically allocated
 	Sym_Value_Static,
 } SymbolKind;
 
@@ -39,6 +38,7 @@ typedef struct OrdinaryIdentifier OrdinaryIdentifier;
 struct OrdinaryIdentifier {
 	SymbolKind kind;
 	OrdinaryIdentifier *shadowed;
+
 	u32 scope_depth;
 	const Token *decl_location;
 	const Token *def_location;

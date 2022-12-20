@@ -45,6 +45,7 @@ typedef struct {
 	FunctionType current_func_type;
 	IrBuild build;
 	Scope func_goto_labels;
+
 	Block *current_loop_head;
 	Block *current_loop_switch_exit;
 
@@ -59,13 +60,13 @@ const char *plxz(const Parse *parse) {
 
 typedef LIST(Reference) RefsList;
 typedef struct {
-	u32 offset;
 	Type type;
+	u32 offset;
 
 	IrRef address;
 
 	RefsList *reloc_references;
-	SPAN(char) reloc_data;
+	MutableString reloc_data;
 } InitializationDest;
 
 static void vcomperror (Log level, bool crash_on_error, const Tokenization *t, const Token *tok, const Token *parse_pos, const char *msg, va_list args) {
@@ -155,7 +156,9 @@ static Symbol *getSymbol (Parse *, String name);
 static Declaration parseDeclarator(Parse *, Type base_type, Namedness);
 static nodiscard bool allowedNoDeclarator(Parse *, Type base_type);
 // static Declaration parseDeclarator (Parse* parse, const Token **tok, Type base_type);
+static void initializeDefinition(Parse *, OrdinaryIdentifier *, Type);
 static void parseInitializer(Parse *, InitializationDest);
+static bool tryIntConstant (Parse *, Value, u64 *result);
 static Value arithAdd(Parse *parse, const Token *primary, Value lhs, Value rhs);
 static Value arithSub(Parse *parse, const Token *primary, Value lhs, Value rhs);
 static Type arithmeticConversions (Parse *parse, const Token *primary, Value *lhs, Value *rhs);
@@ -172,6 +175,8 @@ static void parseTypedefDecls(Parse *, Type base_type);
 static Attributes parseAttributes(Parse *);
 static void popScope(Parse *, Scope);
 static nodiscard Scope pushScope(Parse *);
+static void requires(Parse *, const char *desc, Features);
+static OrdinaryIdentifier *define(Parse *, Declaration, u8 storage, const Token *type_token, const Token *decl_token, const Token *def_token, bool file_scope);
 
 // Parses all top level declarations into a Module.
 void parse (Arena *code_arena, Tokenization tokens, Options *opt, Module *module) {
@@ -182,6 +187,7 @@ void parse (Arena *code_arena, Tokenization tokens, Options *opt, Module *module
 
 	Parse parse = {
 		.arena = create_arena(16 * 1024),
+		.build = global_ir,
 		.code_arena = code_arena,
 		.tokens = tokens,
 		.target = opt->target,
@@ -192,6 +198,12 @@ void parse (Arena *code_arena, Tokenization tokens, Options *opt, Module *module
 
 	while (parse.pos->kind != Tok_EOF) {
 		u8 storage;
+		while (parse.pos->kind == Tok_Semicolon) {
+			parse.pos++;
+			requires(&parse, "semicolons at file scope", Features_GNU_Extensions);
+		}
+		if (parse.pos->kind == Tok_EOF) break;
+
 		const Token *type_token = parse.pos;
 		Type base_type = parseTypeBase(&parse, &storage);
 
@@ -201,8 +213,7 @@ void parse (Arena *code_arena, Tokenization tokens, Options *opt, Module *module
 		}
 
 		if (storage == Storage_Auto)
-			parseerror(&parse, type_token, "top-level symbol can not have automatic storage duration");
-		bool public_linkage = storage != Storage_Static;
+			parseerror(&parse, type_token, "top-level symbol can not have automatic (stack-allocated) storage duration");
 
 		if (allowedNoDeclarator(&parse, base_type))
 			continue;
@@ -211,109 +222,31 @@ void parse (Arena *code_arena, Tokenization tokens, Options *opt, Module *module
 		while (true) {
 			const Token *primary = parse.pos;
 			Declaration decl = parseDeclarator(&parse, base_type, Decl_Named);
+			Type first_argument_type;
 
-			Symbol *sym = getSymbol(&parse, decl.name);
-			OrdinaryIdentifier *existing = sym->ordinary;
+			bool function_def = decl.type.kind == Kind_Function && declarators == 0 &&
+				(parse.pos->kind == Tok_OpenBrace || tryParseTypeBase(&parse, &first_argument_type, NULL));
+			bool object_def = decl.type.kind != Kind_Function && parse.pos->kind == Tok_Equals;
 
-			if (existing) {
-				assert(existing->scope_depth == 0);
-				if (existing->kind != Sym_Value_Static) {
-					assert(existing->kind != Sym_Value_Auto);
-					parseerror(&parse, primary, "cannot redeclare a type as a variable or function", decl.name);
-				}
+			OrdinaryIdentifier *ord = define(&parse, decl, storage, type_token, primary,
+					function_def | object_def ? parse.pos : NULL, /* file_scope */ true);
 
-				StaticValue *existing_val = &module->ptr[existing->static_id];
-				if (!typeCompatible(existing_val->type, decl.type)) {
-					parsemsg(Log_Err, &parse, primary,
-							"type %s does not match previous declaration of ‘%.*s’",
-							printTypeHighlighted(&parse.arena, decl.type),
-							STRING_PRINTAGE(decl.name));
-					parsemsg(Log_Info | Log_Fatal, &parse, existing_val->decl_location,
-							"the original declaration had type %s",
-							printTypeHighlighted(&parse.arena, existing_val->type));
-				}
-			} else {
-				PUSH(*module, ((StaticValue) {
-					.name = decl.name,
-					.type = decl.type,
-					.is_public = public_linkage,
-					.decl_location = primary,
-					.def_kind = decl.type.kind == Kind_Function ? Static_Function : Static_Variable,
-				}));
 
-				sym->ordinary = ALLOC(&parse.arena, OrdinaryIdentifier);
-				*sym->ordinary = (OrdinaryIdentifier) {
-					.kind = Sym_Value_Static,
-					.decl_location = primary,
-					.static_id = module->len-1,
-				};
-			}
-			StaticValue *val = &module->ptr[sym->ordinary->static_id];
-
-			parse.build = (IrBuild) {0};
-			Type argument_type;
-			if (decl.type.kind == Kind_Function && declarators == 0 &&
-				(parse.pos->kind == Tok_OpenBrace || tryParseTypeBase(&parse, &argument_type, NULL)))
-			{
-				// TODO Disallow old-style definitions in C23
-				if (val->def_state == Def_Defined)
-					redefinition(&parse, NULL, sym->ordinary->def_location, val->name);
-
-				val->def_state = Def_Defined;
-				sym->ordinary->def_location = primary;
+			if (function_def) {
+				// TODO Allow old-style definitions before C23
 
 				parse.current_func_type = decl.type.function;
 				parseFunction(&parse, decl.name);
 				parse.scope_depth = 0;
 
-				val = &module->ptr[sym->ordinary->static_id];
+				StaticValue *val = &parse.module->ptr[ord->static_id];
 				val->function_ir = parse.build.ir;
 				val->function_entry = parse.build.entry;
+
+				parse.build = global_ir;
 				break;
-			} else if (decl.type.kind != Kind_Function) {
-				if (existing) {
-					if (val->is_public && storage == Storage_Static) {
-						parsemsg(Log_Err, &parse, primary,
-								"‘%.*s’ cannot be declared static after it was declared extern",
-								STRING_PRINTAGE(decl.name));
-						parsemsg(Log_Info | Log_Fatal, &parse, val->decl_location, "previously declared here");
-					}
-					if (!val->is_public && storage == Storage_Unspecified) {
-						parsemsg(Log_Err, &parse, primary,
-								"‘%.*s’ cannot be declared extern after it was declared static",
-								STRING_PRINTAGE(decl.name));
-						parsemsg(Log_Info | Log_Fatal, &parse, val->decl_location, "previously declared here");
-					}
-				} else {
-					val->is_public = storage != Storage_Static;
-				}
-
-				if (tryEat(&parse, Tok_Equals)) {
-					if (val->def_state == Def_Defined)
-						redefinition(&parse, NULL, sym->ordinary->def_location, val->name);
-
-					val->def_state = Def_Defined;
-					sym->ordinary->def_location = primary;
-
-					RefsList refs = {0};
-					InitializationDest init = {
-						.type = decl.type,
-						.reloc_references = &refs,
-						.reloc_data = ALLOCN(parse.code_arena, char, typeSize(val->type, &parse.target)),
-					};
-					parse.build = global_ir;
-					parseInitializer(&parse, init);
-					global_ir = parse.build;
-
-					val = &module->ptr[sym->ordinary->static_id];
-					val->value_references = (References) {refs.len, refs.ptr};
-					val->value_data = (String) {init.reloc_data.len, init.reloc_data.ptr};
-				} else if ((storage == Storage_Static || storage == Storage_Unspecified)
-					&& val->def_state == Def_Undefined)
-				{
-					val->def_state = Def_Tentative;
-				}
-
+			} else if (object_def) {
+				initializeDefinition(&parse, ord, decl.type);
 			}
 
 			if (!tryEat(&parse, Tok_Comma)) {
@@ -326,10 +259,13 @@ void parse (Arena *code_arena, Tokenization tokens, Options *opt, Module *module
 	}
 
 	for (u32 i = 0; i < module->len; i++) {
-		StaticValue *val = &module->ptr[i];
-		if (val->def_state == Def_Tentative)
-			val->value_data = (String) ALLOCN(parse.code_arena, char, typeSize(val->type, &parse.target));
-		else if (val->is_used && val->def_state == Def_Undefined && !val->is_public)
+		StaticValue *val = &parse.module->ptr[i];
+		if (val->def_state == Def_Tentative) {
+			u32 amount = typeSize(val->type, &parse.target);
+			char *data = aalloc(parse.code_arena, amount);
+			memset(data, 0, amount);
+			val->value_data = (String) {amount, data};
+		} else if (val->is_used && val->def_state == Def_Undefined && !val->is_public)
 			parseerror(&parse, val->decl_location, "TODO(phrasing) static identifier was never defined");
 	}
 
@@ -337,6 +273,7 @@ void parse (Arena *code_arena, Tokenization tokens, Options *opt, Module *module
 	popScope(&parse, (Scope) {0});
 	free_arena(&parse.arena);
 }
+
 
 static Symbol *getSymbol (Parse *parse, String name) {
 	void **slot = mapGetOrCreate(&symbols, name);
@@ -405,15 +342,15 @@ static Value parseExprMultiplication(Parse *);
 static Value parseExprLeftUnary(Parse *);
 static Value parseExprRightUnary(Parse *);
 static Value parseExprBase(Parse *);
-// TODO The order of parameters here is inconsistent.
 static void parseStructInitializer(Parse *, InitializationDest);
+static void parseArrayInitializer(Parse *, InitializationDest);
+// TODO The order of parameters here is inconsistent.
 static Value intPromote(Value v, Parse *, const Token*);
+static void discardValue(Parse *, const Token *, Value v);
 static IrRef coerce(Value v, Type t, Parse *, const Token *);
-static IrRef toBoolean(Parse *, Value v, const Token *);
+static IrRef toBoolean(Parse *, const Token *, Value v);
 static IrRef coercerval(Value v, Type t, Parse *, const Token *, bool allow_casts);
 static Value immediateIntVal(Parse *, Type typ, u64 val);
-static void requiresVersion(Parse *, const char *desc, Version);
-static void requiresVersionJust(Parse *, const char *desc, Version);
 
 void parseFunction (Parse *parse, String func_name) {
 	IrBuild *build = &parse->build;
@@ -575,7 +512,7 @@ static void parseStatement (Parse *parse, bool *had_non_declaration) {
 		expect(parse, Tok_CloseParen);
 		expect(parse, Tok_Semicolon);
 
-		genBranch(build, toBoolean(parse, condition, primary));
+		genBranch(build, toBoolean(parse, primary, condition));
 		build->insertion_block->exit.branch.on_true = body;
 		build->insertion_block->exit.branch.on_false = startNewBlock(build, parse->code_arena, zString("do_while_join"));
 	} break;
@@ -583,19 +520,71 @@ static void parseStatement (Parse *parse, bool *had_non_declaration) {
 		parse->pos++;
 		*had_non_declaration = true;
 
-		Block *head = newBlock(&parse->build, parse->code_arena, zString("while_head_"));
+		Block *head = newBlock(build, parse->code_arena, zString("while_head_"));
 		genJump(build, head);
 		expect(parse, Tok_OpenParen);
 		Value condition = parseExpression(parse);
 		expect(parse, Tok_CloseParen);
 		Block *head_end = build->insertion_block;
-		genBranch(build, toBoolean(parse, condition, primary));
+		genBranch(build, toBoolean(parse, primary, condition));
 
 		head_end->exit.branch.on_true = startNewBlock(build, parse->code_arena, zString("while_body_"));
 		parseStatement(parse, had_non_declaration);
 		genJump(build, head);
 
 		head_end->exit.branch.on_false = startNewBlock(&parse->build, parse->code_arena, zString("while_join_"));
+	} break;
+	case Tok_Key_For: {
+		*had_non_declaration = true;
+		parse->pos++;
+		Scope s = pushScope(parse);
+
+		expect(parse, Tok_OpenParen);
+
+		// TODO Limit this to declaration or expression
+		parseStatement(parse, had_non_declaration);
+
+		Block *enclosing_head = parse->current_loop_head;
+		Block *enclosing_exit = parse->current_loop_switch_exit;
+		parse->current_loop_switch_exit = newBlock(build, parse->code_arena, zString("for_join_"));
+		parse->current_loop_head = newBlock(build, parse->code_arena, zString("for_head_"));
+
+		genJump(build, parse->current_loop_head);
+		Block *to_tail = parse->current_loop_head;
+
+		if (!tryEat(parse, Tok_Semicolon)) {
+			IrRef cond = toBoolean(parse, primary, parseExpression(parse));
+			expect(parse, Tok_Semicolon);
+
+			genBranch(build, cond);
+			build->insertion_block->exit.branch.on_false = parse->current_loop_switch_exit;
+			build->insertion_block->exit.branch.on_true = startNewBlock(build, parse->code_arena, zString("for_join_"));
+		}
+		if (!tryEat(parse, Tok_CloseParen)) {
+			Block *current = build->insertion_block;
+			to_tail = startNewBlock(build, parse->code_arena, zString("for_tail_"));
+			discardValue(parse, primary, parseExpression(parse));
+			expect(parse, Tok_CloseParen);
+
+			// TODO This is just one example of how the basic block
+			// construction interfacees are badly structured.
+			// It takes a lot of code to achieve something simple, and
+			// in the end, blocks are not even activated in the right
+			// order, setting wrong first_instruction values. (Those are
+			// currently fixed up by analysis passes, but I don't want
+			// to do those for lightspeed codegen).
+			genJump(build, parse->current_loop_head);
+			build->insertion_block = current;
+		}
+
+		parseStatement(parse, had_non_declaration);
+		genJump(build, NULL);
+		build->insertion_block->exit.unconditional = to_tail;
+		build->insertion_block = parse->current_loop_switch_exit;
+
+		parse->current_loop_head = enclosing_head;
+		parse->current_loop_switch_exit = enclosing_exit;
+		popScope(parse, s);
 	} break;
 	case Tok_Key_If: {
 		parse->pos++;
@@ -604,7 +593,7 @@ static void parseStatement (Parse *parse, bool *had_non_declaration) {
 		expect(parse, Tok_OpenParen);
 		Value condition = parseExpression(parse);
 		expect(parse, Tok_CloseParen);
-		genBranch(build, toBoolean(parse, condition, primary));
+		genBranch(build, toBoolean(parse, primary, condition));
 		Block *head = build->insertion_block;
 
 		head->exit.branch.on_true = startNewBlock(build, parse->code_arena, zString("if_true_"));
@@ -630,6 +619,8 @@ static void parseStatement (Parse *parse, bool *had_non_declaration) {
 		expect(parse, Tok_OpenParen);
 		Value v = parseExpression(parse);
 		expect(parse, Tok_CloseParen);
+		if (v.typ.kind == Kind_Enum)
+			v.typ = BASIC_INT;
 		if (v.typ.kind != Kind_Basic)
 			parseerror(parse, primary, "can only switch on expressions of integer type, not on an %s",
 					printTypeHighlighted(&parse->arena, v.typ));
@@ -657,14 +648,14 @@ static void parseStatement (Parse *parse, bool *had_non_declaration) {
 		Type base_type;
 		u8 storage;
 		if (!tryParseTypeBase(parse, &base_type, &storage)) {
-			parseExpression(parse);
+			discardValue(parse, primary, parseExpression(parse));
 			expect(parse, Tok_Semicolon);
 			break;
 		}
 		is_declaration = true;
 
 		if (labeled)
-			requiresVersion(parse, "for arbitrary reasons, labels before declarations", Version_C23);
+			requires(parse, "for arbitrary reasons, labels before declarations", Features_C23);
 
 		if (storage == Storage_Typedef) {
 			parseTypedefDecls(parse, base_type);
@@ -677,27 +668,12 @@ static void parseStatement (Parse *parse, bool *had_non_declaration) {
 		do {
 			const Token *decl_token = parse->pos;
 			Declaration decl = parseDeclarator(parse, base_type, Decl_Named);
-			bool is_new;
-			OrdinaryIdentifier *sym = genOrdSymbol(parse, decl.name, &is_new);
 
-			if (decl.type.kind == Kind_Function) {
-				parseerror(parse, decl_token, "TODO Support function declarations in functions");
-			} else if (decl.type.kind == Kind_Void) {
-				parseerror(parse, decl_token, "variables can not have $svoid$s type", BOLD, RESET);
-			} else {
-				if (!is_new)
-					redefinition(parse, decl_token, sym->def_location, decl.name);
+			const Token *definer = parse->pos->kind == Tok_Equals ? parse->pos : NULL;
+			OrdinaryIdentifier *ord = define(parse, decl, storage, primary, decl_token,
+					definer, /* file_scope */ false);
 
-				sym->kind = Sym_Value_Auto;
-				sym->decl_location = sym->def_location = decl_token;
-				sym->value = (Value) {decl.type,
-					genStackAllocFixed(build, typeSize(decl.type, &parse->target)),
-					storage == Storage_Register ? Ref_LValue_Register : Ref_LValue,
-				};
-
-				if (tryEat(parse, Tok_Equals))
-					parseInitializer(parse, (InitializationDest) {0, sym->value.typ, .address = sym->value.inst});
-			}
+			initializeDefinition(parse, ord, decl.type);
 		} while (tryEat(parse, Tok_Comma));
 
 		expect(parse, Tok_Semicolon);
@@ -706,7 +682,7 @@ static void parseStatement (Parse *parse, bool *had_non_declaration) {
 
 	// TODO This is broken.
 	if (is_declaration && *had_non_declaration)
-		requiresVersion(parse, "declarations after the begnning of the block", Version_C99);
+		requires(parse, "declarations after the begnning of the block", Features_C99);
 	else
 		*had_non_declaration = true;
 }
@@ -727,66 +703,59 @@ static Value parseExpression (Parse *parse) {
 static Value parseExprAssignment (Parse *parse) {
 	Value v = parseExprElvis(parse);
 	const Token *primary = parse->pos;
-	bool modfiy = true;
 
-	switch (primary->kind) {
-	case Tok_Equals:
-		modfiy = false;
-		FALLTHROUGH;
-	case Tok_PlusEquals:
-	case Tok_MinusEquals:
-	case Tok_AmpersandEquals:
-	case Tok_PipeEquals:
-	case Tok_DoubleLessEquals:
-	case Tok_DoubleGreaterEquals:
-		parse->pos++;
-		if (v.typ.kind == Kind_Function)
-			parseerror(parse, primary, "cannot assign to a function");
-		if (!isLvalue(v))
-			parseerror(parse, primary, "cannot assign to an rvalue");
-		if (v.typ.qualifiers & Qualifier_Const)
-			parseerror(parse, primary, "cannot assign to a %sconst%s-qualified value", BOLD, RESET);
-
-		Value assigned = parseExprAssignment(parse);
-
-		if (modfiy) {
-			Value loaded = {v.typ, genLoad(&parse->build, v.inst, typeSize(v.typ, &parse->target))};
-			assigned = rvalue(assigned, parse);
-			switch (primary->kind) {
-			case Tok_PlusEquals:
-				assigned = arithAdd(parse, primary, loaded, assigned);
-				break;
-			case Tok_MinusEquals:
-				assigned = arithSub(parse, primary, loaded, assigned);
-				break;
-			case Tok_AmpersandEquals: {
-				Type common = arithmeticConversions(parse, primary, &loaded, &assigned);
-				assigned = (Value) {common, genAnd(&parse->build, loaded.inst, assigned.inst)};
-			} break;
-			case Tok_PipeEquals: {
-				Type common = arithmeticConversions(parse, primary, &loaded, &assigned);
-				assigned = (Value) {common, genOr(&parse->build, loaded.inst, assigned.inst)};
-			} break;
-			case Tok_DoubleLessEquals:
-			case Tok_DoubleGreaterEquals: {
-				loaded = intPromote(loaded, parse, primary);
-				assigned = intPromote(assigned, parse, primary);
-
-				if (primary->kind == Tok_DoubleLessEquals)
-					assigned = (Value) {loaded.typ, genShiftLeft(&parse->build, loaded.inst, assigned.inst)};
-				else
-					assigned = (Value) {loaded.typ, genShiftRight(&parse->build, loaded.inst, assigned.inst)};
-			} break;
-			default:
-				parseerror(parse, primary, "TODO Compound assignments");
-			}
-		}
-
-		genStore(&parse->build, v.inst, coerce(assigned, v.typ, parse, primary));
-		return assigned;
-	default:
+	if (!(primary->kind == Tok_Equals || primary->kind >= Tok_Assignment_Start))
 		return v;
+
+	parse->pos++;
+	if (v.typ.kind == Kind_Function)
+		parseerror(parse, primary, "cannot assign to a function");
+	if (!isLvalue(v))
+		parseerror(parse, primary, "cannot assign to an rvalue");
+	if (v.typ.qualifiers & Qualifier_Const)
+		parseerror(parse, primary, "cannot assign to a %sconst%s-qualified value", BOLD, RESET);
+
+	Value assigned = parseExprAssignment(parse);
+
+	if (primary->kind != Tok_Equals) {
+		Value loaded = {v.typ, genLoad(&parse->build, v.inst, typeSize(v.typ, &parse->target))};
+		assigned = rvalue(assigned, parse);
+		switch (primary->kind) {
+		case Tok_PlusEquals:
+			assigned = arithAdd(parse, primary, loaded, assigned);
+			break;
+		case Tok_MinusEquals:
+			assigned = arithSub(parse, primary, loaded, assigned);
+			break;
+		case Tok_AmpersandEquals: {
+			Type common = arithmeticConversions(parse, primary, &loaded, &assigned);
+			assigned = (Value) {common, genAnd(&parse->build, loaded.inst, assigned.inst)};
+		} break;
+		case Tok_PipeEquals: {
+			Type common = arithmeticConversions(parse, primary, &loaded, &assigned);
+			assigned = (Value) {common, genOr(&parse->build, loaded.inst, assigned.inst)};
+		} break;
+		case Tok_HatEquals: {
+			Type common = arithmeticConversions(parse, primary, &loaded, &assigned);
+			assigned = (Value) {common, genXor(&parse->build, loaded.inst, assigned.inst)};
+		} break;
+		case Tok_DoubleLessEquals:
+		case Tok_DoubleGreaterEquals: {
+			loaded = intPromote(loaded, parse, primary);
+			assigned = intPromote(assigned, parse, primary);
+
+			if (primary->kind == (Tok_DoubleLessEquals))
+				assigned = (Value) {loaded.typ, genShiftLeft(&parse->build, loaded.inst, assigned.inst)};
+			else
+				assigned = (Value) {loaded.typ, genShiftRight(&parse->build, loaded.inst, assigned.inst)};
+		} break;
+		default:
+			parseerror(parse, primary, "TODO Compound assignments");
+		}
 	}
+
+	genStore(&parse->build, v.inst, coerce(assigned, v.typ, parse, primary));
+	return assigned;
 }
 
 static Value parseExprElvis (Parse *parse) {
@@ -794,35 +763,75 @@ static Value parseExprElvis (Parse *parse) {
 
 	const Token *primary = parse->pos;
 	if (tryEat(parse, Tok_Question)) {
-		if (cond.typ.kind != Kind_Basic)
-			parseerror(parse, primary, "condition value of %s %s must be scalar types, a value of type %s is not allowed",
-					tokenName(Tok_Question), tokenName(Tok_Colon), printTypeHighlighted(&parse->arena, cond.typ));
 		IrBuild *build = &parse->build;
 		Block *head = build->insertion_block;
 
+		IrRef ir = toBoolean(parse, primary, cond);
 
-		genBranch(build, rvalue(cond, parse).inst);
+		// Some hacks to allow constant expressions.
+		// TODO Figure out a way to fold this purely in the IR
+		Inst inst = build->ir.ptr[ir];
+		if (inst.kind == Ir_Constant) {
+			Value res;
+			if (inst.constant) {
+				res = parseExprAssignment(parse);
+				expect(parse, Tok_Colon);
+				Block *b = build->insertion_block;
+				startNewBlock(build, parse->code_arena, zString("dummy"));
+				parseExprElvis(parse);
+				build->insertion_block = b;
+			} else {
+				Block *b = build->insertion_block;
+				startNewBlock(build, parse->code_arena, zString("dummy"));
+				parseExprAssignment(parse);
+				expect(parse, Tok_Colon);
+				build->insertion_block = b;
+				res = parseExprElvis(parse);
+			}
+			return res;
+		}
+
+		// This has to generate instructions out of block
+		// order—because the two expressions need to be joined after
+		// both types are known. Maybe the reordering pass really is
+		// necessary.
+
+		genBranch(build, ir);
 		head->exit.branch.on_true = startNewBlock(build, parse->code_arena, STRING_EMPTY);
 		Value lhs = rvalue(parseExprAssignment(parse), parse);
-		IrRef src_l = genPhiOut(build, lhs.inst);
-		expect(parse, Tok_Colon);
 		Block *true_branch = build->insertion_block;
-		genJump(build, NULL);
+
+		const Token *colon = parse->pos;
+		expect(parse, Tok_Colon);
 
 		head->exit.branch.on_false = startNewBlock(build, parse->code_arena, STRING_EMPTY);
 		Value rhs = rvalue(parseExprElvis(parse), parse);
-		IrRef src_r = genPhiOut(build, rhs.inst);
 
-		if (!typeCompatible(lhs.typ, rhs.typ))
-			parseerror(parse, primary, "(TODO phrasing) (TODO join arithmetic types) Types are not compatible");
+		Type common;
+		if (typeCompatible(lhs.typ, rhs.typ))
+			common = lhs.typ;
+		else if (lhs.typ.kind == Kind_Pointer && lhs.typ.kind == Kind_Pointer)
+			if (lhs.typ.pointer->kind == Kind_Void)
+				common = rhs.typ;
+			else if (rhs.typ.pointer->kind == Kind_Void)
+				common = lhs.typ;
+			else
+				parseerror(parse, colon, "incompatible pointer types");
+		else // This can only generate an extension instruction, which will be reordered into the right block.
+			common = arithmeticConversions(parse, colon, &rhs, &lhs);
+
+		IrRef src_r = genPhiOut(build, coerce(rhs, common, parse, colon));
 		Block *join = newBlock(&parse->build, parse->code_arena, STRING_EMPTY);
 		genJump(build, join);
-		true_branch->exit.unconditional = join;
 
-		IrRef dest = genPhiIn(build, typeSize(lhs.typ, &parse->target));
+		build->insertion_block = true_branch;
+		IrRef src_l = genPhiOut(build, coerce(lhs, common, parse, colon));
+		genJump(build, join);
+
+		IrRef dest = genPhiIn(build, typeSize(common, &parse->target));
 		setPhiOut(build, src_l, dest, IR_REF_NONE);
 		setPhiOut(build, src_r, dest, IR_REF_NONE);
-		cond = (Value) {lhs.typ, dest};
+		cond = (Value) {common, dest};
 	}
 	return cond;
 }
@@ -836,12 +845,12 @@ static Value parseExprOr (Parse *parse) {
 		Block *head = build->insertion_block;
 
 		IrRef constant = genPhiOut(build, genImmediateInt(build, 1, int_size));
-		genBranch(build, toBoolean(parse, lhs, primary));
+		genBranch(build, toBoolean(parse, primary, lhs));
 		head->exit.branch.on_false = startNewBlock(build, parse->code_arena, STRING_EMPTY);
 
 		Value rhs = parseExprOr(parse);
 
-		IrRef rhs_val = genPhiOut(build, toBoolean(parse, rhs, primary));
+		IrRef rhs_val = genPhiOut(build, toBoolean(parse, primary, rhs));
 		Block *join = newBlock(&parse->build, parse->code_arena, STRING_EMPTY);
 		genJump(build, join);
 		head->exit.branch.on_true = join;
@@ -864,12 +873,12 @@ static Value parseExprAnd (Parse *parse) {
 		Block *head = build->insertion_block;
 
 		IrRef constant = genPhiOut(build, genImmediateInt(build, 0, int_size));
-		genBranch(build, toBoolean(parse, lhs, primary));
+		genBranch(build, toBoolean(parse, primary, lhs));
 		head->exit.branch.on_true = startNewBlock(build, parse->code_arena, STRING_EMPTY);
 
 		Value rhs = parseExprOr(parse);
 
-		IrRef rhs_val = genPhiOut(build, toBoolean(parse, rhs, primary));
+		IrRef rhs_val = genPhiOut(build, toBoolean(parse, primary, rhs));
 		Block *join = newBlock(&parse->build, parse->code_arena, STRING_EMPTY);
 		genJump(build, join);
 		head->exit.branch.on_false = join;
@@ -923,13 +932,17 @@ static Value parseExprEquality (Parse *parse) {
 	IrBuild *build = &parse->build;
 	Value lhs = parseExprComparison(parse);
 
-	switch (parse->pos->kind) {
-	case Tok_DoubleEquals:
+	switch ((int) parse->pos->kind) {
+	case Tok_EqualsEquals:
 	case Tok_BangEquals: {
 		const Token *primary = parse->pos;
 		parse->pos++;
-		lhs = rvalue(lhs, parse);
-		Value rhs = rvalue(parseExprComparison(parse), parse);
+		Value rhs = parseExprComparison(parse);
+
+		if (lhs.inst == rhs.inst && lhs.category == rhs.category && parse->opt->warn_compare)
+			parsemsg(Log_Warn, parse, primary, "comparison to self is always %s",
+					primary->kind == Tok_BangEquals ? "false" : "true");
+
 		if (lhs.typ.kind == Kind_Pointer && lhs.typ.kind == Kind_Pointer) {
 			if (!lhs.typ.pointer->kind == Kind_Void &&
 				!rhs.typ.pointer->kind == Kind_Void &&
@@ -938,12 +951,14 @@ static Value parseExprEquality (Parse *parse) {
 				parseerror(parse, primary, "can not compare types %s and %s",
 						printTypeHighlighted(&parse->arena, lhs.typ), printTypeHighlighted(&parse->arena, rhs.typ));
 			}
+			lhs = rvalue(lhs, parse);
+			rhs = rvalue(rhs, parse);
 		} else {
 			arithmeticConversions(parse, primary, &lhs, &rhs);
 		}
 
 		IrRef eql = genEquals(build, lhs.inst, rhs.inst, typeSize(BASIC_INT, &parse->target));
-		if (primary->kind == Tok_BangEquals)
+		if (primary->kind == (Tok_BangEquals))
 			eql = genNot(build, eql);
 		return (Value) { BASIC_INT, eql };
 	}
@@ -962,10 +977,15 @@ static Value parseExprComparison (Parse *parse) {
 	case Tok_Greater:
 	case Tok_GreaterEquals: {
 		parse->pos++;
-		lhs = rvalue(lhs, parse);
-		Value rhs = rvalue(parseExprShift(parse), parse);
+		Value rhs = parseExprShift(parse);
+
+		if (lhs.inst == rhs.inst && lhs.category == rhs.category && parse->opt->warn_compare)
+			parsemsg(Log_Warn, parse, primary, "comparison to self is always %s",
+					primary->kind == Tok_Less || primary->kind == Tok_Greater ? "false" : "true");
+
 		if (lhs.typ.kind == Kind_Pointer && rhs.typ.kind == Kind_Pointer) {
-			;
+			lhs = rvalue(lhs, parse);
+			rhs = rvalue(rhs, parse);
 		} else if (lhs.typ.kind == Kind_Pointer) {
 			parseerror(parse, primary, "can not compare a pointer with an %s", printTypeHighlighted(&parse->arena, rhs.typ));
 		} else if (rhs.typ.kind == Kind_Pointer) {
@@ -1232,7 +1252,6 @@ static Value parseExprRightUnary (Parse *parse) {
 		} else if (tryEat(parse, Tok_DoublePlus) || tryEat(parse, Tok_DoubleMinus)) {
 			int delta = primary->kind == Tok_DoublePlus ? 1 : -1;
 
-			Value v = parseExprLeftUnary(parse);
 			if (v.typ.kind == Kind_Function)
 				parseerror(parse, primary, "cannot modify a function");
 			if (!isLvalue(v))
@@ -1379,9 +1398,9 @@ static Value parseExprBase (Parse *parse) {
 		return immediateIntVal(parse, BASIC_INT, typeAlignment(t, &parse->target));
 	}
 	case Tok_Identifier: {
-		Symbol *sym = mapGet(&symbols, t.val.string);
+		Symbol *sym = mapGet(&symbols, t.val.identifier);
 		if (sym == NULL || sym->ordinary == NULL)
-			parseerror(parse, NULL, "undefined identifier ‘%.*s’", STRING_PRINTAGE(t.val.string));
+			parseerror(parse, NULL, "undefined identifier ‘%.*s’", STRING_PRINTAGE(t.val.identifier));
 		OrdinaryIdentifier *ident = sym->ordinary;
 		switch (ident->kind) {
 		case Sym_Typedef:
@@ -1400,7 +1419,7 @@ static Value parseExprBase (Parse *parse) {
 		}
 	} unreachable;
 	case Tok_Key_Generic: {
-		requiresVersion(parse, "generic selections", Version_C17);
+		requires(parse, "generic selections", Features_C23);
 
 		const Token *primary = parse->pos;
 		expect(parse, Tok_OpenParen);
@@ -1457,13 +1476,103 @@ static Value parseExprBase (Parse *parse) {
 static Attributes parseAttributes (Parse *parse) {
 	Attributes result = 0;
 	while (parse->pos[0].kind == Tok_OpenBracket && parse->pos[1].kind == Tok_OpenBracket) {
-		requiresVersion(parse, "attributes", Version_C23);
+		requires(parse, "attributes", Features_C23);
 		parse->pos += 2;
 		parseerror(parse, NULL, "TODO Implement attributes");
 	}
 	return result;
 }
 
+
+// More redundant state. See the comment on define().
+static void initializeDefinition (Parse *parse, OrdinaryIdentifier *ord, Type type) {
+	const Token *init_token = NULL;
+	if (parse->pos->kind == Tok_Equals) {
+		init_token = parse->pos;
+		parse->pos++;
+	}
+
+	bool unspecified_size = false;
+	if (type.kind == Kind_VLArray) {
+		if (type.array.count == IR_REF_NONE) {
+			unspecified_size = true;
+			if (!init_token)
+				parseerror(parse, NULL, "cannot infer size of array without initializer");
+		} else if (init_token) {
+			requires(parse, "initialization of variable-length arrays", Features_C23);
+
+			expect(parse, Tok_OpenBrace);
+			expect(parse, Tok_CloseBrace);
+
+			parseerror(parse, NULL, "TODO Implement VLA initializers");
+		}
+	}
+
+	StaticValue *static_val = NULL;
+	RefsList refs = { 0 };
+	InitializationDest dest = { .type = type };
+
+	if (ord->kind == Sym_Value_Auto) {
+		ord->value = (Value) {type, genStackAllocFixed(&parse->build, typeSize(type, &parse->target)), Ref_LValue};
+		dest.address = ord->value.inst;
+	} else {
+		assert(ord->kind == Sym_Value_Static);
+		assert(init_token);
+		static_val = &parse->module->ptr[ord->static_id];
+// 		assert(type == static_val->type);
+		dest.reloc_references = &refs;
+	}
+
+	if (unspecified_size) {
+		assert(init_token);
+		expect(parse, Tok_OpenBrace);
+		dest.type = *dest.type.array.inner;
+
+		u32 member_size = typeSize(dest.type, &parse->target);
+		u32 count = 0;
+		while (true) {
+			if (tryEat(parse, Tok_CloseBrace))
+				break;
+			count++;
+			if (static_val && count * member_size > dest.reloc_data.len) {
+				dest.reloc_data = (MutableString) ALLOCN(parse->code_arena, char,
+						dest.reloc_data.len + count * member_size);
+			}
+
+			parseInitializer(parse, dest);
+
+			if (!tryEat(parse, Tok_Comma)) {
+				expect(parse, Tok_CloseBrace);
+				break;
+			}
+		}
+
+		if (static_val) {
+			static_val->type.kind = Kind_Array;
+			static_val->type.array.count = count;
+			static_val->value_data = (String) {count * member_size, dest.reloc_data.ptr};
+			static_val->value_references = (References) {refs.len, refs.ptr};
+		} else {
+			ord->value.typ.kind = Kind_Array;
+			ord->value.typ.array.count = count;
+			Inst *size = &parse->build.ir.ptr[parse->build.ir.ptr[dest.address].alloc.size];
+			assert(size->kind == Ir_Constant);
+			size->constant = count * member_size;
+		}
+	}
+
+	if (init_token) {
+		if (static_val) {
+			dest.reloc_data = (MutableString) ALLOCN(parse->code_arena, char,
+					typeSize(type, &parse->target));
+			parseInitializer(parse, dest);
+			static_val->value_data = (String) {dest.reloc_data.len, dest.reloc_data.ptr};
+			static_val->value_references = (References) {refs.len, refs.ptr};
+		} else {
+			parseInitializer(parse, dest);
+		}
+	}
+}
 
 static void parseInitializer (Parse *parse, InitializationDest dest) {
 	// TODO Values must be constants when initializing static/_Thread_local values.
@@ -1478,7 +1587,7 @@ static void parseInitializer (Parse *parse, InitializationDest dest) {
 			u32 member_idx = 0;
 			Members members = resolveType(dest.type).members;
 			if (tryEat(parse, Tok_Dot)) {
-				requiresVersion(parse, "dot-designated initializers", Version_C99);
+				requires(parse, "dot-designated initializers", Features_C99);
 				const Token *name = parse->pos;
 				String member = expect(parse, Tok_Identifier).val.identifier;
 
@@ -1486,7 +1595,8 @@ static void parseInitializer (Parse *parse, InitializationDest dest) {
 					member_idx++;
 
 				if (member_idx == members.len)
-					parseerror(parse, name, "%s does not have a member named %.*s", printTypeHighlighted(&parse->arena, dest.type), member.len, member.ptr);
+					parseerror(parse, name, "%s does not have a member named %.*s",
+							printTypeHighlighted(&parse->arena, dest.type), STRING_PRINTAGE(member));
 
 				expect(parse, Tok_Equals);
 			}
@@ -1495,7 +1605,8 @@ static void parseInitializer (Parse *parse, InitializationDest dest) {
 			expect(parse, Tok_CloseBrace);
 		} return;
 		case Kind_Array:
-			parseerror(parse, NULL, "TODO Array initializers");
+			parseArrayInitializer(parse, dest);
+			return;
 		default:
 			parseerror(parse, NULL, "initializer can only be used for structs, unions and arrays, not for %s", printTypeHighlighted(&parse->arena, dest.type));
 		}
@@ -1507,7 +1618,7 @@ static void parseInitializer (Parse *parse, InitializationDest dest) {
 			if (dest.reloc_data.ptr)
 				parseerror(parse, begin, "expected a static initializer (TODO print the non-static culprit)");
 
-			requiresVersion(parse, "non-constant initializers", Version_C99);
+			requires(parse, "non-constant initializers", Features_C99);
 		}
 
 		IrBuild *build = &parse->build;
@@ -1516,8 +1627,7 @@ static void parseInitializer (Parse *parse, InitializationDest dest) {
 				memcpy(
 					dest.reloc_data.ptr + dest.offset,
 					&inst.constant,
-					inst.size
-				);
+					inst.size);
 			} else {
 				assert(inst.kind == Ir_Reloc);
 				StaticValue *val = &parse->module->ptr[inst.reloc.id];
@@ -1551,9 +1661,15 @@ static void parseStructInitializer (Parse *parse, InitializationDest dest) {
 	u32 len = resolved.members.len;
 	CompoundMember *members = resolved.members.ptr;
 
+	if (dest.reloc_data.ptr) {
+		memset(dest.reloc_data.ptr + dest.offset, 0, typeSize(resolved, &parse->target));
+	} else {
+		parsemsg(Log_Warn, parse, parse->pos - 1, "TODO zero-init values");
+	}
+
 	if (tryEat(parse, Tok_CloseBrace)) {
-		requiresVersionJust(parse, "empty initializers", Version_C23);
-		parseerror(parse, NULL, "TODO Implement empty initializers");
+		requires(parse, "empty initializers", Features_C23);
+		parseerror(parse, parse->pos - 2, "TODO Implement empty initializers");
 		return;
 	}
 
@@ -1562,7 +1678,7 @@ static void parseStructInitializer (Parse *parse, InitializationDest dest) {
 	u32 member_idx = 0;
 	while (true) {
 		if (tryEat(parse, Tok_Dot)) {
-			requiresVersion(parse, "dot-designated initializers", Version_C99);
+			requires(parse, "dot-designated initializers", Features_C99);
 			const Token *name = parse->pos;
 			String member = expect(parse, Tok_Identifier).val.identifier;
 
@@ -1595,6 +1711,62 @@ static void parseStructInitializer (Parse *parse, InitializationDest dest) {
 	}
 }
 
+static void parseArrayInitializer(Parse *parse, InitializationDest dest) {
+	assert(dest.type.kind == Kind_Array);
+	u32 count = dest.type.array.count;
+	Type inner = *dest.type.array.inner;
+	u32 member_size = typeSize(inner, &parse->target);
+
+	if (dest.reloc_data.ptr) {
+		memset(dest.reloc_data.ptr + dest.offset, 0, typeSize(dest.type, &parse->target));
+	} else {
+		parsemsg(Log_Warn, parse, NULL, "TODO zero-init values");
+	}
+
+	if (tryEat(parse, Tok_CloseBrace)) {
+		requires(parse, "empty initializers", Features_C23);
+		parseerror(parse, NULL, "TODO Implement empty initializers");
+		return;
+	}
+
+	u32 member_idx = 0;
+	while (true) {
+		if (tryEat(parse, Tok_OpenBracket)) {
+			const Token *designator = parse->pos - 1;
+			requires(parse, "bracket-designated initializers", Features_C99);
+
+			u64 pos;
+			if (!tryIntConstant(parse, parseExpression(parse), &pos))
+				parseerror(parse, designator, "bracket designators must be constant integer expressions");
+
+			if (pos >= count)
+				parseerror(parse, designator, "index %lld is out of range of the array", (long long) member_idx);
+
+			member_idx = pos;
+
+			expect(parse, Tok_CloseBracket);
+			expect(parse, Tok_Equals);
+		} else if (member_idx >= count) {
+			parseerror(parse, NULL, "initializers went beyond the end of the array");
+		}
+
+		InitializationDest sub_dest = dest;
+		sub_dest.offset += member_idx * member_size;
+		sub_dest.type = inner;
+		parseInitializer(parse, sub_dest);
+
+		member_idx++;
+
+		if (tryEat(parse, Tok_Comma)) {
+			if (tryEat(parse, Tok_CloseBrace))
+				break;
+		} else {
+			expect(parse, Tok_CloseBrace);
+			break;
+		}
+	}
+
+}
 
 static Type parseValueType (Parse *parse, Value (*operator)(Parse *parse)) {
 	Block *current = parse->build.insertion_block;
@@ -1625,8 +1797,14 @@ static bool tryParseTypeName (Parse *parse, Type *type, u8 *storage_dest) {
 
 static Type parseTypeBase (Parse *parse, u8 *storage) {
 	Type type;
-	if (!tryParseTypeBase(parse, &type, storage))
+	if (!tryParseTypeBase(parse, &type, storage)) {
+		if (parse->pos->kind == Tok_Identifier) {
+			requires(parse, "default types of int", Features_DefaultInt);
+			*storage = Storage_Unspecified;
+			return BASIC_INT;
+		}
 		parseerror(parse, parse->pos, "expected a type name");
+	}
 	return type;
 }
 
@@ -1778,11 +1956,12 @@ static bool tryParseTypeBase (Parse *parse, Type *type, u8 *storage_dest) {
 				if (tryEat(parse, Tok_Equals)) {
 					const Token *expr_token = parse->pos;
 					Value val = parseExprAssignment(parse);
-					Inst inst = parse->build.ir.ptr[val.inst];
-					if (inst.kind != Ir_Constant)
+
+					u64 int_val;
+					if (!tryIntConstant(parse, val, &int_val))
 						parseerror(parse, expr_token, "enumeration values must be constant expressions");
 					// TODO Range check this downcast.
-					value = inst.constant;
+					value = int_val;
 				}
 				bool new;
 				OrdinaryIdentifier *ident = genOrdSymbol(parse, name, &new);
@@ -1795,7 +1974,7 @@ static bool tryParseTypeBase (Parse *parse, Type *type, u8 *storage_dest) {
 
 				if (tryEat(parse, Tok_Comma)) {
 					if (tryEat(parse, Tok_CloseBrace)) {
-						requiresVersion(parse, "trailing comma in enumerator list", Version_C99);
+						requires(parse, "trailing comma in enumerator list", Features_C99);
 						break;
 					}
 				} else {
@@ -1811,7 +1990,7 @@ static bool tryParseTypeBase (Parse *parse, Type *type, u8 *storage_dest) {
 			if (longness[0]) {
 				if (longness[1])
 					parseerror(parse, parse->pos, "The Type Is Too Damn Long");
-				requiresVersion(parse, "long long types", Version_C99);
+				requires(parse, "long long types", Features_C99);
 				longness[1] = parse->pos;
 			} else {
 				longness[0] = parse->pos;
@@ -1826,7 +2005,7 @@ static bool tryParseTypeBase (Parse *parse, Type *type, u8 *storage_dest) {
 		case Tok_Key_Volatile: base.qualifiers |= Qualifier_Volatile; break;
 		case Tok_Key_Restrict: base.qualifiers |= Qualifier_Restrict; break;
 		case Tok_Key_Atomic:
-			requiresVersion(parse, "atomic types", Version_C17);
+			requires(parse, "atomic types", Features_C11);
 			base.qualifiers |= Qualifier_Atomic;
 			break;
 		// TODO Parse _Atomic() type operator
@@ -1874,7 +2053,7 @@ static bool tryParseTypeBase (Parse *parse, Type *type, u8 *storage_dest) {
 			// TODO
 			break;
 		case Tok_Key_Threadlocal:
-			requiresVersion(parse, "thread-local types", Version_C17);
+			requires(parse, "thread-local types", Features_C11);
 			parseerror(parse, parse->pos, "TODO Support _Thread_local");
 // 			base.storage = Storage_Threadlocal;
 // 			storages++;
@@ -1996,13 +2175,68 @@ static Type parseStructUnionBody(Parse *parse, bool is_struct) {
 		// with an incomplete array, or incomplete type except
 		// that the last item may be an incomplete array.
 		// TODO Check this.
+
+		const Token *begin = parse->pos;
 		Type base = parseTypeBase(parse, NULL);
+
+		if (tryEat(parse, Tok_Semicolon)) {
+			Type t = resolveType(base);
+			if (t.kind != Kind_Struct && t.kind != Kind_Union)
+				parseerror(parse, begin, "missing");
+			requires(parse, "anonymous members", Features_C11);
+
+			u32 offset = 0;
+			if (is_struct)
+				offset = addMemberOffset(&current_offset, t, &parse->target);
+			for (u32 i = 0; i < t.members.len; i++) {
+				// TODO Check that the last member is not a flexible array.
+				CompoundMember m = t.members.ptr[i];
+				m.offset += offset;
+				PUSH_A(parse->code_arena, members, m);
+			}
+			continue;
+		}
+
 		do {
-			Declaration decl = parseDeclarator(parse, base, Decl_Named);
+			const Token *begin = parse->pos;
+			bool bare_colon = tryEat(parse, Tok_Colon);
+
+			Declaration decl;
+			if (!bare_colon)
+				decl = parseDeclarator(parse, base, Decl_Named);
+
+			if (bare_colon || tryEat(parse, Tok_Colon)) {
+				const Token *colon = parse->pos - 1;
+				Type basetype = bare_colon ? base : decl.type;
+				if (basetype.kind != Kind_Basic)
+					parseerror(parse, colon, "a bit field must have integer type, %s does not work",
+							printTypeHighlighted(&parse->arena, basetype));
+				if (basetype.basic != Int_bool && (basetype.basic & ~Int_unsigned) != Int_int)
+					requires(parse, "bit fields of types other than int", Features_GNU_Extensions);
+
+				u64 bitsize;
+				if (!tryIntConstant(parse, parseExpression(parse), &bitsize))
+					parseerror(parse, colon, "the width of a bit field must be a constant integer expression");
+				// TODO
+			}
+
 			// TODO Support VLAs
 			u32 member_offset = 0;
 			if (is_struct)
 				member_offset = addMemberOffset(&current_offset, decl.type, &parse->target);
+
+			if (arrayUnknownSize(decl.type)) {
+				if (!(parse->pos[0].kind == Tok_Semicolon && parse->pos[1].kind == Tok_CloseBrace)) {
+					// TOOD "such a structure (and any union containing,
+					// possibly recursively, a member that is such a
+					// structure) shall not be a member of a structure or an
+					// element of an array."
+					parseerror(parse, begin, "only the last member of a struct member may have incomplete array type");
+				}
+				requires(parse, "flexible array members", Features_C99);
+				if (members.len == 0)
+					requires(parse, "flexible array members without preceding members", Features_GNU_Extensions);
+			}
 
 			PUSH_A(parse->code_arena, members, ((CompoundMember) {decl.type, decl.name, member_offset}));
 		} while (tryEat(parse, Tok_Comma));
@@ -2050,6 +2284,7 @@ static bool allowedNoDeclarator (Parse *parse, Type base_type) {
 	case Kind_Struct_Named:
 	case Kind_Union:
 	case Kind_Union_Named:
+	case Kind_Enum:
 		return tryEat(parse, Tok_Semicolon);
 	default:
 		return false;
@@ -2183,7 +2418,7 @@ static Declaration parseDeclarator (Parse *parse, Type base_type, Namedness name
 			}
 			if (is_static) {
 				// TODO Reject a `static` everywhere except on a function parameter
-				requiresVersion(parse, "static specifiers on array parameters", Version_C99);
+				requires(parse, "static specifiers on array parameters", Features_C99);
 			}
 
 			if (tryEat(parse, Tok_Asterisk)) {
@@ -2195,7 +2430,7 @@ static Declaration parseDeclarator (Parse *parse, Type base_type, Namedness name
 			} else {
 				inner->array.count = coerce(parseExprAssignment(parse), parse->target.ptrdiff, parse, primary);
 				if (parse->build.ir.ptr[inner->array.count].kind != Ir_Constant) {
-					requiresVersion(parse, "variable length arrays", Version_C99);
+					requires(parse, "variable length arrays", Features_C99);
 					parseerror(parse,NULL, "TODO Support VLA");
 				}
 			}
@@ -2232,10 +2467,165 @@ static void parseTypedefDecls(Parse *parse, Type base_type) {
 }
 
 
-// ===> Type operations, semantic analysis
+// ===> Type operations and semantic analysis
 
 
-static Value arithAdd(Parse *parse, const Token *primary, Value lhs, Value rhs) {
+/*
+The semantics of declarations and linkages in C are the most
+aesthetically offensive piece of logic I have ever read. And this does
+not even cover the bizarre MSVC modifications to scope, like function
+declarations always being at file scope.
+
+This code tries to express some finnicky bits in the standard's wording
+of linkage, resulting in some abstractness and redundant representations
+of data. I usually like to compress that kind of stuff down, but here it
+looks like explaining the correctness of the result would be more effort
+than it's worth.
+*/
+
+static OrdinaryIdentifier *define (
+	Parse *parse,
+	Declaration decl,
+	u8 storage,
+	const Token *type_token,
+	const Token *decl_token,
+	const Token *defining_token,
+	bool file_scope)
+{
+	typedef enum {
+		Link_None,
+		Link_External,
+		Link_Internal,
+	} Linkage;
+	bool msvc = parse->target.version & Features_MSVC_Extensions;
+
+	Symbol *sym = getSymbol(parse, decl.name);
+	OrdinaryIdentifier *existing = sym->ordinary;
+	Linkage existing_link = Link_None;
+	u32 scope_depth = parse->scope_depth;
+
+	if (msvc && decl.type.kind == Kind_Function)
+		scope_depth = 0;
+
+	if (existing && existing->kind == Sym_Value_Static) {
+		existing_link = parse->module->ptr[existing->static_id].is_public ?
+				Link_External : Link_Internal;
+	}
+
+	// If the declaration of an identifier for a function has no
+	// storage-class specifier, its linkage is determined exactly as if
+	// it were declared with the storage-class specifier extern.
+	if (decl.type.kind == Kind_Function && storage == Storage_Unspecified)
+		storage = Storage_Extern;
+
+
+	Linkage link = Link_None;
+	if (storage == Storage_Static || storage == Storage_Constexpr) {
+		link = Link_Internal;
+		if (msvc && existing && existing->kind == Sym_Value_Static) {
+			parse->module->ptr[existing->static_id].is_public = false;
+			existing_link = Link_Internal;
+		}
+	} else if (storage == Storage_Extern) {
+		if (defining_token) {
+			// GCC reports the initialization of a non-file-scope extern
+			// identifier as an error, which matches my intuition, but I
+			// have not yet found the relevant section in the standard.
+			if (!file_scope)
+				parseerror(parse, defining_token, "cannot initialize an %s%s%s declaration", BOLD, "extern", RESET);
+		}
+		// For an identifier declared with the storage-class specifier
+		// extern in a scope in which a prior dec- laration of that
+		// identifier is visible, if the prior declaration specifies
+		// internal or external linkage, the linkage of the identifier at
+		// the later declaration is the same as the linkage specified at the
+		// prior declaration. If no prior declaration is visible, or if the
+		// prior declaration specifies no linkage, then the identifier has
+		// external linkage.
+		if (existing && existing_link != Link_None)
+			link = existing_link; // TOOD The later declaration may hide the former declaration...
+		else
+			link = Link_External;
+	} else if (file_scope) {
+		// If the declaration of an identifier for an object has file
+		// scope and no storage-class specifier, its linkage is
+		// external.
+		link = Link_External;
+	}
+
+	if (decl.type.kind == Kind_Function && !file_scope && storage != Storage_Extern)
+		parseerror(parse, type_token, "a function at block scope may only be specified extern");
+
+	// (6.7.1.9)
+	bool tentative = file_scope && decl.type.kind != Kind_Function && !defining_token && (storage == Storage_Static || storage == Storage_Unspecified);
+	if (tentative && storage == Storage_Static && typeSize(decl.type, &parse->target) == 0)
+		parseerror(parse, decl_token, "tentative definition with internal linkage may not have incomplete type");
+
+	if (existing && existing->scope_depth == parse->scope_depth) {
+		Type existing_type;
+		StaticValue *staticval = NULL;
+
+		if (existing->kind == Sym_Value_Auto) {
+			existing_type = existing->value.typ;
+		} else if (existing->kind == Sym_Value_Static) {
+			staticval = &parse->module->ptr[existing->static_id];
+			existing_type = staticval->type;
+		} else {
+			// Actually: Redeclaration as different kind of symbol.
+			redefinition(parse, decl_token, existing->def_location, decl.name);
+		}
+
+		if (existing_link != link || !typeCompatible(decl.type, existing_type))
+			// Actually: Redeclaration with incompatible linkage/type.
+			redefinition(parse, decl_token, existing->def_location, decl.name);
+
+
+		if (defining_token) {
+			if (!staticval || staticval->def_state == Def_Defined)
+				redefinition(parse, defining_token, existing->def_location, decl.name);
+			staticval->def_state = Def_Defined;
+		}
+		return existing;
+	}
+
+	sym->ordinary = ALLOC(&parse->arena, OrdinaryIdentifier);
+	*sym->ordinary = (OrdinaryIdentifier) {
+		.kind = link == Link_None ? Sym_Value_Auto : Sym_Value_Static,
+		.shadowed = existing,
+		.scope_depth = scope_depth,
+		.decl_location = decl_token,
+		.def_location = defining_token,
+	};
+
+	if (link != Link_None) {
+		sym->ordinary->static_id = parse->module->len;
+		PUSH(*parse->module, ((StaticValue) {
+			.name = decl.name,
+			.type = decl.type,
+			.is_public = link == Link_External,
+			.decl_location = decl_token,
+			.def_kind = decl.type.kind == Kind_Function ? Static_Function : Static_Variable,
+			.def_state = defining_token ? Def_Defined :
+					tentative ? Def_Tentative : Def_Undefined,
+		}));
+	}
+
+	PUSH(parse->current_scope, sym);
+	return sym->ordinary;
+}
+
+
+static bool tryIntConstant (Parse *parse, Value v, u64 *result) {
+	if (isLvalue(v)) return false;
+
+	Inst inst = parse->build.ir.ptr[v.inst];
+	if (inst.kind != Ir_Constant) return false;
+
+	*result = inst.constant;
+	return true;
+}
+
+static Value arithAdd (Parse *parse, const Token *primary, Value lhs, Value rhs) {
 	assert(!isLvalue(lhs));
 	assert(!isLvalue(rhs));
 	if (lhs.typ.kind == Kind_Pointer || rhs.typ.kind == Kind_Pointer) {
@@ -2246,7 +2636,7 @@ static Value arithAdd(Parse *parse, const Token *primary, Value lhs, Value rhs) 
 	}
 }
 
-static Value arithSub(Parse *parse, const Token *primary, Value lhs, Value rhs) {
+static Value arithSub (Parse *parse, const Token *primary, Value lhs, Value rhs) {
 	assert(!isLvalue(lhs));
 	assert(!isLvalue(rhs));
 	IrBuild *build = &parse->build;
@@ -2256,9 +2646,9 @@ static Value arithSub(Parse *parse, const Token *primary, Value lhs, Value rhs) 
 
 		if (rhs.typ.kind == Kind_Pointer) {
 			IrRef diff = genSub(build, lhs.inst, rhs.inst);
-			return (Value) {BASIC_INT, genDiv(build, diff, stride)};
+			return (Value) {parse->target.ptrdiff, genDiv(build, diff, stride)};
 		} else {
-			IrRef idx = genMul(build, coercerval(rhs, BASIC_INT, parse, primary, false), stride);
+			IrRef idx = genMul(build, coercerval(rhs, parse->target.ptrdiff, parse, primary, false), stride);
 			return (Value) {lhs.typ, genSub(build, lhs.inst, idx)};
 		}
 	} else {
@@ -2275,12 +2665,13 @@ static Type arithmeticConversions (Parse *parse, const Token *primary, Value *a,
 	*b = intPromote(*b, parse, primary);
 
 	i32 rank_diff = rankDiff(a->typ.basic, b->typ.basic);
-	// a shall have the type rank of lower than or equal to b, or be signed if equal rank
+	// a shall have the type rank of lower than or equal to b, or be the
+	// signed one if the ranks are equal.
 	if (rank_diff > 0 || (rank_diff == 0 && (b->typ.basic & Int_unsigned))) {
 		Value *tmp = a;
 		a = b;
 		b = tmp;
-		rank_diff = - rank_diff;
+		rank_diff = -rank_diff;
 	}
 	Type lower = a->typ;
 	Type higher = b->typ;
@@ -2320,14 +2711,15 @@ static Type arithmeticConversions (Parse *parse, const Token *primary, Value *a,
 	Type common = higher;
 	if ((lower.basic & Int_unsigned) != (higher.basic & Int_unsigned)) {
 		bool signed_cannot_represent = typeSize(lower, &parse->target) == typeSize(higher, &parse->target);
-		if ((lower.basic & Int_unsigned) && signed_cannot_represent)
+		if ((lower.basic & Int_unsigned) && signed_cannot_represent) {
 			common.basic |= Int_unsigned;
+			b->typ.basic |= Int_unsigned;
+		}
 
 		if ((common.basic & Int_unsigned) && parse->opt->warn_on_wrapping) {
-			IrRef signed_one = higher.basic & Int_unsigned ? a->inst : b->inst;
-			Inst signed_inst = parse->build.ir.ptr[signed_one];
-
-			if (signed_inst.kind != Ir_Constant || (i64) signed_inst.constant < 0) {
+			Value *signed_val = higher.basic & Int_unsigned ? a : b;
+			u64 constval;
+			if (!tryIntConstant(parse, *signed_val, &constval) || (i64) constval < 0) {
 				parsemsg(Log_Warn, parse, primary, "wrapping negative value range when converting operands to common type %s",
 						printTypeHighlighted(&parse->arena, common));
 				parsemsg(Log_Info | Log_Noexpand, parse, primary, "explicitly cast operands to an unsigned type to suppress this warning");
@@ -2373,8 +2765,12 @@ static Value dereference (Parse *parse, Value v) {
 }
 
 
-static Value intPromote(Value val, Parse *p, const Token *primary) {
+static Value intPromote (Value val, Parse *p, const Token *primary) {
 	val = rvalue(val, p);
+	if (val.typ.kind == Kind_Enum) {
+		val.typ = BASIC_INT;
+		return val;
+	}
 
 	if (val.typ.kind != Kind_Basic)
 		parseerror(p, primary, "expected a scalar type");
@@ -2389,6 +2785,11 @@ static Value intPromote(Value val, Parse *p, const Token *primary) {
 		return (Value) {BASIC_INT, coerce(val, BASIC_INT, p, primary)};
 }
 
+static void discardValue(Parse *parse, const Token *token, Value v) {
+	(void) parse;
+	(void) token;
+	(void) v;
+}
 
 // Performs lvalue conversion, array to pointer conversion and function
 // to pointer conversion as necessary. This is idempotent, but I still
@@ -2412,9 +2813,10 @@ static IrRef coerce (Value v, Type t, Parse *p, const Token *primary) {
 	return coercerval(rvalue(v, p), t, p, primary, false);
 }
 
-static IrRef toBoolean(Parse *p, Value v, const Token *primary) {
+static IrRef toBoolean (Parse *p, const Token *primary, Value v) {
 	IrBuild *build = &p->build;
-	if (v.typ.kind != Kind_Basic)
+
+	if (v.typ.kind != Kind_Basic && v.typ.kind != Kind_Enum && v.typ.kind != Kind_Pointer)
 		parseerror(p, primary, "(TODO Explain this better) expected an expression of scalar type");
 
 	u32 size = typeSize(v.typ, &p->target);
@@ -2432,7 +2834,7 @@ static IrRef coercerval (Value v, Type t, Parse *p, const Token *primary, bool a
 	if (typeCompatible(v.typ, t))
 		return v.inst;
 	if (t.basic == Int_bool)
-		parseerror(p, NULL, "TODO Cast booleans");
+		return toBoolean(p, primary, v);
 
 	// Integer conversions
 	if (v.typ.kind == Kind_Basic && t.kind == Kind_Basic) {
@@ -2475,20 +2877,14 @@ static IrRef coercerval (Value v, Type t, Parse *p, const Token *primary, bool a
 		printTypeHighlighted(&p->arena, v.typ), printTypeHighlighted(&p->arena, t));
 }
 
-static Value immediateIntVal(Parse *p, Type typ, u64 val) {
+static Value immediateIntVal (Parse *p, Type typ, u64 val) {
 	return (Value) { typ,
 		genImmediateInt(&p->build, val, typeSize(typ, &p->target))
 	};
 }
 
-static void requiresVersionJust (Parse *parse, const char *desc, Version v) {
-	if (parse->target.version != v && parse->target.version != Version_Lax)
-		parseerror(parse, NULL, "%s are only supported with %s, but the current target uses %s",
-				desc, version_names[v], version_names[parse->target.version]);
-}
-
-static void requiresVersion (Parse *parse, const char *desc, Version v) {
-	if (parse->target.version < v)
-		parseerror(parse, NULL, "%s are only supported with %s, but the current target uses %s",
-				desc, version_names[v], version_names[parse->target.version]);
+static void requires (Parse *parse, const char *desc, Features required) {
+	if (!(parse->target.version & required))
+		parseerror(parse, NULL, "%s are not supported under the current target (%s)",
+				desc, versionName(parse->target.version));
 }

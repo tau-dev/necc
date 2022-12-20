@@ -122,8 +122,8 @@ void printMsg (Log level, SourceFile source, u32 offset) {
 	SourceLocation loc = findSourcePos(
 			source.content.ptr, source.content.ptr + offset);
 
-	fprintf(stderr, "%s%.*s%.*s:%lu:%lu:\t", BOLD, STRING_PRINTAGE(source.path), STRING_PRINTAGE(source.name),
-		(unsigned long) loc.line, (unsigned long) loc.col);
+	fprintf(stderr, "%s%.*s%.*s:%lu:%lu:%s\t", BOLD, STRING_PRINTAGE(source.path), STRING_PRINTAGE(source.name),
+		(unsigned long) loc.line, (unsigned long) loc.col, RESET);
 
 	const char *const messages[] = {
 		[Log_Err]  = "error:   ",
@@ -131,7 +131,7 @@ void printMsg (Log level, SourceFile source, u32 offset) {
 		[Log_Info] = "info:    ",
 	};
 	const char *const highlights[] = {
-		[Log_Err]  = RED,
+		[Log_Err]  = REDBOLD,
 		[Log_Warn] = YELLOW,
 		[Log_Info] = CYAN,
 

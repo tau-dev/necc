@@ -184,7 +184,10 @@ Token getToken (Arena *str_arena, SourceFile src, const char **p) {
 	const char *pos = *p;
 
 	switch (pos[0]) {
-	case '\0': tok.kind = Tok_EOF; pos--; break;
+	case '\0':
+		tok.kind = Tok_EOF;
+		*p = pos;
+		return tok;
 	case '(': tok.kind = Tok_OpenParen; break;
 	case ')': tok.kind = Tok_CloseParen; break;
 	case '{': tok.kind = Tok_OpenBrace; break;
@@ -205,42 +208,23 @@ Token getToken (Arena *str_arena, SourceFile src, const char **p) {
 		}
 		break;
 	case '<':
-		if (pos[1] == '=') {
+		if (pos[1] == '<') {
 			pos++;
-			tok.kind = Tok_LessEquals;
-		} else if (pos[1] == '<') {
-			pos++;
-			if (pos[1] == '=') {
-				pos++;
-				tok.kind = Tok_DoubleLessEquals;
-			} else {
-				tok.kind = Tok_DoubleLess;
-			}
+			tok.kind = Tok_DoubleLess;
 		} else {
 			tok.kind = Tok_Less;
 		}
 		break;
 	case '>':
-		if (pos[1] == '=') {
+		if (pos[1] == '>') {
 			pos++;
-			tok.kind = Tok_GreaterEquals;
-		} else if (pos[1] == '>') {
-			pos++;
-			if (pos[1] == '=') {
-				pos++;
-				tok.kind = Tok_DoubleGreaterEquals;
-			} else {
-				tok.kind = Tok_DoubleGreater;
-			}
+			tok.kind = Tok_DoubleGreater;
 		} else {
 			tok.kind = Tok_Greater;
 		}
 		break;
 	case '+':
-		if (pos[1] == '=') {
-			pos++;
-			tok.kind = Tok_PlusEquals;
-		} else if (pos[1] == '+') {
+		if (pos[1] == '+') {
 			pos++;
 			tok.kind = Tok_DoublePlus;
 		} else {
@@ -251,9 +235,6 @@ Token getToken (Arena *str_arena, SourceFile src, const char **p) {
 		if (pos[1] == '>') {
 			pos++;
 			tok.kind = Tok_Arrow;
-		} else if (pos[1] == '=') {
-			pos++;
-			tok.kind = Tok_MinusEquals;
 		} else if (pos[1] == '-') {
 			pos++;
 			tok.kind = Tok_DoubleMinus;
@@ -262,53 +243,25 @@ Token getToken (Arena *str_arena, SourceFile src, const char **p) {
 		}
 		break;
 	case '*':
-		if (pos[1] == '=') {
-			pos++;
-			tok.kind = Tok_AsteriskEquals;
-		} else {
-			tok.kind = Tok_Asterisk;
-		}
+		tok.kind = Tok_Asterisk;
 		break;
 	case '/':
-		if (pos[1] == '=') {
-			pos++;
-			tok.kind = Tok_SlashEquals;
-		} else {
-			tok.kind = Tok_Slash;
-		}
+		tok.kind = Tok_Slash;
 		break;
 	case '!':
-		if (pos[1] == '=') {
-			pos++;
-			tok.kind = Tok_BangEquals;
-		} else {
-			tok.kind = Tok_Bang;
-		}
+		tok.kind = Tok_Bang;
 		break;
 	case '%':
-		if (pos[1] == '=') {
-			pos++;
-			tok.kind = Tok_PercentEquals;
-		} else {
-			tok.kind = Tok_Percent;
-		}
+		tok.kind = Tok_Percent;
 		// TODO Digraphs
 		break;
 	case '=':
-		if (pos[1] == '=') {
-			pos++;
-			tok.kind = Tok_DoubleEquals;
-		} else {
-			tok.kind = Tok_Equals;
-		}
+		tok.kind = Tok_Equals;
 		break;
 	case '&':
 		if (pos[1] == '&') {
 			pos++;
 			tok.kind = Tok_DoubleAmpersand;
-		} else if (pos[1] == '=') {
-			pos++;
-			tok.kind = Tok_AmpersandEquals;
 		} else {
 			tok.kind = Tok_Ampersand;
 		}
@@ -318,9 +271,6 @@ Token getToken (Arena *str_arena, SourceFile src, const char **p) {
 		if (pos[1] == '|' || (pos[1] == '?' && pos[2] == '?' && pos[3] == '!')) {
 			pos++;
 			tok.kind = Tok_DoublePipe;
-		} else if (pos[1] == '=') {
-			pos++;
-			tok.kind = Tok_PipeEquals;
 		} else {
 			tok.kind = Tok_Pipe;
 		}
@@ -491,6 +441,10 @@ Token getToken (Arena *str_arena, SourceFile src, const char **p) {
 		}
 	}
 	pos++;
+	if (tok.kind >= Tok_Equalable_Start && pos[0] == '=') {
+		pos++;
+		tok.kind |= Tok_EQUALED;
+	}
 	*p = pos;
 	return tok;
 }
@@ -923,6 +877,7 @@ static bool expandInto (const ExpansionParams ex, Tokenization *dest, bool is_ar
 		{
 			Tokenization *arguments = NULL;
 			if (mac->is_function_like) {
+				collapseMacroStack(ex.stack, &level_of_argument_source);
 				MacroToken paren = takeToken(ex, &level_of_argument_source);
 				if (paren.tok.kind != Tok_OpenParen) {
 					appendOneToken(dest, t.tok, (TokenPosition) {
@@ -1182,8 +1137,7 @@ static void collapseMacroStack (MacroStack *stack, u32 *marker) {
 		} else {
 			if (repl->pos < repl->toks->count)
 				return;
-			// PERFOMANCE It would be correct to drop this check on
-			// parameters, but it would be a lot of work to explain why.
+
 			if (*marker == stack->len)
 				(*marker)--;
 			stack->len--;
@@ -1230,7 +1184,8 @@ static String restOfLine (SourceFile source, const char **pos) {
 	return (String) {*pos - start, start};
 }
 
-// PERFORMANCE This function may be critical for the parse.
+
+// PERFORMANCE This function is potentially a very hot path. Optimize!
 static SpaceClass tryGobbleSpace (SourceFile source, const char **p) {
 	const char *pos = *p;
 	SpaceClass spacing = Space_Regular;
@@ -1399,10 +1354,10 @@ static int parseAnd(ConstParse *parse) {
 static int parseEq(ConstParse *parse) {
 	int x = parseCmp(parse);
 	while (true) {
-		if (parse->pos->kind == Tok_DoubleEquals) {
+		if (parse->pos->kind == (Tok_Equals | Tok_EQUALED)) {
 			parse->pos++;
 			x = x == parseCmp(parse);
-		} else if (parse->pos->kind == Tok_BangEquals) {
+		} else if (parse->pos->kind == (Tok_Bang | Tok_EQUALED)) {
 			parse->pos++;
 			x = x != parseCmp(parse);
 		} else {
@@ -1419,13 +1374,13 @@ static int parseCmp(ConstParse *parse) {
 		if (parse->pos->kind == Tok_Less) {
 			parse->pos++;
 			x = x < parseAdd(parse);
-		} else if (parse->pos->kind == Tok_LessEquals) {
+		} else if (parse->pos->kind == (Tok_Less | Tok_EQUALED)) {
 			parse->pos++;
 			x = x <= parseAdd(parse);
 		} else if (parse->pos->kind == Tok_Greater) {
 			parse->pos++;
 			x = x > parseAdd(parse);
-		} else if (parse->pos->kind == Tok_GreaterEquals) {
+		} else if (parse->pos->kind == (Tok_Greater | Tok_EQUALED)) {
 			parse->pos++;
 			x = x >= parseAdd(parse);
 		} else {
@@ -1565,40 +1520,42 @@ const char *token_names[Tok_EOF+1] = {
 	[Tok_Dot] = ".",
 	[Tok_TripleDot] = "...",
 
-	[Tok_Bang] = "!",
-	[Tok_BangEquals] = "!=",
-	[Tok_Question] = "?",
-	[Tok_Equals] = "=",
-	[Tok_DoubleEquals] = "==",
 	[Tok_Arrow] = "->",
+	[Tok_Question] = "?",
+	[Tok_Bang] = "!",
+	[Tok_Bang | Tok_EQUALED] = "!=",
+	[Tok_Equals] = "=",
+	[Tok_Equals | Tok_EQUALED] = "==",
 	[Tok_Plus] = "+",
 	[Tok_DoublePlus] = "++",
-	[Tok_PlusEquals] = "+=",
+	[Tok_Plus | Tok_EQUALED] = "+=",
 	[Tok_Minus] = "-",
 	[Tok_DoubleMinus] = "--",
-	[Tok_MinusEquals] = "-=",
+	[Tok_Minus | Tok_EQUALED] = "-=",
 	[Tok_Asterisk] = "*",
-	[Tok_AsteriskEquals] = "*=",
+	[Tok_Asterisk | Tok_EQUALED] = "*=",
 	[Tok_Slash] = "/",
-	[Tok_SlashEquals] = "/=",
+	[Tok_Slash | Tok_EQUALED] = "/=",
 	[Tok_Percent] = "%",
-	[Tok_PercentEquals] = "%=",
+	[Tok_Percent | Tok_EQUALED] = "%=",
 	[Tok_Less] = "<",
-	[Tok_LessEquals] = "<=",
+	[Tok_Less | Tok_EQUALED] = "<=",
 	[Tok_DoubleLess] = "<<",
-	[Tok_DoubleLessEquals] = "<<=",
+	[Tok_DoubleLess | Tok_EQUALED] = "<<=",
 	[Tok_Greater] = ">",
-	[Tok_GreaterEquals] = ">=",
+	[Tok_Greater | Tok_EQUALED] = ">=",
 	[Tok_DoubleGreater] = ">>",
-	[Tok_DoubleGreaterEquals] = ">>=",
+	[Tok_DoubleGreater | Tok_EQUALED] = ">>=",
 	[Tok_Ampersand] = "&",
 	[Tok_DoubleAmpersand] = "&&",
-	[Tok_AmpersandEquals] = "&=",
+	[Tok_Ampersand | Tok_EQUALED] = "&=",
 	[Tok_Pipe] = "|",
 	[Tok_DoublePipe] = "||",
-	[Tok_PipeEquals] = "|=",
+	[Tok_Pipe | Tok_EQUALED] = "|=",
 	[Tok_Hat] = "^",
+	[Tok_Hat | Tok_EQUALED] = "^=",
 	[Tok_Tilde] = "~",
+	[Tok_Tilde | Tok_EQUALED] = "~=",
 
 	[Tok_EOF] = "end of file",
 };
@@ -1753,10 +1710,6 @@ static void predefineMacros (Arena *arena, StringMap *macros, Target *target) {
 		predefine(arena, macros, "__LITTLE_ENDIAN__", 1);
 
 // 		predefine(arena, macros, "__GNUC__", 1);
-		predefine(arena, macros, "__BYTE_ORDER__", 1);
-		predefine(arena, macros, "__ORDER_LITTLE_ENDIAN__", 1);
-		predefine(arena, macros, "__ORDER_BIG_ENDIAN__", 2);
-		predefine(arena, macros, "__ORDER_PDP_ENDIAN__", 3);
 	}
 }
 

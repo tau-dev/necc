@@ -1,7 +1,11 @@
+
+// Returns the supplied formatting code if stderr is a terminal
+// supporting ANSII escapes, the empty string otherwise.
 const char *ifTerminal(const char*);
 
 #define BLACK ifTerminal("\x1b[30m")
 #define RED ifTerminal("\x1b[31m")
+#define REDBOLD ifTerminal("\x1b[31m\x1b[1m")
 #define GREEN ifTerminal("\x1b[32m")
 #define YELLOW ifTerminal("\x1b[33m")
 #define BLUE ifTerminal("\x1b[34m")

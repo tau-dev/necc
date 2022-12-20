@@ -37,16 +37,22 @@ typedef enum {
 	Kind_FunctionPtr,
 } TypeKind;
 
+
+// Syntactically "storage-class specifiers".
 enum {
 	Storage_Unspecified,
 	Storage_Auto,
 	Storage_Register,
+	Storage_Constexpr,
 	Storage_Static,
 	Storage_Static_Threadlocal,
 	Storage_Extern,
 	Storage_Extern_Threadlocal,
+
 	Storage_Typedef,
 };
+
+
 enum {
 	Qualifier_Const = 1,
 	Qualifier_Volatile = 2,
@@ -63,7 +69,7 @@ typedef struct {
 
 typedef struct {
 	Type *inner;
-	u32 count; // IrRef for VLA (IR_REF_NONE for unspecified size), number otherwise.
+	u32 count; // IrRef for VLA (IR_REF_NONE for unkown size), number otherwise.
 } ArrayType;
 
 
@@ -107,14 +113,27 @@ typedef struct Declaration {
 } Declaration;
 
 typedef enum {
-	Version_C89,
-	Version_C99,
-	Version_C17,
-	Version_C23,
-	Version_GNU,
-	Version_MSVC,
-	Version_Lax,
+// 	Features_C89 = 0x1,
+	Features_C99 = 0x2,
+	Features_C11 = 0x4,
+	Features_C23 = 0x8,
+	Features_GNU_Extensions = 0x10,
+	Features_MSVC_Extensions = 0x20,
+
+	Features_OldStyleDefinitions = 0x40,
+	Features_DefaultInt = 0x80,
+} Features;
+
+typedef enum {
+	Version_C89       = Features_OldStyleDefinitions,
+	Version_C99       = Features_C99 | Features_OldStyleDefinitions,
+	Version_C17       = Features_C99 | Features_C11 | Features_OldStyleDefinitions,
+	Version_C23       = Features_C99 | Features_C11 | Features_C23,
+	Version_GNU       = Version_C17 | Features_GNU_Extensions | Features_DefaultInt,
+	Version_MSVC      = Version_C17 | Features_MSVC_Extensions,
+	Version_Lax       = 0x7fff,
 } Version;
+extern const char *versionName(Version);
 
 typedef enum {
 	Attribute_Deprecated = 1,
@@ -126,7 +145,6 @@ typedef enum {
 	Attribute_Reproducible = 1 << 6,
 } Attributes;
 typedef struct Target Target;
-extern const char *version_names[];
 
 Type resolveType(Type t);
 bool typeCompatible(Type a, Type b);
@@ -136,6 +154,7 @@ u32 typeAlignment(Type t, const Target *target);
 u32 addMemberOffset(u32 *offset, Type t, const Target *target);
 bool isFlexibleArrayMember(Members m, u32 index);
 int rankDiff(BasicType a, BasicType b);
+bool arrayUnknownSize(Type t);
 
 char *printDeclarator(Arena *a, Type t, String name);
 char *printType(Arena *a, Type t);

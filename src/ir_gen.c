@@ -270,6 +270,7 @@ IrRef genLessThanOrEquals(IrBuild *build, IrRef a, IrRef b, u16 size) {
 }
 
 IrRef genImmediateInt (IrBuild *build, long long i, u16 size) {
+	assert(size <= 8);
 	return append(build, (Inst) {Ir_Constant, size, {.constant = i}});
 }
 
@@ -470,6 +471,7 @@ void printBlock (FILE *dest, Block *blk, IrList ir) {
 		case Ir_Equals: fprintf(dest, "cmp=="); break;
 		case Ir_ShiftLeft: fprintf(dest, "shift<<"); break;
 		case Ir_ShiftRight: fprintf(dest, "shift>>"); break;
+		default: unreachable;
 		}
 		fprintf(dest, " %lu %lu\n", (ulong) inst.binop.lhs, (ulong) inst.binop.rhs);
 	}

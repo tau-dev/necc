@@ -174,6 +174,7 @@ int main (int argc, char **args) {
 		.target = target_x64_linux_gcc,
 		.warn_on_wrapping = true,
 		.warn_char_subscript = true,
+		.warn_compare = true,
 	};
 
 	const char *assembly_out = NULL;
@@ -273,10 +274,11 @@ int main (int argc, char **args) {
 	// Analyses and transformations:
 	for (u32 i = 0; i < module.len; i++) {
 		StaticValue *val = &module.ptr[i];
-		if (opt_store_load && val->def_state == Def_Defined && val->def_kind == Static_Function) {
+		if (val->def_state == Def_Defined && val->def_kind == Static_Function) {
 			Blocks linearized = {0};
 			scheduleBlocksStraight(val->function_entry, &linearized);
-			innerBlockPropagate(val->function_ir, linearized);
+			if (opt_store_load)
+				innerBlockPropagate(val->function_ir, linearized);
 			resolveCopies(val->function_ir);
 			decimateIr(&val->function_ir, linearized);
 // 			decimateIr(&val->function_ir, linearized);

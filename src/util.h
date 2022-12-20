@@ -11,6 +11,7 @@
 
 #define SPAN(type) struct { size_t len; type *ptr; }
 typedef SPAN(const char) String;
+typedef SPAN(char) MutableString;
 #define SPAN_EQL(a, b) (sizeof(*(a).ptr) == sizeof(*(b).ptr) && (a).len == (b).len && memcmp((a).ptr, (b).ptr, sizeof(*(a).ptr) * (a).len) == 0)
 // #define STRING(text) (String) { .len = strlen(text), .ptr = text }
 #define STRING_EMPTY ((String) {0})

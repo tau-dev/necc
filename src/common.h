@@ -16,6 +16,7 @@ typedef struct {
 
 	bool warn_on_wrapping;
 	bool warn_char_subscript;
+	bool warn_compare;
 
 	bool emitted_warnings;
 	bool error_on_warnings;

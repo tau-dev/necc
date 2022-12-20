@@ -605,32 +605,46 @@ static void emitInstForward(Codegen *c, IrRef i) {
 	} break;
 	case Ir_Call: {
 		ValuesSpan params = inst.call.parameters;
+		bool memory_return = isMemory(inst.size);
 
-		u32 param_slot = 0;
+		u32 param_slot = memory_return;
+		if (memory_return)
+			fprintf(c->out, "  lea rdi, [rsp+%lu]\n",
+				(ulong) c->storage[i]);
 		for (u32 p = 0; p < params.len; p++) {
 			assert(param_slot < parameter_regs_count);
 			IrRef param = params.ptr[p];
 			u16 sz = valueSize(c, param);
-			assert(!isMemory(sz));
-
-			bool bigg = sz > 8;
-			u32 sza = bigg ? 8 : sz;
-			fprintf(c->out, "  mov %s, [rsp+%lu]\n",
-				registerSized(parameter_regs[param_slot], sza),
-				(ulong) c->storage[param]);
-			param_slot++;
-			if (bigg) {
-				assert(param_slot < parameter_regs_count);
+			if (isMemory(sz)) {
+				unreachable;
+			} else {
+				bool bigg = sz > 8;
+				u32 sza = bigg ? 8 : sz;
 				fprintf(c->out, "  mov %s, [rsp+%lu]\n",
-					registerSized(parameter_regs[param_slot], sz - sza),
-					(ulong) c->storage[param] + 8);
+					registerSized(parameter_regs[param_slot], sza),
+					(ulong) c->storage[param]);
 				param_slot++;
+				if (bigg) {
+					assert(param_slot < parameter_regs_count);
+					fprintf(c->out, "  mov %s, [rsp+%lu]\n",
+						registerSized(parameter_regs[param_slot], sz - sza),
+						(ulong) c->storage[param] + 8);
+					param_slot++;
+				}
 			}
 		}
 		fprintf(c->out, "  call qword %s\n", valueName(c, inst.call.function_ptr));
-		fprintf(c->out, "  mov %s, %s\n", valueName(c, i),
-			registerSized(RAX, inst.size));
+
+		if (!memory_return) {
+			fprintf(c->out, "  mov %s, %s\n", valueName(c, i),
+				registerSized(RAX, inst.size > 8 ? 8 : inst.size));
+			if (inst.size > 8) {
+				fprintf(c->out, "  mov [rsp+%lu], %s\n", (ulong) c->storage[i]+8,
+					registerSized(RDX, inst.size - 8));
+			}
+		}
 	} break;
+	default: unreachable;
 	}
 }
 
