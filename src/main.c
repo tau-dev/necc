@@ -345,14 +345,6 @@ int main (int argc, char **args) {
 	return 0;
 }
 
-// TODO Do not allow regular files.
-static bool isDirectory(const char *path) {
-	FILE *f = fopen(path, "r");
-	if (f == NULL)
-		return false;
-	fclose(f);
-	return true;
-}
 
 static String checkIncludePath(Arena *arena, const char *path) {
 	if (!isDirectory(path))

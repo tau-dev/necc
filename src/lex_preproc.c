@@ -52,6 +52,7 @@ Keyword names[] = {
 	{"for", Tok_Key_For},
 	{"return", Tok_Key_Return},
 	{"break", Tok_Key_Break},
+	{"continue", Tok_Key_Continue},
 	{"default", Tok_Key_Default},
 	{"sizeof", Tok_Key_Sizeof},
 	{"_Alignof", Tok_Key_Alignof},

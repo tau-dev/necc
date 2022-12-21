@@ -116,7 +116,9 @@ void mapFree(StringMap *);
 bool eql(const char *, String);
 bool startsWith(const char *, String);
 String zString(const char *);
-SourceFile *readAllAlloc (String source, String filename);
+SourceFile *readAllAlloc(String source, String filename);
+bool isDirectory(const char *path);
+bool isFile(const char *path);
 
 
 typedef enum {

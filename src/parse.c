@@ -46,8 +46,9 @@ typedef struct {
 	IrBuild build;
 	Scope func_goto_labels;
 
-	Block *current_loop_head;
+	Block *switch_block;
 	Block *current_loop_switch_exit;
+	Block *current_loop_head;
 
 	Module *module;
 } Parse;
@@ -86,7 +87,6 @@ static void vcomperror (Log level, bool crash_on_error, const Tokenization *t, c
 
 	if (level & Log_Fatal) {
 		if (crash_on_error) {
-			printf("TOKEN STREAM:\n\t");
 			puts(lexz(*t, tok, parse_pos, 12));
 			puts("");
 			int *c = NULL;
@@ -171,6 +171,7 @@ static void parseFunction(Parse *, String func_name);
 static Value rvalue(Value v, Parse *);
 static Value dereference(Parse *, Value v);
 static Value pointerAdd(IrBuild *, Value lhs, Value rhs, Parse *op_parse, const Token *);
+static bool comparablePointers(Parse *, Type a, Type b);
 static void parseTypedefDecls(Parse *, Type base_type);
 static Attributes parseAttributes(Parse *);
 static void popScope(Parse *, Scope);
@@ -342,8 +343,6 @@ static Value parseExprMultiplication(Parse *);
 static Value parseExprLeftUnary(Parse *);
 static Value parseExprRightUnary(Parse *);
 static Value parseExprBase(Parse *);
-static void parseStructInitializer(Parse *, InitializationDest);
-static void parseArrayInitializer(Parse *, InitializationDest);
 // TODO The order of parameters here is inconsistent.
 static Value intPromote(Value v, Parse *, const Token*);
 static void discardValue(Parse *, const Token *, Value v);
@@ -459,21 +458,52 @@ static void parseStatement (Parse *parse, bool *had_non_declaration) {
 	Attributes attr = parseAttributes(parse);
 	(void) attr;
 
-	if (t.kind == Tok_Identifier && parse->pos[1].kind == Tok_Colon) {
-		Symbol *sym = getSymbol(parse, t.val.identifier);
+	while ((t.kind == Tok_Identifier && parse->pos[1].kind == Tok_Colon)
+		|| t.kind == Tok_Key_Case || t.kind == Tok_Key_Default)
+	{
+		Block *new_block;
+		parse->pos++;
+		if (t.kind == Tok_Key_Case) {
+			if (!parse->switch_block)
+				parseerror(parse, NULL, "case labels may only appear in a switch statement");
+			const Token *label = parse->pos;
+			Value v = parseExpression(parse);
+			expect(parse, Tok_Colon);
 
-		if (sym->label.block) {
-			if (sym->label.block->exit.kind != Exit_None)
-				redefinition(parse, parse->pos, sym->label.def_location, t.val.identifier);
+			u64 val;
+			if (!tryIntConstant(parse, v, &val))
+				parseerror(parse, label, "case labels must be constant expressions");
+
+			new_block = newBlock(build, parse->code_arena, zString("case_"));
+			PUSH(parse->switch_block->exit.switch_.cases, ((SwitchCase) {val, new_block}));
+		} else if (t.kind == Tok_Key_Default) {
+			if (!parse->switch_block)
+				parseerror(parse, NULL, "default labels may only appear in a switch statement");
+			if (parse->switch_block->exit.switch_.default_case)
+				parseerror(parse, NULL, "default label cannot appear multiple times within one switch statement");
+
+			expect(parse, Tok_Colon);
+
+			new_block = newBlock(build, parse->code_arena, zString("default_"));
+			parse->switch_block->exit.switch_.default_case = new_block;
 		} else {
-			sym->label.def_location = parse->pos;
-			sym->label.block = newBlock(&parse->build, parse->code_arena, t.val.identifier);
+			Symbol *sym = getSymbol(parse, t.val.identifier);
+
+			if (sym->label.block) {
+				// TODO This does not catch a series two identical labels in a row.
+				if (sym->label.block->exit.kind != Exit_None)
+					redefinition(parse, parse->pos, sym->label.def_location, t.val.identifier);
+			} else {
+				sym->label.def_location = parse->pos;
+				sym->label.block = newBlock(build, parse->code_arena, t.val.identifier);
+			}
+
+			new_block = sym->label.block;
+
+			parse->pos++;
 		}
-
-		genJump(build, sym->label.block);
-
+		genJump(build, new_block);
 		labeled = true;
-		parse->pos += 2;
 		t = *parse->pos;
 	}
 
@@ -503,8 +533,13 @@ static void parseStatement (Parse *parse, bool *had_non_declaration) {
 		parse->pos++;
 		*had_non_declaration = true;
 
-		Block *body = newBlock(&parse->build, parse->code_arena, zString("do_while_body_"));
-		genJump(build, body);
+		Block *outer_head = parse->current_loop_head;
+		Block *outer_exit = parse->current_loop_switch_exit;
+
+		parse->current_loop_switch_exit = newBlock(build, parse->code_arena, zString("do_while_join"));
+		parse->current_loop_head = newBlock(&parse->build, parse->code_arena, zString("do_while_body_"));
+		genJump(build, parse->current_loop_head);
+
 		parseStatement(parse, had_non_declaration);
 		expect(parse, Tok_Key_While);
 		expect(parse, Tok_OpenParen);
@@ -513,26 +548,41 @@ static void parseStatement (Parse *parse, bool *had_non_declaration) {
 		expect(parse, Tok_Semicolon);
 
 		genBranch(build, toBoolean(parse, primary, condition));
-		build->insertion_block->exit.branch.on_true = body;
-		build->insertion_block->exit.branch.on_false = startNewBlock(build, parse->code_arena, zString("do_while_join"));
+		build->insertion_block->exit.branch.on_true = parse->current_loop_head;
+		build->insertion_block->exit.branch.on_false = parse->current_loop_switch_exit;
+
+
+		startBlock(build, parse->current_loop_switch_exit);
+
+		parse->current_loop_head = outer_head;
+		parse->current_loop_switch_exit = outer_exit;
 	} break;
 	case Tok_Key_While: {
 		parse->pos++;
 		*had_non_declaration = true;
 
-		Block *head = newBlock(build, parse->code_arena, zString("while_head_"));
-		genJump(build, head);
+		Block *outer_head = parse->current_loop_head;
+		Block *outer_exit = parse->current_loop_switch_exit;
+
+		parse->current_loop_head = newBlock(build, parse->code_arena, zString("while_head_"));
+		parse->current_loop_switch_exit = newBlock(&parse->build, parse->code_arena, zString("while_join_"));
+		genJump(build, parse->current_loop_head);
+
 		expect(parse, Tok_OpenParen);
 		Value condition = parseExpression(parse);
 		expect(parse, Tok_CloseParen);
 		Block *head_end = build->insertion_block;
 		genBranch(build, toBoolean(parse, primary, condition));
-
+		head_end->exit.branch.on_false = parse->current_loop_switch_exit;
 		head_end->exit.branch.on_true = startNewBlock(build, parse->code_arena, zString("while_body_"));
-		parseStatement(parse, had_non_declaration);
-		genJump(build, head);
 
-		head_end->exit.branch.on_false = startNewBlock(&parse->build, parse->code_arena, zString("while_join_"));
+		parseStatement(parse, had_non_declaration);
+		genJump(build, parse->current_loop_head);
+
+		startBlock(build, parse->current_loop_switch_exit);
+
+		parse->current_loop_head = outer_head;
+		parse->current_loop_switch_exit = outer_exit;
 	} break;
 	case Tok_Key_For: {
 		*had_non_declaration = true;
@@ -601,7 +651,7 @@ static void parseStatement (Parse *parse, bool *had_non_declaration) {
 		Block *on_true = build->insertion_block;
 		genJump(build, NULL);
 
-		Block *join = newBlock(&parse->build, parse->code_arena, zString("if_join_"));
+		Block *join = newBlock(build, parse->code_arena, zString("if_join_"));
 
 		if (parse->pos->kind == Tok_Key_Else) {
 			parse->pos++;
@@ -619,27 +669,52 @@ static void parseStatement (Parse *parse, bool *had_non_declaration) {
 		expect(parse, Tok_OpenParen);
 		Value v = parseExpression(parse);
 		expect(parse, Tok_CloseParen);
-		if (v.typ.kind == Kind_Enum)
-			v.typ = BASIC_INT;
-		if (v.typ.kind != Kind_Basic)
-			parseerror(parse, primary, "can only switch on expressions of integer type, not on an %s",
-					printTypeHighlighted(&parse->arena, v.typ));
+
 		v = intPromote(v, parse, primary);
+		genSwitch(build, v.inst);
+		Block *outer_switch = parse->switch_block;
+		Block *outer_exit = parse->current_loop_switch_exit;
 
+		parse->switch_block = build->insertion_block;
+		parse->current_loop_switch_exit = newBlock(build, parse->code_arena, zString("switch_join_"));
+
+		parseStatement(parse, had_non_declaration);
+		genJump(build, parse->current_loop_switch_exit);
+
+		if (parse->switch_block->exit.switch_.default_case == NULL)
+			parse->switch_block->exit.switch_.default_case = parse->current_loop_switch_exit;
+
+		parse->switch_block = outer_switch;
+		parse->current_loop_switch_exit = outer_exit;
 	} break;
+	case Tok_Key_Break:
+	case Tok_Key_Continue:
 	case Tok_Key_Goto: {
-		// TODO Check: "A goto statement shall not jump from outside the
-		// scope of an identifier having a variably modified type to
-		// inside the scope of that identifier." I think this is a
-		// run-time constraint, so we can only emit a warning.
+		Block *dest;
 		parse->pos++;
-		String label = expect(parse, Tok_Identifier).val.identifier;
+
+		switch (primary->kind) {
+		case Tok_Key_Break:
+			if (!parse->current_loop_switch_exit)
+				parseerror(parse, primary, "break may only appear inside a loop or switch statement");
+			dest = parse->current_loop_switch_exit;
+			break;
+		case Tok_Key_Continue:
+			if (!parse->current_loop_head)
+				parseerror(parse, primary, "continue may only appear inside a loop");
+			dest = parse->current_loop_head;
+			break;
+		case Tok_Key_Goto:
+			dest = getLabeledBlock(parse, expect(parse, Tok_Identifier).val.identifier);
+			break;
+		default: unreachable;
+		}
+
 		expect(parse, Tok_Semicolon);
+		genJump(build, dest);
 
-		genJump(build, getLabeledBlock(parse, label));
-
-		// Unreferenced dummy block for further instructions, will be ignored
-		startNewBlock(build, parse->code_arena, STRING_EMPTY);
+		// Unreferenced dummy block for further instructions, will be dropped.
+		startNewBlock(build, parse->code_arena, zString("dummy_"));
 	} break;
 	case Tok_Semicolon:
 		parse->pos++;
@@ -704,7 +779,7 @@ static Value parseExprAssignment (Parse *parse) {
 	Value v = parseExprElvis(parse);
 	const Token *primary = parse->pos;
 
-	if (!(primary->kind == Tok_Equals || primary->kind >= Tok_Assignment_Start))
+	if (!(primary->kind == Tok_Equals || (primary->kind >= Tok_Assignment_Start && primary->kind != Tok_EOF)))
 		return v;
 
 	parse->pos++;
@@ -810,13 +885,9 @@ static Value parseExprElvis (Parse *parse) {
 		Type common;
 		if (typeCompatible(lhs.typ, rhs.typ))
 			common = lhs.typ;
-		else if (lhs.typ.kind == Kind_Pointer && lhs.typ.kind == Kind_Pointer)
-			if (lhs.typ.pointer->kind == Kind_Void)
-				common = rhs.typ;
-			else if (rhs.typ.pointer->kind == Kind_Void)
-				common = lhs.typ;
-			else
-				parseerror(parse, colon, "incompatible pointer types");
+		else if (comparablePointers(parse, lhs.typ, rhs.typ))
+			// For function-null comparison
+			common = lhs.typ.kind == Kind_Pointer ? rhs.typ : lhs.typ;
 		else // This can only generate an extension instruction, which will be reordered into the right block.
 			common = arithmeticConversions(parse, colon, &rhs, &lhs);
 
@@ -943,14 +1014,7 @@ static Value parseExprEquality (Parse *parse) {
 			parsemsg(Log_Warn, parse, primary, "comparison to self is always %s",
 					primary->kind == Tok_BangEquals ? "false" : "true");
 
-		if (lhs.typ.kind == Kind_Pointer && lhs.typ.kind == Kind_Pointer) {
-			if (!lhs.typ.pointer->kind == Kind_Void &&
-				!rhs.typ.pointer->kind == Kind_Void &&
-				!typeCompatible(lhs.typ, rhs.typ))
-			{
-				parseerror(parse, primary, "can not compare types %s and %s",
-						printTypeHighlighted(&parse->arena, lhs.typ), printTypeHighlighted(&parse->arena, rhs.typ));
-			}
+		if (comparablePointers(parse, lhs.typ, rhs.typ)) {
 			lhs = rvalue(lhs, parse);
 			rhs = rvalue(rhs, parse);
 		} else {
@@ -982,14 +1046,15 @@ static Value parseExprComparison (Parse *parse) {
 		if (lhs.inst == rhs.inst && lhs.category == rhs.category && parse->opt->warn_compare)
 			parsemsg(Log_Warn, parse, primary, "comparison to self is always %s",
 					primary->kind == Tok_Less || primary->kind == Tok_Greater ? "false" : "true");
+		lhs = rvalue(lhs, parse);
+		rhs = rvalue(rhs, parse);
 
 		if (lhs.typ.kind == Kind_Pointer && rhs.typ.kind == Kind_Pointer) {
 			lhs = rvalue(lhs, parse);
 			rhs = rvalue(rhs, parse);
-		} else if (lhs.typ.kind == Kind_Pointer) {
-			parseerror(parse, primary, "can not compare a pointer with an %s", printTypeHighlighted(&parse->arena, rhs.typ));
-		} else if (rhs.typ.kind == Kind_Pointer) {
-			parseerror(parse, primary, "can not compare a pointer with an %s", printTypeHighlighted(&parse->arena, lhs.typ));
+		} else if (lhs.typ.kind == Kind_Pointer || rhs.typ.kind == Kind_Pointer) {
+			parseerror(parse, primary, "can not compare types %s and %s",
+					printTypeHighlighted(&parse->arena, lhs.typ), printTypeHighlighted(&parse->arena, rhs.typ));
 		} else {
 			arithmeticConversions(parse, primary, &lhs, &rhs);
 		}
@@ -1085,13 +1150,16 @@ static Value parseExprLeftUnary (Parse *parse) {
 		Value rval = (Value) {v.typ, genLoad(build, v.inst, typeSize(v.typ, &parse->target))};
 
 		const int delta = parse->pos->kind == Tok_DoublePlus ? 1 : -1;
+
 		Value one = immediateIntVal(parse, v.typ, delta);
 
 		Value result;
-		if (v.typ.kind == Kind_Pointer)
+		if (v.typ.kind == Kind_Pointer) {
+			one.typ = parse->target.ptrdiff;
 			result = pointerAdd(build, rval, one, parse, primary);
-		else
+		} else {
 			result = (Value) {v.typ, genAdd(build, rval.inst, one.inst)};
+		}
 
 		genStore(build, v.inst, result.inst);
 		return result;
@@ -1217,7 +1285,8 @@ static Value parseExprRightUnary (Parse *parse) {
 					if (have_prototype && arguments.len < params.len) {
 						inst = coerce(arg, params.ptr[arguments.len].type, parse, primary);
 					} else {
-						inst = intPromote(arg, parse, primary).inst;
+						if (arg.typ.kind == Kind_Basic)
+							inst = intPromote(arg, parse, primary).inst;
 					}
 					PUSH_A(parse->code_arena, arguments, inst);
 				} while (tryEat(parse, Tok_Comma));
@@ -1261,10 +1330,12 @@ static Value parseExprRightUnary (Parse *parse) {
 			Value one = immediateIntVal(parse, v.typ, delta);
 
 			IrRef result;
-			if (v.typ.kind == Kind_Pointer)
+			if (v.typ.kind == Kind_Pointer) {
+				one.typ = parse->target.ptrdiff;
 				result = pointerAdd(build, rval, one, parse, primary).inst;
-			else
+			} else {
 				result = genAdd(build, rval.inst, one.inst);
+			}
 
 			genStore(build, v.inst, result);
 			v = rval;
@@ -1517,7 +1588,6 @@ static void initializeDefinition (Parse *parse, OrdinaryIdentifier *ord, Type ty
 		dest.address = ord->value.inst;
 	} else {
 		assert(ord->kind == Sym_Value_Static);
-		assert(init_token);
 		static_val = &parse->module->ptr[ord->static_id];
 // 		assert(type == static_val->type);
 		dest.reloc_references = &refs;
@@ -1525,6 +1595,25 @@ static void initializeDefinition (Parse *parse, OrdinaryIdentifier *ord, Type ty
 
 	if (unspecified_size) {
 		assert(init_token);
+		if (parse->pos->kind == Tok_String) {
+			// TODO Type checking
+			String str = parse->pos->val.string;
+			parse->pos++;
+			// TODO Concatenation etc.
+
+			if (static_val) {
+				MutableString data = ALLOCN(parse->code_arena, char, str.len + 1);
+				memcpy(data.ptr, str.ptr, str.len);
+				data.ptr[str.len] = 0;
+
+				static_val->type.kind = Kind_Array;
+				static_val->type.array.count = data.len;
+				static_val->value_data = (String) {data.len, data.ptr};
+			} else {
+				assert(!"TODO");
+			}
+			return;
+		}
 		expect(parse, Tok_OpenBrace);
 		dest.type = *dest.type.array.inner;
 
@@ -1548,6 +1637,7 @@ static void initializeDefinition (Parse *parse, OrdinaryIdentifier *ord, Type ty
 		}
 
 		if (static_val) {
+			static_val = &parse->module->ptr[ord->static_id];
 			static_val->type.kind = Kind_Array;
 			static_val->type.array.count = count;
 			static_val->value_data = (String) {count * member_size, dest.reloc_data.ptr};
@@ -1559,20 +1649,34 @@ static void initializeDefinition (Parse *parse, OrdinaryIdentifier *ord, Type ty
 			assert(size->kind == Ir_Constant);
 			size->constant = count * member_size;
 		}
-	}
-
-	if (init_token) {
+	} else if (init_token) {
+		if (typeSize(type, &parse->target) == 0)
+			parseerror(parse, NULL, "cannot initialize incomplete type %s", printTypeHighlighted(&parse->arena, type));
 		if (static_val) {
 			dest.reloc_data = (MutableString) ALLOCN(parse->code_arena, char,
 					typeSize(type, &parse->target));
+
+			memset(dest.reloc_data.ptr, 0, typeSize(dest.type, &parse->target));
 			parseInitializer(parse, dest);
+			static_val = &parse->module->ptr[ord->static_id];
 			static_val->value_data = (String) {dest.reloc_data.len, dest.reloc_data.ptr};
 			static_val->value_references = (References) {refs.len, refs.ptr};
 		} else {
 			parseInitializer(parse, dest);
 		}
+	} else if (static_val) {
+		// STYLE Copypasta from above.
+		dest.reloc_data = (MutableString) ALLOCN(parse->code_arena, char,
+				typeSize(type, &parse->target));
+
+		static_val->value_data = (String) {dest.reloc_data.len, dest.reloc_data.ptr};
+		memset(dest.reloc_data.ptr, 0, typeSize(dest.type, &parse->target));
+		static_val = &parse->module->ptr[ord->static_id];
 	}
 }
+
+
+static void parseBracedInitializer(Parse *, InitializationDest);
 
 static void parseInitializer (Parse *parse, InitializationDest dest) {
 	// TODO Values must be constants when initializing static/_Thread_local values.
@@ -1580,39 +1684,17 @@ static void parseInitializer (Parse *parse, InitializationDest dest) {
 		switch (dest.type.kind) {
 		case Kind_Struct:
 		case Kind_Struct_Named:
-			parseStructInitializer(parse, dest);
-			return;
 		case Kind_Union:
-		case Kind_Union_Named: {
-			u32 member_idx = 0;
-			Members members = resolveType(dest.type).members;
-			if (tryEat(parse, Tok_Dot)) {
-				requires(parse, "dot-designated initializers", Features_C99);
-				const Token *name = parse->pos;
-				String member = expect(parse, Tok_Identifier).val.identifier;
-
-				while (member_idx < members.len && !SPAN_EQL(member, members.ptr[member_idx].name))
-					member_idx++;
-
-				if (member_idx == members.len)
-					parseerror(parse, name, "%s does not have a member named %.*s",
-							printTypeHighlighted(&parse->arena, dest.type), STRING_PRINTAGE(member));
-
-				expect(parse, Tok_Equals);
-			}
-			dest.type = members.ptr[member_idx].type;
-			parseInitializer(parse, dest);
-			expect(parse, Tok_CloseBrace);
-		} return;
+		case Kind_Union_Named:
 		case Kind_Array:
-			parseArrayInitializer(parse, dest);
+			parseBracedInitializer(parse, dest);
 			return;
 		default:
 			parseerror(parse, NULL, "initializer can only be used for structs, unions and arrays, not for %s", printTypeHighlighted(&parse->arena, dest.type));
 		}
 	} else {
 		const Token *begin = parse->pos;
-		Value got = parseExprAssignment(parse);
+		Value got = rvalue(parseExprAssignment(parse), parse);
 		Inst inst = parse->build.ir.ptr[got.inst];
 		if (inst.kind != Ir_Constant && inst.kind != Ir_Reloc) {
 			if (dest.reloc_data.ptr)
@@ -1656,116 +1738,114 @@ static void parseInitializer (Parse *parse, InitializationDest dest) {
 	}
 }
 
-static void parseStructInitializer (Parse *parse, InitializationDest dest) {
-	Type resolved = resolveType(dest.type);
-	u32 len = resolved.members.len;
-	CompoundMember *members = resolved.members.ptr;
-
-	if (dest.reloc_data.ptr) {
-		memset(dest.reloc_data.ptr + dest.offset, 0, typeSize(resolved, &parse->target));
-	} else {
-		parsemsg(Log_Warn, parse, parse->pos - 1, "TODO zero-init values");
-	}
-
+static void tryParseDesignator(Parse *, InitializationDest, u32 *outermost_member_idx);
+static void parseBracedInitializer (Parse *parse, InitializationDest dest) {
 	if (tryEat(parse, Tok_CloseBrace)) {
 		requires(parse, "empty initializers", Features_C23);
-		parseerror(parse, parse->pos - 2, "TODO Implement empty initializers");
 		return;
 	}
 
-	// TODO Zero out the gaps after initialization.
+	if (parse->pos[0].kind == Tok_Integer && parse->pos[0].val.literal.integer == 0
+		&& parse->pos[1].kind == Tok_CloseBrace)
+	{
+		parse->pos += 2;
+		return;
+	}
 
 	u32 member_idx = 0;
 	while (true) {
+		tryParseDesignator(parse, dest, &member_idx);
+
+		member_idx++;
+
+		if (tryEat(parse, Tok_Comma)) {
+			if (tryEat(parse, Tok_CloseBrace))
+				break;
+		} else {
+			expect(parse, Tok_CloseBrace);
+			break;
+		}
+	}
+
+}
+
+static void tryParseDesignator (Parse *parse, InitializationDest dest, u32 *outermost_member_idx) {
+	Type current = dest.type;
+	u32 total_offset = 0;
+	bool have_outermost_member_idx = false;
+
+	while (true) {
+		const Token *designator = parse->pos;
 		if (tryEat(parse, Tok_Dot)) {
-			requires(parse, "dot-designated initializers", Features_C99);
+			requires(parse, "designated initializers", Features_C99);
+			Type resolved = resolveType(current);
+			if (resolved.kind != Kind_Struct && resolved.kind != Kind_Union) {
+				parseerror(parse, designator, "cannot use a member designator for initializing the type %s",
+						printTypeHighlighted(&parse->arena, current));
+			}
+			u32 len = resolved.members.len;
+			CompoundMember *members = resolved.members.ptr;
+
 			const Token *name = parse->pos;
 			String member = expect(parse, Tok_Identifier).val.identifier;
 
-			member_idx = 0;
+			u32 member_idx = 0;
 			while (member_idx < len && !SPAN_EQL(member, members[member_idx].name))
 				member_idx++;
 
 			if (member_idx == len)
 				parseerror(parse, name, "%s does not have a member named %.*s", printTypeHighlighted(&parse->arena, dest.type), member.len, member.ptr);
 
-			expect(parse, Tok_Equals);
-		} else if (member_idx >= len) {
-			parseerror(parse, NULL, "initializers went beyond the end of the struct");
-		}
+			if (!have_outermost_member_idx) {
+				*outermost_member_idx = member_idx;
+				have_outermost_member_idx = true;
+			}
+			total_offset += members[member_idx].offset;
+			current = members[member_idx].type;
+		} else if (tryEat(parse, Tok_OpenBracket)) {
+			requires(parse, "designated initializers", Features_C99);
 
-		InitializationDest sub_dest = dest;
-		sub_dest.offset += members[member_idx].offset;
-		sub_dest.type = members[member_idx].type;
-		parseInitializer(parse, sub_dest);
-
-		member_idx++;
-
-		if (tryEat(parse, Tok_Comma)) {
-			if (tryEat(parse, Tok_CloseBrace))
-				break;
-		} else {
-			expect(parse, Tok_CloseBrace);
-			break;
-		}
-	}
-}
-
-static void parseArrayInitializer(Parse *parse, InitializationDest dest) {
-	assert(dest.type.kind == Kind_Array);
-	u32 count = dest.type.array.count;
-	Type inner = *dest.type.array.inner;
-	u32 member_size = typeSize(inner, &parse->target);
-
-	if (dest.reloc_data.ptr) {
-		memset(dest.reloc_data.ptr + dest.offset, 0, typeSize(dest.type, &parse->target));
-	} else {
-		parsemsg(Log_Warn, parse, NULL, "TODO zero-init values");
-	}
-
-	if (tryEat(parse, Tok_CloseBrace)) {
-		requires(parse, "empty initializers", Features_C23);
-		parseerror(parse, NULL, "TODO Implement empty initializers");
-		return;
-	}
-
-	u32 member_idx = 0;
-	while (true) {
-		if (tryEat(parse, Tok_OpenBracket)) {
-			const Token *designator = parse->pos - 1;
-			requires(parse, "bracket-designated initializers", Features_C99);
+			if (current.kind != Kind_Array && current.kind != Kind_VLArray) {
+				parseerror(parse, designator, "cannot use an array designator for initializing %s",
+						printTypeHighlighted(&parse->arena, current));
+			}
 
 			u64 pos;
 			if (!tryIntConstant(parse, parseExpression(parse), &pos))
 				parseerror(parse, designator, "bracket designators must be constant integer expressions");
-
-			if (pos >= count)
-				parseerror(parse, designator, "index %lld is out of range of the array", (long long) member_idx);
-
-			member_idx = pos;
-
 			expect(parse, Tok_CloseBracket);
-			expect(parse, Tok_Equals);
-		} else if (member_idx >= count) {
-			parseerror(parse, NULL, "initializers went beyond the end of the array");
-		}
 
-		InitializationDest sub_dest = dest;
-		sub_dest.offset += member_idx * member_size;
-		sub_dest.type = inner;
-		parseInitializer(parse, sub_dest);
+			if (current.kind == Kind_Array && pos >= current.array.count)
+				parseerror(parse, designator, "index %lld is out of range of the array", (long long) pos);
 
-		member_idx++;
-
-		if (tryEat(parse, Tok_Comma)) {
-			if (tryEat(parse, Tok_CloseBrace))
-				break;
+			if (!have_outermost_member_idx) {
+				*outermost_member_idx = pos;
+				have_outermost_member_idx = true;
+			}
+			current = *current.array.inner;
+			// PERFOMANCE Computing this size on every designator is slightly wasteful.
+			total_offset += pos * typeSize(current, &parse->target);
 		} else {
-			expect(parse, Tok_CloseBrace);
 			break;
 		}
 	}
 
+	if (have_outermost_member_idx) {
+		expect(parse, Tok_Equals);
+	} else {
+		if (current.kind == Kind_Array && current.kind != Kind_VLArray) {
+			current = *current.array.inner;
+		} else {
+			Type res = resolveType(dest.type);
+			current = res.members.ptr[*outermost_member_idx].type;
+		}
+	}
+
+
+	InitializationDest sub_dest = dest;
+	sub_dest.offset += total_offset;
+	sub_dest.type = current;
+	parseInitializer(parse, sub_dest);
 }
 
 static Type parseValueType (Parse *parse, Value (*operator)(Parse *parse)) {
@@ -2177,7 +2257,11 @@ static Type parseStructUnionBody(Parse *parse, bool is_struct) {
 		// TODO Check this.
 
 		const Token *begin = parse->pos;
-		Type base = parseTypeBase(parse, NULL);
+		u8 storage;
+		Type base = parseTypeBase(parse, &storage);
+		if (storage != Storage_Unspecified)
+			parseerror(parse, begin, "members cannot specify storage");
+
 
 		if (tryEat(parse, Tok_Semicolon)) {
 			Type t = resolveType(base);
@@ -2754,6 +2838,28 @@ static Value pointerAdd (IrBuild *ir, Value lhs, Value rhs, Parse *op_parse, con
 	return (Value) {ptr.typ, genAdd(ir, ptr.inst, diff)};
 }
 
+static bool comparablePointers (Parse *parse, Type a, Type b) {
+	if (!((a.kind == Kind_Pointer || a.kind == Kind_FunctionPtr)
+		&& (b.kind == Kind_Pointer || b.kind == Kind_FunctionPtr)))
+			return false;
+
+	if (a.kind == Kind_Pointer) {
+		if (a.pointer->kind == Kind_Void)
+			return true;
+		a.pointer->qualifiers = 0;
+	}
+	if (b.kind == Kind_Pointer) {
+		if (b.pointer->kind == Kind_Void)
+			return true;
+		b.pointer->qualifiers = 0;
+	}
+
+	if (!typeCompatible(a, b))
+		parseerror(parse, NULL, "incompatible pointer types");
+
+	return true;
+}
+
 static Value dereference (Parse *parse, Value v) {
 	assert(v.typ.kind == Kind_Pointer);
 
@@ -2815,6 +2921,7 @@ static IrRef coerce (Value v, Type t, Parse *p, const Token *primary) {
 
 static IrRef toBoolean (Parse *p, const Token *primary, Value v) {
 	IrBuild *build = &p->build;
+	v = rvalue(v, p);
 
 	if (v.typ.kind != Kind_Basic && v.typ.kind != Kind_Enum && v.typ.kind != Kind_Pointer)
 		parseerror(p, primary, "(TODO Explain this better) expected an expression of scalar type");
@@ -2831,7 +2938,7 @@ static IrRef coercerval (Value v, Type t, Parse *p, const Token *primary, bool a
 
 	if (t.kind == Kind_Void)
 		return IR_REF_NONE;
-	if (typeCompatible(v.typ, t))
+	if (typeCompatible(t, v.typ))
 		return v.inst;
 	if (t.basic == Int_bool)
 		return toBoolean(p, primary, v);
@@ -2857,12 +2964,6 @@ static IrRef coercerval (Value v, Type t, Parse *p, const Token *primary, bool a
 		}
 	}
 
-	// Conversions to and from void*
-	if (v.typ.kind == Kind_Pointer && t.kind == Kind_Pointer
-			&& (v.typ.pointer->kind == Kind_Void || t.pointer->kind == Kind_Void || allow_casts))
-	{
-		return v.inst;
-	}
 
 	if (allow_casts) {
 		// NOTE This relies on pointers being the largest types.
@@ -2870,9 +2971,15 @@ static IrRef coercerval (Value v, Type t, Parse *p, const Token *primary, bool a
 			return genTrunc(build, v.inst, p->target.typesizes[t.basic & ~Int_unsigned]);
 		if (t.kind == Kind_Pointer && v.typ.kind == Kind_Basic)
 			return genZeroExt(build, v.inst, p->target.ptr_size);
-		if (t.kind == Kind_FunctionPtr && v.typ.kind == Kind_FunctionPtr)
+		if ((t.kind == Kind_Pointer || t.kind == Kind_FunctionPtr)
+			&& (t.kind == Kind_Pointer || v.typ.kind == Kind_FunctionPtr))
+		{
 			return v.inst;
+		}
 	}
+
+	if (comparablePointers(p, t, v.typ))
+		return v.inst;
 	parseerror(p, primary, "could not convert type %s to type %s",
 		printTypeHighlighted(&p->arena, v.typ), printTypeHighlighted(&p->arena, t));
 }
@@ -2884,7 +2991,8 @@ static Value immediateIntVal (Parse *p, Type typ, u64 val) {
 }
 
 static void requires (Parse *parse, const char *desc, Features required) {
-	if (!(parse->target.version & required))
+	if (!(parse->target.version & required)) {
 		parseerror(parse, NULL, "%s are not supported under the current target (%s)",
 				desc, versionName(parse->target.version));
+	}
 }

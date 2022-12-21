@@ -113,6 +113,7 @@ typedef struct Inst {
 		// blocks". It does not matter very much.
 		struct {
 			IrRef source;
+			// Does not yet handle switch expressions.
 			IrRef on_true;
 			IrRef on_false; // Unused for jumps.
 		} phi_out;
@@ -147,10 +148,24 @@ typedef struct {
 	Block *on_false;
 } Branch;
 
+typedef struct {
+	u64 value;
+	Block *dest;
+} SwitchCase;
+
+typedef LIST(SwitchCase) Cases;
+
+typedef struct {
+	IrRef value;
+	Block *default_case;
+	Cases cases;
+} Switch;
+
 typedef enum {
 	Exit_None, // Used for blocks that are currently in construction or that have already been visited.
 	Exit_Branch,
 	Exit_Unconditional,
+	Exit_Switch,
 	Exit_Return,
 } ExitKind;
 
@@ -159,6 +174,7 @@ typedef struct {
 
 	union {
 		Branch branch;
+		Switch switch_;
 		Block *unconditional;
 		IrRef ret;
 	};
@@ -168,7 +184,7 @@ typedef struct {
 typedef struct Block {
 	String label; // null-terminated
 	IrRef first_inst;
-	IrRef last_inst; // Used for unoptimized output, irrelevant when scheduler applies
+	IrRef inst_end; // Used for unoptimized output, irrelevant when scheduler applies
 	IrRefList mem_instructions; // Loads and stores
 	IrRefList ordered_instructions; // Calls, stores, phi_outs
 	Exit exit;

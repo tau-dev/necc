@@ -143,7 +143,7 @@ void decimateIr (IrList *ir, Blocks blocks) {
 		if (blk->exit.kind == Exit_Return && blk->exit.ret != IR_REF_NONE)
 			blk->exit.ret = copyUsed(*ir, blk->exit.ret, &out, relocs);
 
-		blk->last_inst = out.len - 1;
+		blk->inst_end = out.len;
 	}
 
 	for (u32 i = 0; i < out.len; i++) applyRelocs(out, i, relocs);
@@ -212,6 +212,12 @@ static void scheduleBlockStraight (Block *blk, Block *prev, Blocks *dest, u32 id
 		scheduleBlockStraight(blk->exit.branch.on_false, blk, dest, id);
 		scheduleBlockStraight(blk->exit.branch.on_true, blk, dest, id);
 		break;
+	case Exit_Switch: {
+		Switch s = blk->exit.switch_;
+		for (u32 i = 0; i < s.cases.len; i++)
+			scheduleBlockStraight(s.cases.ptr[i].dest, blk, dest, id);
+		scheduleBlockStraight(s.default_case, blk, dest, id);
+	} break;
 	case Exit_Return: break;
 	case Exit_None: unreachable;
 	}

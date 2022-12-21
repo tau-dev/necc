@@ -39,6 +39,7 @@ typedef enum {
 	Tok_Key_For,
 	Tok_Key_Return,
 	Tok_Key_Break,
+	Tok_Key_Continue,
 	Tok_Key_Default,
 	Tok_Key_Sizeof,
 	Tok_Key_Alignof,

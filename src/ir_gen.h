@@ -38,6 +38,7 @@ void replaceWithCopy(IrList ir, IrRef original, IrRef replacement, IrRef ordered
 void genReturnVal(IrBuild *, IrRef val);
 void genBranch(IrBuild *, IrRef condition);
 void genJump(IrBuild *, Block *blk);
+void genSwitch(IrBuild *, IrRef val);
 Block *newBlock(IrBuild *build, Arena *arena, String label);
 void startBlock(IrBuild *, Block *blk);
 void discardBlock(Block *blk);

@@ -31,12 +31,12 @@ IrRef genStackAlloc (IrBuild *build, IrRef size) {
 }
 
 void genReturnVal (IrBuild *build, IrRef val) {
-	build->insertion_block->last_inst = build->ir.len - 1;
+	build->insertion_block->inst_end = build->ir.len;
 	build->insertion_block->exit = (Exit) {Exit_Return, .ret = val};
 }
 
 void genBranch (IrBuild *build, IrRef condition) {
-	build->insertion_block->last_inst = build->ir.len - 1;
+// 	build->insertion_block->last_inst = build->ir.len;
 	build->insertion_block->exit = (Exit) {
 		Exit_Branch,
 		.branch = {condition}
@@ -44,13 +44,22 @@ void genBranch (IrBuild *build, IrRef condition) {
 }
 
 void genJump (IrBuild *build, Block *dest) {
-	build->insertion_block->last_inst = build->ir.len - 1;
+// 	build->insertion_block->last_inst = build->ir.len;
 	build->insertion_block->exit = (Exit) {
 		Exit_Unconditional,
 		.unconditional = dest
 	};
 	if (dest)
 		startBlock(build, dest);
+}
+
+
+void genSwitch (IrBuild *build, IrRef val) {
+// 	build->insertion_block->last_inst = build->ir.len;
+	build->insertion_block->exit = (Exit) {
+		Exit_Switch,
+		.switch_.value = val
+	};
 }
 
 Block *newBlock (IrBuild *build, Arena *arena, String label) {
@@ -387,7 +396,7 @@ void printBlock (FILE *dest, Block *blk, IrList ir) {
 
 	fprintf(dest, " %.*s%lu:\n", STRING_PRINTAGE(blk->label), (ulong) blk->id);
 
-	for (size_t i = blk->first_inst; i <= blk->last_inst; i++) {
+	for (size_t i = blk->first_inst; i < blk->inst_end; i++) {
 		fprintf(dest, " %3lu = ", (ulong) i);
 		Inst inst = ir.ptr[i];
 

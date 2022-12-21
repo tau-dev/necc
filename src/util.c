@@ -3,6 +3,8 @@
 #include "stdio.h"
 #include "ansii.h"
 #ifdef __unix__
+#include <sys/types.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #endif
 
@@ -23,6 +25,32 @@ const char *ifTerminal(const char *val) {
 		return val;
 #endif
 	return "";
+}
+
+// TODO Do not allow regular files.
+bool isDirectory(const char *path) {
+#ifdef __unix__
+	struct stat path_stat;
+	if (stat(path, &path_stat) == -1)
+		return false;
+	return S_ISDIR(path_stat.st_mode);
+#endif
+	return !isFile(path);
+}
+
+// TODO Do not allow regular files.
+bool isFile(const char *path) {
+#ifdef __unix__
+	struct stat path_stat;
+	if (stat(path, &path_stat) == -1)
+		return false;
+	return S_ISREG(path_stat.st_mode);
+#endif
+	FILE *f = fopen(path, "r");
+	if (f == NULL)
+		return false;
+	fclose(f);
+	return true;
 }
 
 bool eql (const char* a, String b) {
@@ -55,7 +83,9 @@ SourceFile *readAllAlloc (String path, String filename) {
 			memcpy(filename_z, path.ptr, path.len);
 		memcpy(filename_z + path.len, filename.ptr, filename.len);
 		filename_z[path.len + filename.len] = 0;
-		FILE *f = fopen(filename_z, "r");
+		FILE *f = NULL;
+		if (isFile(filename_z))
+			f = fopen(filename_z, "r");
 		if (f) {
 			if (fseek(f, 0, SEEK_END) == 0) {
 				long count = ftell(f);

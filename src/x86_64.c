@@ -387,7 +387,7 @@ static void emitBlockForward (Codegen *c, Block *block) {
 	}
 	IrRefList false_phis = {0};
 
-	for (u32 i = block->first_inst; i <= block->last_inst; i++) {
+	for (u32 i = block->first_inst; i < block->inst_end; i++) {
 		IrRef ref = i;
 
 		emitInstForward(c, ref);
@@ -423,6 +423,18 @@ static void emitBlockForward (Codegen *c, Block *block) {
 
 		emitBlockForward(c, exit.branch.on_false);
 		emitBlockForward(c, exit.branch.on_true);
+	} break;
+	case Exit_Switch: {
+		assert(!false_phis.len);
+		const char *condition = valueName(c, exit.switch_.value);
+		Cases cases = exit.switch_.cases;
+
+		for (u32 i = 0; i < cases.len; i++) {
+			fprintf(c->out, " cmp %s, %llu\n", condition, (ullong) cases.ptr[i].value);
+			emitJump(c->out, "je", cases.ptr[i].dest);
+		}
+
+		emitJump(c->out, "jnz", exit.switch_.default_case);
 	} break;
 	case Exit_Return:
 		if (exit.ret != IR_REF_NONE) {
@@ -614,20 +626,20 @@ static void emitInstForward(Codegen *c, IrRef i) {
 		for (u32 p = 0; p < params.len; p++) {
 			assert(param_slot < parameter_regs_count);
 			IrRef param = params.ptr[p];
-			u16 sz = valueSize(c, param);
-			if (isMemory(sz)) {
+			u16 param_size = valueSize(c, param);
+			if (isMemory(param_size)) {
 				unreachable;
 			} else {
-				bool bigg = sz > 8;
-				u32 sza = bigg ? 8 : sz;
+				bool bigg = param_size > 8;
+				u32 reduced_size = bigg ? 8 : param_size;
 				fprintf(c->out, "  mov %s, [rsp+%lu]\n",
-					registerSized(parameter_regs[param_slot], sza),
+					registerSized(parameter_regs[param_slot], reduced_size),
 					(ulong) c->storage[param]);
 				param_slot++;
 				if (bigg) {
 					assert(param_slot < parameter_regs_count);
 					fprintf(c->out, "  mov %s, [rsp+%lu]\n",
-						registerSized(parameter_regs[param_slot], sz - sza),
+						registerSized(parameter_regs[param_slot], param_size - reduced_size),
 						(ulong) c->storage[param] + 8);
 					param_slot++;
 				}
