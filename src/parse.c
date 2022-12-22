@@ -143,7 +143,7 @@ bool fromStandardHeader (Parse *parse, const Token *primary) {
 	assert(primary);
 	const Tokenization *t = &parse->tokens;
 	u32 p = primary - t->tokens;
-	return t->files.ptr[t->positions[p].source_file_ref]->is_standard_header;
+	return t->files.ptr[t->positions[p].source_file_ref]->kind == Source_StandardHeader;
 }
 
 typedef enum {
@@ -184,7 +184,7 @@ void parse (Arena *code_arena, Tokenization tokens, Options *opt, Module *module
 	// Used only as a scratch buffer for constructing constants at the
 	// top level. Kind of inefficient, but very straightforward.
 	IrBuild global_ir = {0};
-	startNewBlock(&global_ir, code_arena, zString("dummy"));
+	startNewBlock(&global_ir, code_arena, zstr("dummy"));
 
 	Parse parse = {
 		.arena = create_arena(16 * 1024),
@@ -314,12 +314,26 @@ Scope pushScope (Parse *parse) {
 
 void popScope (Parse *parse, Scope replacement) {
 	Scope def = parse->current_scope;
+
 	for (u32 i = 0; i < def.len; i++) {
-		if (def.ptr[i]->ordinary && def.ptr[i]->ordinary->scope_depth == parse->scope_depth)
-			def.ptr[i]->ordinary = def.ptr[i]->ordinary->shadowed;
+		OrdinaryIdentifier *ord = def.ptr[i]->ordinary;
+		assert(!ord || ord->scope_depth <= parse->scope_depth);
+		if (ord && ord->scope_depth == parse->scope_depth) {
+			if (!ord->is_used) {
+				if (ord->kind == Sym_Value_Auto) {
+					parsemsg(Log_Warn, parse, ord->decl_location, "‘%.*s’ is never used", STRING_PRINTAGE(def.ptr[i]->name));
+				} else if (ord->kind == Sym_Value_Static) {
+					StaticValue *val = &parse->module->ptr[ord->static_id];
+					if (!val->is_public && val->name.len && val->name.ptr[0] != '_')
+						parsemsg(Log_Warn, parse, ord->decl_location, "‘%.*s’ is never used", STRING_PRINTAGE(def.ptr[i]->name));
+				}
+			}
+			def.ptr[i]->ordinary = ord->shadowed;
+		}
 		if (def.ptr[i]->nametagged && def.ptr[i]->nametagged->scope_depth == parse->scope_depth)
 			def.ptr[i]->nametagged = def.ptr[i]->nametagged->shadowed;
 	}
+
 	free(def.ptr);
 	parse->current_scope = replacement;
 	parse->scope_depth--;
@@ -355,7 +369,7 @@ void parseFunction (Parse *parse, String func_name) {
 	IrBuild *build = &parse->build;
 	*build = (IrBuild) {0};
 
-	build->entry = startNewBlock(build, parse->code_arena, zString("entry"));
+	build->entry = startNewBlock(build, parse->code_arena, zstr("entry"));
 
 	assert(parse->scope_depth == 0);
 	Scope enclosing = pushScope(parse);
@@ -374,7 +388,7 @@ void parseFunction (Parse *parse, String func_name) {
 		.value_data = {func_name.len+1, terminated},
 	}));
 	bool is_new;
-	OrdinaryIdentifier *func_name_sym = genOrdSymbol(parse, zString("__func__"), &is_new);
+	OrdinaryIdentifier *func_name_sym = genOrdSymbol(parse, zstr("__func__"), &is_new);
 	assert(is_new);
 	func_name_sym->kind = Sym_Value_Static;
 	func_name_sym->decl_location = func_name_sym->def_location = parse->pos;
@@ -474,7 +488,7 @@ static void parseStatement (Parse *parse, bool *had_non_declaration) {
 			if (!tryIntConstant(parse, v, &val))
 				parseerror(parse, label, "case labels must be constant expressions");
 
-			new_block = newBlock(build, parse->code_arena, zString("case_"));
+			new_block = newBlock(build, parse->code_arena, zstr("case_"));
 			PUSH(parse->switch_block->exit.switch_.cases, ((SwitchCase) {val, new_block}));
 		} else if (t.kind == Tok_Key_Default) {
 			if (!parse->switch_block)
@@ -484,7 +498,7 @@ static void parseStatement (Parse *parse, bool *had_non_declaration) {
 
 			expect(parse, Tok_Colon);
 
-			new_block = newBlock(build, parse->code_arena, zString("default_"));
+			new_block = newBlock(build, parse->code_arena, zstr("default_"));
 			parse->switch_block->exit.switch_.default_case = new_block;
 		} else {
 			Symbol *sym = getSymbol(parse, t.val.identifier);
@@ -536,8 +550,8 @@ static void parseStatement (Parse *parse, bool *had_non_declaration) {
 		Block *outer_head = parse->current_loop_head;
 		Block *outer_exit = parse->current_loop_switch_exit;
 
-		parse->current_loop_switch_exit = newBlock(build, parse->code_arena, zString("do_while_join"));
-		parse->current_loop_head = newBlock(&parse->build, parse->code_arena, zString("do_while_body_"));
+		parse->current_loop_switch_exit = newBlock(build, parse->code_arena, zstr("do_while_join"));
+		parse->current_loop_head = newBlock(&parse->build, parse->code_arena, zstr("do_while_body_"));
 		genJump(build, parse->current_loop_head);
 
 		parseStatement(parse, had_non_declaration);
@@ -564,8 +578,8 @@ static void parseStatement (Parse *parse, bool *had_non_declaration) {
 		Block *outer_head = parse->current_loop_head;
 		Block *outer_exit = parse->current_loop_switch_exit;
 
-		parse->current_loop_head = newBlock(build, parse->code_arena, zString("while_head_"));
-		parse->current_loop_switch_exit = newBlock(&parse->build, parse->code_arena, zString("while_join_"));
+		parse->current_loop_head = newBlock(build, parse->code_arena, zstr("while_head_"));
+		parse->current_loop_switch_exit = newBlock(&parse->build, parse->code_arena, zstr("while_join_"));
 		genJump(build, parse->current_loop_head);
 
 		expect(parse, Tok_OpenParen);
@@ -574,7 +588,7 @@ static void parseStatement (Parse *parse, bool *had_non_declaration) {
 		Block *head_end = build->insertion_block;
 		genBranch(build, toBoolean(parse, primary, condition));
 		head_end->exit.branch.on_false = parse->current_loop_switch_exit;
-		head_end->exit.branch.on_true = startNewBlock(build, parse->code_arena, zString("while_body_"));
+		head_end->exit.branch.on_true = startNewBlock(build, parse->code_arena, zstr("while_body_"));
 
 		parseStatement(parse, had_non_declaration);
 		genJump(build, parse->current_loop_head);
@@ -596,8 +610,8 @@ static void parseStatement (Parse *parse, bool *had_non_declaration) {
 
 		Block *enclosing_head = parse->current_loop_head;
 		Block *enclosing_exit = parse->current_loop_switch_exit;
-		parse->current_loop_switch_exit = newBlock(build, parse->code_arena, zString("for_join_"));
-		parse->current_loop_head = newBlock(build, parse->code_arena, zString("for_head_"));
+		parse->current_loop_switch_exit = newBlock(build, parse->code_arena, zstr("for_join_"));
+		parse->current_loop_head = newBlock(build, parse->code_arena, zstr("for_head_"));
 
 		genJump(build, parse->current_loop_head);
 		Block *to_tail = parse->current_loop_head;
@@ -608,11 +622,11 @@ static void parseStatement (Parse *parse, bool *had_non_declaration) {
 
 			genBranch(build, cond);
 			build->insertion_block->exit.branch.on_false = parse->current_loop_switch_exit;
-			build->insertion_block->exit.branch.on_true = startNewBlock(build, parse->code_arena, zString("for_join_"));
+			build->insertion_block->exit.branch.on_true = startNewBlock(build, parse->code_arena, zstr("for_join_"));
 		}
 		if (!tryEat(parse, Tok_CloseParen)) {
 			Block *current = build->insertion_block;
-			to_tail = startNewBlock(build, parse->code_arena, zString("for_tail_"));
+			to_tail = startNewBlock(build, parse->code_arena, zstr("for_tail_"));
 			discardValue(parse, primary, parseExpression(parse));
 			expect(parse, Tok_CloseParen);
 
@@ -646,16 +660,16 @@ static void parseStatement (Parse *parse, bool *had_non_declaration) {
 		genBranch(build, toBoolean(parse, primary, condition));
 		Block *head = build->insertion_block;
 
-		head->exit.branch.on_true = startNewBlock(build, parse->code_arena, zString("if_true_"));
+		head->exit.branch.on_true = startNewBlock(build, parse->code_arena, zstr("if_true_"));
 		parseStatement(parse, had_non_declaration);
 		Block *on_true = build->insertion_block;
 		genJump(build, NULL);
 
-		Block *join = newBlock(build, parse->code_arena, zString("if_join_"));
+		Block *join = newBlock(build, parse->code_arena, zstr("if_join_"));
 
 		if (parse->pos->kind == Tok_Key_Else) {
 			parse->pos++;
-			head->exit.branch.on_false = startNewBlock(build, parse->code_arena, zString("if_else_"));
+			head->exit.branch.on_false = startNewBlock(build, parse->code_arena, zstr("if_else_"));
 			parseStatement(parse, had_non_declaration);
 			genJump(build, join);
 		} else {
@@ -676,7 +690,7 @@ static void parseStatement (Parse *parse, bool *had_non_declaration) {
 		Block *outer_exit = parse->current_loop_switch_exit;
 
 		parse->switch_block = build->insertion_block;
-		parse->current_loop_switch_exit = newBlock(build, parse->code_arena, zString("switch_join_"));
+		parse->current_loop_switch_exit = newBlock(build, parse->code_arena, zstr("switch_join_"));
 
 		parseStatement(parse, had_non_declaration);
 		genJump(build, parse->current_loop_switch_exit);
@@ -714,7 +728,7 @@ static void parseStatement (Parse *parse, bool *had_non_declaration) {
 		genJump(build, dest);
 
 		// Unreferenced dummy block for further instructions, will be dropped.
-		startNewBlock(build, parse->code_arena, zString("dummy_"));
+		startNewBlock(build, parse->code_arena, zstr("dummy_"));
 	} break;
 	case Tok_Semicolon:
 		parse->pos++;
@@ -852,12 +866,12 @@ static Value parseExprElvis (Parse *parse) {
 				res = parseExprAssignment(parse);
 				expect(parse, Tok_Colon);
 				Block *b = build->insertion_block;
-				startNewBlock(build, parse->code_arena, zString("dummy"));
+				startNewBlock(build, parse->code_arena, zstr("dummy"));
 				parseExprElvis(parse);
 				build->insertion_block = b;
 			} else {
 				Block *b = build->insertion_block;
-				startNewBlock(build, parse->code_arena, zString("dummy"));
+				startNewBlock(build, parse->code_arena, zstr("dummy"));
 				parseExprAssignment(parse);
 				expect(parse, Tok_Colon);
 				build->insertion_block = b;
@@ -1473,6 +1487,8 @@ static Value parseExprBase (Parse *parse) {
 		if (sym == NULL || sym->ordinary == NULL)
 			parseerror(parse, NULL, "undefined identifier ‘%.*s’", STRING_PRINTAGE(t.val.identifier));
 		OrdinaryIdentifier *ident = sym->ordinary;
+		ident->is_used = true;
+
 		switch (ident->kind) {
 		case Sym_Typedef:
 			parseerror(parse, NULL, "expected a value, found a typedef name");
@@ -2148,6 +2164,7 @@ static bool tryParseTypeBase (Parse *parse, Type *type, u8 *storage_dest) {
 				&& !(storage == Storage_Typedef &&
 					(parse->pos[1].kind == Tok_Semicolon || parse->pos[1].kind == Tok_Comma)))
 			{
+				sym->ordinary->is_used = true;
 				base = sym->ordinary->typedef_type;
 				bases++;
 				modifiable = false;

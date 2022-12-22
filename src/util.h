@@ -52,6 +52,7 @@ typedef SPAN(char) MutableString;
 
 #define POP(list) (assert((list).len > 0), (list).ptr[--(list).len])
 
+typedef LIST(String) StringList;
 
 
 // #define CHECK(a, msg) do { if (!(a)) {puts("error: " msg); exit(EXIT_FAILURE); } } while(0)
@@ -84,14 +85,24 @@ typedef SPAN(char) MutableString;
 
 u64 strHash(String);
 
+typedef enum {
+	Source_Regular,
+	Source_StandardHeader,
+
+	// For these special files, the name field holds the macro name and the
+	// path field holds the macro contents.
+	Source_CommandLineMacro,
+	Source_SystemDefinedMacro,
+} SourceKind;
+
 typedef struct {
 	String name; // non-owning
 	String path; // non-owning
 
-	String content;
+	String content; // non-owning, possibly co-allocated
 	u32 idx;
 	u32 included_count;
-	bool is_standard_header;
+	SourceKind kind;
 } SourceFile;
 
 typedef struct {
@@ -115,7 +126,7 @@ void mapFree(StringMap *);
 
 bool eql(const char *, String);
 bool startsWith(const char *, String);
-String zString(const char *);
+String zstr(const char *);
 SourceFile *readAllAlloc(String source, String filename);
 bool isDirectory(const char *path);
 bool isFile(const char *path);
@@ -125,6 +136,7 @@ typedef enum {
 	Log_Err,
 	Log_Warn,
 	Log_Info,
+
 	Log_Noexpand = 0x100,
 	Log_Fatal = 0x200,
 } Log;

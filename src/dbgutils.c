@@ -22,7 +22,7 @@ static void append(String s) {
 }
 
 static void appendz(const char *c) {
-	append(zString(c));
+	append(zstr(c));
 }
 
 

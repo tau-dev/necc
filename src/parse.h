@@ -50,6 +50,7 @@ struct OrdinaryIdentifier {
 	Value value;
 
 	i32 enum_constant;
+	bool is_used;
 };
 
 typedef struct NameTaggedType NameTaggedType;

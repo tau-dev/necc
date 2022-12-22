@@ -332,6 +332,8 @@ static void emitFunctionForward (Arena *arena, FILE *out, Module module, StaticV
 
 	emitBlockForward(&c, entry);
 
+	if (c.is_memory_return)
+		fprintf(c.out, " mov r15, rdi\n");
 	free(c.storage);
 }
 
@@ -346,16 +348,18 @@ const Register parameter_regs[] = {
 
 static const u32 parameter_regs_count = sizeof(parameter_regs) / sizeof(parameter_regs[0]);
 
-static void copyTo (Codegen *c, const char *to, u32 to_offset, const char *from, u32 from_offset, u16 size) {
-	ulong offset = 0;
+static void copyTo (Codegen *c, const char *to, i32 to_offset, const char *from, i32 from_offset, u16 size) {
+	long offset = 0;
 	while (size - offset > 8) {
-		fprintf(c->out, " mov r8, [%s+%lu]\n", from, offset+from_offset);
-		fprintf(c->out, " mov [%s+%lu], r8 \n", to, offset+to_offset);
+		fprintf(c->out, " mov r8, [%s%+ld]\n", from, offset+from_offset);
+		fprintf(c->out, " mov [%s%+ld], r8 \n", to, offset+to_offset);
 		offset += 8;
 	}
+
+	// This will break for non-power-of-two remainders.
 	const char *tmp = registerSized(R8, size - offset);
-	fprintf(c->out, " mov %s, [%s+%lu]\n", tmp, from, offset+from_offset);
-	fprintf(c->out, " mov [%s+%lu], %s \n", to, offset+to_offset, tmp);
+	fprintf(c->out, " mov %s, [%s%+ld]\n", tmp, from, offset+from_offset);
+	fprintf(c->out, " mov [%s%+ld], %s \n", to, offset+to_offset, tmp);
 }
 
 
@@ -363,6 +367,25 @@ static const char *loadTo (Codegen *c, Register reg, IrRef i) {
 	const char *dest = registerSized(reg, c->ir.ptr[i].size);
 	fprintf(c->out, " mov %s, %s\n", dest, storageName(c, c->storage[i]));
 	return dest;
+}
+
+
+static bool loadMaybeBigTo (Codegen *c, Register reg1, Register reg2, IrRef i) {
+	u16 size = valueSize(c, i);
+	bool bigg = size > 8;
+
+	u32 reduced_size = bigg ? 8 : size;
+	fprintf(c->out, "  mov %s, [rsp+%lu]\n",
+		registerSized(reg1, reduced_size),
+		(ulong) c->storage[i]);
+
+	if (bigg) {
+		fprintf(c->out, "  mov %s, [rsp+%lu]\n",
+			registerSized(reg2, size - reduced_size),
+			(ulong) c->storage[i] + 8);
+	}
+
+	return bigg;
 }
 
 
@@ -442,14 +465,7 @@ static void emitBlockForward (Codegen *c, Block *block) {
 				copyTo(c, "r15", 0, "rsp", c->storage[exit.ret], valueSize(c, exit.ret));
 				fprintf(c->out, " mov rax, r15\n");
 			} else {
-				u32 ret_size = valueSize(c, exit.ret);
-				if (ret_size > 8) {
-					assert(!"TODO !!Big returns!!");
-				} else {
-					fprintf(c->out, " mov %s, %s\n",
-							registerSized(RAX, ret_size),
-							valueName(c, exit.ret));
-				}
+				loadMaybeBigTo(c, RAX, RDX, exit.ret);
 			}
 		}
 		fprintf(c->out, " ret %lu\n\n", (ulong) c->stack_allocated);
@@ -584,8 +600,8 @@ static void emitInstForward(Codegen *c, IrRef i) {
 		}
 	} break;
 	case Ir_Constant:
-		fprintf(c->out, " mov %s %s, %llu\n", sizeOp(inst.size),
-				valueName(c, i), (ullong) inst.constant);
+		fprintf(c->out, " mov %s %s, %lld\n", sizeOp(inst.size),
+				valueName(c, i), (long long) inst.constant);
 		break;
 	case Ir_StackAlloc:
 		fprintf(c->out, " lea rax, [rsp+%lu]	; alloc\n",  (ulong) inst.alloc.known_offset);
@@ -623,29 +639,40 @@ static void emitInstForward(Codegen *c, IrRef i) {
 		if (memory_return)
 			fprintf(c->out, "  lea rdi, [rsp+%lu]\n",
 				(ulong) c->storage[i]);
+
+		u32 stack_memory = 0;
+		for (u32 p = 0; p < params.len; p++) {
+			u32 size = valueSize(c, params.ptr[p]);
+			if (isMemory(size))
+				stack_memory += size;
+		}
+
+		i32 stack_mem_pos = -stack_memory;
 		for (u32 p = 0; p < params.len; p++) {
 			assert(param_slot < parameter_regs_count);
 			IrRef param = params.ptr[p];
 			u16 param_size = valueSize(c, param);
 			if (isMemory(param_size)) {
-				unreachable;
+				copyTo(c, "rsp", stack_mem_pos, "rsp", c->storage[p], param_size);
+				stack_mem_pos += param_size;
 			} else {
-				bool bigg = param_size > 8;
-				u32 reduced_size = bigg ? 8 : param_size;
-				fprintf(c->out, "  mov %s, [rsp+%lu]\n",
-					registerSized(parameter_regs[param_slot], reduced_size),
-					(ulong) c->storage[param]);
+				bool bigg = loadMaybeBigTo(c, parameter_regs[param_slot], parameter_regs[param_slot+1], param);
 				param_slot++;
+
 				if (bigg) {
 					assert(param_slot < parameter_regs_count);
-					fprintf(c->out, "  mov %s, [rsp+%lu]\n",
-						registerSized(parameter_regs[param_slot], param_size - reduced_size),
-						(ulong) c->storage[param] + 8);
 					param_slot++;
 				}
 			}
 		}
-		fprintf(c->out, "  call qword %s\n", valueName(c, inst.call.function_ptr));
+		assert(stack_mem_pos == 0);
+
+
+		if (stack_memory)
+			fprintf(c->out, "  add rsp, %lu\n", (ulong) stack_memory);
+		fprintf(c->out, "  call qword [rsp+%lu]\n", (ulong) c->storage[inst.call.function_ptr] + stack_memory);
+		if (stack_memory)
+			fprintf(c->out, "  sub rsp, %lu\n", (ulong) stack_memory);
 
 		if (!memory_return) {
 			fprintf(c->out, "  mov %s, %s\n", valueName(c, i),
@@ -668,7 +695,7 @@ static void emitJump(FILE *out, const char *inst, const Block *dest) {
 // 	return s >= STACK_BEGIN;
 // }
 
-static inline Storage registerSize(u16 size) {
+static inline Storage registerSize (u16 size) {
 	if (size == 1)
 		return RSIZE_BYTE;
 	if (size == 2)
@@ -685,7 +712,7 @@ static inline const char *registerSized(Register stor, u16 size) {
 	return register_names[(stor & ~RSIZE_MASK) | registerSize(size)];
 }
 
-static const char *sizeOp(u16 size) {
+static const char *sizeOp (u16 size) {
 	if (size == 1)
 		return "byte";
 	if (size == 2)
@@ -697,7 +724,7 @@ static const char *sizeOp(u16 size) {
 	unreachable;
 }
 
-static u16 valueSize(Codegen *c, IrRef ref) {
+static u16 valueSize (Codegen *c, IrRef ref) {
 	return c->ir.ptr[ref].size;
 }
 
@@ -705,14 +732,14 @@ static bool isMemory(u16 size) {
 	return size > 16;
 }
 
-static const char *valueName(Codegen *c, IrRef ref) {
+static const char *valueName (Codegen *c, IrRef ref) {
 	assert(ref != IR_REF_NONE);
 	return storageName(c, c->storage[ref]);
 }
 
 #define BUF 100
 static char buf[BUF] = {0};
-static const char *storageName(Codegen *c, Storage store) {
+static const char *storageName (Codegen *c, Storage store) {
 	snprintf(buf, BUF, "[rsp+%lu]", (ulong) store);
 	return adupez(c->arena, buf);
 }

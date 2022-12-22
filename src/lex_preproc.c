@@ -86,6 +86,7 @@ Keyword names[] = {
 	{"extern", Tok_Key_Extern},
 	{"_Thread_local", Tok_Key_Threadlocal},
 	{"inline", Tok_Key_Inline},
+	{"__inline", Tok_Key_Inline},
 	{"_Noreturn", Tok_Key_Noreturn},
 
 	{"__builtin_va_list", Tok_Key_VaList},
@@ -508,42 +509,47 @@ static IfClass skipToElseIfOrEnd(SourceFile source, const char **p);
 static Token getTokenSpaced(Arena *, SourceFile, const char **p);
 static bool gobbleSpaceToNewline(const char **p);
 static bool evalPreprocExpression(ExpansionParams, Tokenization *);
-static void predefineMacros (Arena *arena, StringMap *macros, Target *);
-Tokenization lex (Arena *generated_strings, String filename, Paths paths, Target *target) {
+static const char *defineMacro(Arena *arena, Arena *generated_strings, StringMap *macros, String name, SourceFile, const char *pos);
+static void predefineMacros(Arena *arena, Arena *genrated_strings, StringMap *macros, FileList *, StringList to_define, SourceKind);
+
+
+Tokenization lex (Arena *generated_strings, String filename, Paths paths) {
 	typedef struct {
 		u16 file;
 		const char *pos;
 	} Inclusion;
 
-// 	qsort(names, sizeof(names)/sizeof(names[0]), sizeof(names[0]), keyword_cmp);
 
 	Arena macro_arena = create_arena(2048);
 	Tokenization t = {0};
 
-	SourceFile *initial_source = readAllAlloc(zString(""), filename);
+	StringMap sources = {0};
+	StringMap macros = {0};
+	LIST(Inclusion) includes_stack = {0};
+	Tokenization prepreoc_evaluation_buf = {0};
+	MacroStack macro_expansion_stack = {0};
+
+	SourceFile *initial_source = readAllAlloc(STRING_EMPTY, filename);
 	if (initial_source == NULL)
 		generalFatal("could not open file \"%.*s\"\n", STRING_PRINTAGE(filename));
 
 	PUSH(t.files, initial_source);
 	SourceFile source = *initial_source;
 
-	StringMap sources = {0};
-	StringMap macros = {0};
-	StringMap macro_parameters = {0};
-	LIST(Inclusion) includes_stack = {0};
-	Tokenization prepreoc_evaluation_buf = {0};
-	MacroStack macro_expansion_stack = {0};
-
 	const char *pos = source.content.ptr;
 
-	predefineMacros(&macro_arena, &macros, target);
+	predefineMacros(&macro_arena, generated_strings, &macros, &t.files,
+			paths.command_line_macros, Source_CommandLineMacro);
+	predefineMacros(&macro_arena, generated_strings, &macros, &t.files,
+			paths.system_macros, Source_SystemDefinedMacro);
+
+
 	ExpansionParams expansion = {
 		.stack = &macro_expansion_stack,
 		.strings_arena = generated_strings,
 		.macros = &macros,
 		.src = &pos,
 	};
-
 	bool first_line_in_file = true;
 	while (true) {
 		bool file_begin = pos == source.content.ptr;
@@ -554,7 +560,7 @@ Tokenization lex (Arena *generated_strings, String filename, Paths paths, Target
 			line_begin = tryGobbleSpace(source, &pos) == Space_Linebreak || file_begin;
 			begin = pos;
 			tok = getToken(generated_strings, source, &pos);
-			if (tok.kind != Tok_EOF || source.idx == 0)
+			if (tok.kind != Tok_EOF || source.idx == initial_source->idx)
 				break;
 			Inclusion inc = POP(includes_stack);
 			pos = inc.pos;
@@ -579,94 +585,13 @@ Tokenization lex (Arena *generated_strings, String filename, Paths paths, Target
 						lexerror(source, pos, "macro identifier may only contain alphanumeric characters");
 					pos++;
 				}
+
+				// TODO Disallow `defined`
 				String name = {pos - start, start};
-				void **entry = mapGetOrCreate(&macros, name);
-				// TODO Disallow `defined` or
 // 				if (*entry != NULL)
 // 					fprintf(stderr, "redefining %.*s (TODO Check that definitions are identical)\n", STRING_PRINTAGE(name));
 
-				Macro *mac = ALLOC(&macro_arena, Macro);
-				*entry = mac;
-				*mac = (Macro) {name, source.idx};
-
-				u32 parameters = 0;
-				if (pos[0] == '(') {
-					pos++;
-					const char *p = pos;
-					while (true) {
-						Token t = getTokenSpaced(generated_strings, source, &p);
-						if (t.kind != Tok_Identifier && t.kind != Tok_TripleDot)
-							lexerror(source, pos, "the parameters of function-like macros must be valid identifiers");
-						parameters++;
-						t = getTokenSpaced(generated_strings, source, &p);
-						if (t.kind == Tok_CloseParen)
-							break;
-						else if (t.kind != Tok_Comma)
-							lexerror(source, pos, "the parameters of function-like macros must be valid identifiers");
-					}
-					mac->parameters.ptr = aalloc(&macro_arena, sizeof(Parameter) * parameters);
-					mac->parameters.len = parameters;
-					mac->is_function_like = true;
-
-					for (u32 i = 0; i < parameters; i++) {
-						Token t = getTokenSpaced(generated_strings, source, &pos);
-						assert(t.kind == Tok_Identifier || t.kind == Tok_TripleDot);
-						String name;
-						if (t.kind == Tok_TripleDot) {
-							if (i + 1 != parameters)
-								lexerror(source, pos, "an ellipsis may only appear as the last parameter to a variadic macro");
-							// TODO Version check for C99
-							name = zString("__VA_ARGS__");
-						} else {
-							name = t.val.identifier;
-						}
-
-						mac->parameters.ptr[i].name = name;
-						void **entry = mapGetOrCreate(&macro_parameters, name);
-						if (*entry)
-							lexerror(source, ((String *)*entry)->ptr, "macro parameters may not be duplicated");
-						*entry = &mac->parameters.ptr[i];
-
-						t = getTokenSpaced(generated_strings, source, &pos);
-					}
-				}
-
-				LIST(MacroToken) macro_assembly = {0};
-				while (true) {
-					bool havespace = gobbleSpaceToNewline(&pos);
-					if (*pos == '\n')
-						break;
-
-					u32 macro_pos = pos - source.content.ptr;
-					MacroToken t = {
-						.tok = getToken(generated_strings, source, &pos),
-						.file_offset = macro_pos,
-						.file_ref = source.idx,
-					};
-					t.tok.preceded_by_space = havespace;
-					if (t.tok.kind == Tok_EOF)
-						lexerror(source, pos, "macro definition must end before end of source file");
-					if (parameters && (t.tok.kind == Tok_Identifier || t.tok.kind == Tok_PreprocDirective)) {
-						Parameter *param = mapGet(&macro_parameters, t.tok.val.identifier);
-						if (param)
-							t.parameter = param - mac->parameters.ptr + 1;
-					}
-					PUSH(macro_assembly, t);
-				}
-				if (macro_assembly.len) {
-					MacroToken first = macro_assembly.ptr[0];
-					if (first.tok.kind == Tok_PreprocConcatenate)
-						lexerrorOffset(source, first.file_offset, "a %s##%s preprocessing token may not occur at the beginning of a macro definition");
-					MacroToken last = macro_assembly.ptr[macro_assembly.len-1];
-					if (last.tok.kind == Tok_PreprocConcatenate)
-						lexerrorOffset(source, last.file_offset, "a %s##%s preprocessing token may not occur at the end of a macro definition");
-				}
-				mac->tokens.ptr = macro_assembly.ptr;
-				mac->tokens.len = macro_assembly.len;
-
-				if (parameters > 0)
-					mapFree(&macro_parameters);
-
+				pos = defineMacro(&macro_arena, generated_strings, &macros, name, source, pos);
 			} else if (eql("undef", directive)) {
 				tok = getTokenSpaced(generated_strings, source, &pos);
 
@@ -713,7 +638,7 @@ Tokenization lex (Arena *generated_strings, String filename, Paths paths, Target
 					for (u32 i = 0; i < paths.sys_include_dirs.len && new_source == NULL; i++) {
 						new_source = readAllAlloc(paths.sys_include_dirs.ptr[i], includefilename);
 						if (new_source)
-							new_source->is_standard_header = true;
+							new_source->kind = Source_StandardHeader;
 					}
 					if (new_source == NULL)
 						lexerror(source, begin, "could not open include file \"%.*s\"", STRING_PRINTAGE(includefilename));
@@ -1666,20 +1591,103 @@ bool isAlnum (char c) {
 }
 
 
-static void predefine (Arena *arena, StringMap *macros, const char *name, int val) {
-	MacroToken *one = calloc(1, sizeof(MacroToken));
-	*one = (MacroToken) {{Tok_Integer, .val.literal.integer = val}};
+static const char *defineMacro (
+	Arena *arena,
+	Arena *generated_strings,
+	StringMap *macros,
+	String name,
+	SourceFile source,
+	const char *pos)
+{
+	static StringMap parameters = {0};
 
-	String name_str = zString(name);
-	void **entry = mapGetOrCreate(macros, name_str);
+	void **entry = mapGetOrCreate(macros, name);
 	Macro *mac = ALLOC(arena, Macro);
 	*entry = mac;
-	*mac = (Macro) {
-		name_str,
-		.tokens = {1, one}
-	};
-}
+	*mac = (Macro) {name, source.idx};
 
+
+	u32 param_count = 0;
+	if (pos[0] == '(') {
+		pos++;
+		const char *p = pos;
+		while (true) {
+			Token t = getTokenSpaced(generated_strings, source, &p);
+			if (t.kind != Tok_Identifier && t.kind != Tok_TripleDot)
+				lexerror(source, pos, "the parameters of function-like macros must be valid identifiers");
+			param_count++;
+			t = getTokenSpaced(generated_strings, source, &p);
+			if (t.kind == Tok_CloseParen)
+				break;
+			else if (t.kind == Tok_EOF)
+				lexerror(source, pos, "incomplete parameter list");
+			else if (t.kind != Tok_Comma)
+				lexerror(source, pos, "the parameters of function-like macros must be valid identifiers");
+		}
+		mac->parameters.ptr = aalloc(arena, sizeof(Parameter) * param_count);
+		mac->parameters.len = param_count;
+		mac->is_function_like = true;
+
+		for (u32 i = 0; i < param_count; i++) {
+			Token t = getTokenSpaced(generated_strings, source, &pos);
+			assert(t.kind == Tok_Identifier || t.kind == Tok_TripleDot);
+
+			String name = t.val.identifier;
+			if (t.kind == Tok_TripleDot) {
+				if (i + 1 != param_count)
+					lexerror(source, pos, "an ellipsis may only appear as the last parameter to a variadic macro");
+				// TODO Version check for C99
+				name = zstr("__VA_ARGS__");
+			}
+
+			mac->parameters.ptr[i].name = name;
+			void **entry = mapGetOrCreate(&parameters, name);
+			if (*entry)
+				lexerror(source, ((String *)*entry)->ptr, "macro parameters may not be duplicated");
+			*entry = &mac->parameters.ptr[i];
+
+			t = getTokenSpaced(generated_strings, source, &pos);
+		}
+	}
+
+	LIST(MacroToken) macro_assembly = {0};
+	while (true) {
+		bool havespace = gobbleSpaceToNewline(&pos);
+		if (*pos == '\n')
+			break;
+
+		u32 macro_pos = pos - source.content.ptr;
+		MacroToken t = {
+			.tok = getToken(generated_strings, source, &pos),
+			.file_offset = macro_pos,
+			.file_ref = source.idx,
+		};
+		t.tok.preceded_by_space = havespace;
+		if (t.tok.kind == Tok_EOF)
+			break;
+
+		if (param_count && (t.tok.kind == Tok_Identifier || t.tok.kind == Tok_PreprocDirective)) {
+			Parameter *param = mapGet(&parameters, t.tok.val.identifier);
+			if (param)
+				t.parameter = param - mac->parameters.ptr + 1;
+		}
+		PUSH(macro_assembly, t);
+	}
+	if (macro_assembly.len) {
+		MacroToken first = macro_assembly.ptr[0];
+		if (first.tok.kind == Tok_PreprocConcatenate)
+			lexerrorOffset(source, first.file_offset, "a %s##%s preprocessing token may not occur at the beginning of a macro definition");
+		MacroToken last = macro_assembly.ptr[macro_assembly.len-1];
+		if (last.tok.kind == Tok_PreprocConcatenate)
+			lexerrorOffset(source, last.file_offset, "a %s##%s preprocessing token may not occur at the end of a macro definition");
+	}
+	mac->tokens.ptr = macro_assembly.ptr;
+	mac->tokens.len = macro_assembly.len;
+
+	if (param_count > 0)
+		mapFree(&parameters);
+	return pos;
+}
 
 u32 version_vals[] = {
 	[Version_C99] = 199901L,
@@ -1689,31 +1697,44 @@ u32 version_vals[] = {
 	[Version_MSVC] = 201710L,
 };
 
-static void predefineMacros (Arena *arena, StringMap *macros, Target *target) {
-	predefine(arena, macros, "__STDC__", 1);
-	// TODO
-// 	predefine(arena, macros, "__DATE__", 1);
-// 	predefine(arena, macros, "__TIME__", 1);
-	if (target->version >= Version_C99) {
-		predefine(arena, macros, "__STDC_VERSION__", version_vals[target->version]);
-		predefine(arena, macros, "__STDC_HOSTED__", 1);
-	}
-	if (target->version >= Version_C17) {
-		predefine(arena, macros, "__STDC_ANALYZABLE__", 1);
-		predefine(arena, macros, "__STDC_NO_ATOMICS__", 1);
-		predefine(arena, macros, "__STDC_NO_COMPLEX__", 1);
-		predefine(arena, macros, "__STDC_NO_THREADS__", 1);
-	}
+static void predefineMacros (
+	Arena *arena,
+	Arena *genrated_strings,
+	StringMap *macros,
+	FileList *files,
+	StringList to_define,
+	SourceKind kind)
+{
+#ifdef NDEBUG
+	SourceFile *sources = calloc(sizeof(SourceFile), macros);
+#endif
 
-	if (target->version == Version_GNU) {
-		predefine(arena, macros, "unix", 1);
-		predefine(arena, macros, "__unix__", 1);
-		predefine(arena, macros, "__LITTLE_ENDIAN__", 1);
+	for (u32 i = 0; i < to_define.len; i++) {
+#ifdef NDEBUG
+		SourceFile *source = &sources[i];
+#else
+		SourceFile *source = calloc(sizeof(SourceFile), 1);
+#endif
+		source->kind = kind;
+		source->idx = files->len;
+		PUSH(*files, source);
 
-// 		predefine(arena, macros, "__GNUC__", 1);
+		String def = to_define.ptr[i];
+
+		u32 equals = 0;
+		while (equals < def.len && def.ptr[equals] != '=') equals++;
+		// TODO Without default "1", the name and content parsing would not need to be sparated.
+		source->name = def;
+		source->content = zstr("1");
+		if (equals < def.len) {
+			source->name.len = equals;
+			equals++;
+			source->content = (String) {def.len - equals, def.ptr + equals};
+		}
+
+		defineMacro(arena, genrated_strings, macros, source->name, *source, source->content.ptr);
 	}
 }
-
 
 
 String processStringLiteral(Arena *arena, String src) {

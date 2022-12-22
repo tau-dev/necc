@@ -157,9 +157,11 @@ typedef struct {
 	u32 macro_file_offset;
 } TokenPosition;
 
+typedef LIST(SourceFile*) FileList;
+
 // All members allocated with malloc
 typedef struct {
-	LIST(SourceFile*) files;
+	FileList files;
 
 	Token *tokens;
 	TokenPosition *positions;
@@ -168,10 +170,13 @@ typedef struct {
 } Tokenization;
 
 typedef struct {
-	SPAN(String) sys_include_dirs;
-	SPAN(String) user_include_dirs;
-} Paths;
+	StringList sys_include_dirs;
+	StringList user_include_dirs;
+
+	StringList command_line_macros;
+	StringList system_macros;
+} Paths; // Now a significant misnomer. Oh well.
 
 typedef LIST(Token) Token_List;
 
-Tokenization lex(Arena *generated_strings, String filename, Paths paths, Target *version);
+Tokenization lex(Arena *generated_strings, String filename, Paths paths);

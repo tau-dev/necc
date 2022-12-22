@@ -21,13 +21,16 @@ typedef enum {
 	F_Version,
 	F_Help,
 	F_Standard,
+	F_Define,
+	F_Include,
 	F_Crashing,
 	F_Debug,
-	F_Include,
+
 	F_StdInc,
 	F_NoStdInc,
 	F_EmitIr,
 	F_EmitAssembly,
+
 	F_OptSimple,
 	F_OptStoreLoad,
 	F_Werror,
@@ -39,6 +42,7 @@ static Name flags[] = {
 	{"-help", F_Help},
 	{"v", F_Version},
 	{"version", F_Version},
+	{"D", F_Define},
 	{"g", F_Debug},
 	{"debug", F_Debug},
 	{"std", F_Standard},
@@ -182,8 +186,7 @@ int main (int argc, char **args) {
 	bool stdinc = true;
 	bool opt_store_load = false;
 
-	LIST(String) user_paths = {0};
-	LIST(String) sys_paths = {0};
+	Paths paths = {0};
 
 	for (int i = 1; i < argc; i++) {
 		if (args[i][0] == '-') {
@@ -217,11 +220,15 @@ int main (int argc, char **args) {
 				break;
 			case F_Include:
 				i++;
-				PUSH(user_paths, checkIncludePath(&arena, args[i]));
+				PUSH(paths.user_include_dirs, checkIncludePath(&arena, args[i]));
+				break;
+			case F_Define:
+				i++;
+				PUSH(paths.command_line_macros, zstr(args[i]));
 				break;
 			case F_StdInc:
 				i++;
-				PUSH(sys_paths, checkIncludePath(&arena, args[i]));
+				PUSH(paths.sys_include_dirs, checkIncludePath(&arena, args[i]));
 				break;
 			case F_NoStdInc: stdinc = false; break;
 			case F_OptSimple:
@@ -233,7 +240,7 @@ int main (int argc, char **args) {
 				fprintf(stderr, "%swarning: %sIgnoring unknown flag %s\n", YELLOW, RESET, args[i]);
 			}
 		} else {
-			input = zString(args[i]);
+			input = zstr(args[i]);
 		}
 	}
 
@@ -250,22 +257,40 @@ int main (int argc, char **args) {
 	}
 
 	if (stdinc) {
-		PUSH(sys_paths, zString(MUSL_DIR "/arch/generic/"));
-		PUSH(sys_paths, zString(MUSL_DIR "/arch/x86_64/"));
-		PUSH(sys_paths, zString(MUSL_DIR "/obj/include/"));
-		PUSH(sys_paths, zString(MUSL_DIR "/include/"));
+		PUSH(paths.sys_include_dirs, zstr(MUSL_DIR "/arch/generic/"));
+		PUSH(paths.sys_include_dirs, zstr(MUSL_DIR "/arch/x86_64/"));
+		PUSH(paths.sys_include_dirs, zstr(MUSL_DIR "/obj/include/"));
+		PUSH(paths.sys_include_dirs, zstr(MUSL_DIR "/include/"));
 	}
-	PUSH(user_paths, ((String){i+1, input.ptr}));
+	PUSH(paths.user_include_dirs, ((String) {i+1, input.ptr}));
 
-	Paths paths = {
-		.sys_include_dirs = {sys_paths.len, sys_paths.ptr},
-		.user_include_dirs = {user_paths.len, user_paths.ptr},
-	};
+
+	PUSH(paths.system_macros, zstr("__STDC__"));
+	// TODO
+// 	predefine(arena, macros, "__DATE__", 1);
+// 	predefine(arena, macros, "__TIME__", 1);
+	if (opt.target.version & Features_C99) {
+// 		PUSH(paths.system_macros, "__STDC_VERSION__=???");
+		PUSH(paths.system_macros, zstr("__STDC_HOSTED__"));
+	}
+
+	if (opt.target.version & Features_C11) {
+		PUSH(paths.system_macros, zstr("__STDC_ANALYZABLE__"));
+		PUSH(paths.system_macros, zstr("__STDC_NO_ATOMICS__"));
+		PUSH(paths.system_macros, zstr("__STDC_NO_COMPLEX__"));
+		PUSH(paths.system_macros, zstr("__STDC_NO_THREADS__"));
+	}
+
+	if (opt.target.version &Features_GNU_Extensions) {
+		PUSH(paths.system_macros, zstr("unix"));
+		PUSH(paths.system_macros, zstr("__unix__"));
+		PUSH(paths.system_macros, zstr("__LITTLE_ENDIAN__"));
+	}
 
 
 	// The Real Work happens now.
 
-	Tokenization tokens = lex(&arena, input, paths, &target_x64_linux_gcc);
+	Tokenization tokens = lex(&arena, input, paths);
 	parse(&arena, tokens, &opt, &module);
 
 	if (opt.emitted_warnings && opt.error_on_warnings)
@@ -307,7 +332,7 @@ int main (int argc, char **args) {
 					fprintf(dest, "constant ");
 				String name = val.name;
 				if (name.len == 0)
-					name = zString("[anon]");
+					name = zstr("[anon]");
 				fprintf(dest, "%d (%.*s):\n", (int) i, STRING_PRINTAGE(name));
 
 				bool is_string = true;

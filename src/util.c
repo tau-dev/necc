@@ -62,7 +62,7 @@ bool startsWith (const char* a, String b) {
 	return memcmp(a, b.ptr, b.len) == 0;
 }
 
-String zString (const char *s) {
+String zstr (const char *s) {
 	return (String) {strlen(s), s};
 }
 
@@ -149,11 +149,21 @@ SourceLocation findSourcePos (const char *source, const char *pos) {
 static Log plainLevel (Log l) { return l & ~Log_Fatal & ~Log_Noexpand; }
 
 void printMsg (Log level, SourceFile source, u32 offset) {
-	SourceLocation loc = findSourcePos(
-			source.content.ptr, source.content.ptr + offset);
+	switch (source.kind) {
+	case Source_SystemDefinedMacro:
+		fprintf(stderr, "%s<system defined macro>%s %.*s:\t", BOLD, RESET, STRING_PRINTAGE(source.name));
+		break;
+	case Source_CommandLineMacro:
+		fprintf(stderr, "%s<command-line defined macro>%s %.*s:\t", BOLD, RESET, STRING_PRINTAGE(source.name));
+		break;
+	default: {
+		SourceLocation loc = findSourcePos(
+				source.content.ptr, source.content.ptr + offset);
 
-	fprintf(stderr, "%s%.*s%.*s:%lu:%lu:%s\t", BOLD, STRING_PRINTAGE(source.path), STRING_PRINTAGE(source.name),
-		(unsigned long) loc.line, (unsigned long) loc.col, RESET);
+		fprintf(stderr, "%s%.*s%.*s:%lu:%lu:%s\t", BOLD, STRING_PRINTAGE(source.path), STRING_PRINTAGE(source.name),
+			(unsigned long) loc.line, (unsigned long) loc.col, RESET);
+	}
+	}
 
 	const char *const messages[] = {
 		[Log_Err]  = "error:   ",
