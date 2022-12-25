@@ -71,17 +71,6 @@ typedef struct {
 } Codegen;
 
 
-const int caller_saved[] = {
-	RCX,
-	RSI,
-	RDI,
-	RBP,
-	R8,
-	R9,
-	R10,
-	R11,
-};
-
 #define CALLER_SAVED_COUNT (sizeof(caller_saved) / sizeof(caller_saved[0]))
 
 const char *register_names[STACK_BEGIN] = {
@@ -154,12 +143,32 @@ const char *register_names[STACK_BEGIN] = {
 	[R15 + RSIZE_QWORD] = "r15",
 };
 
+const Register caller_saved[] = {
+	RCX,
+	RSI,
+	RDI,
+	RBP,
+	R8,
+	R9,
+	R10,
+	R11,
+};
+
+const Register parameter_regs[] = {
+	RDI,
+	RSI,
+	RDX,
+	RCX,
+	R8,
+	R9,
+};
+static const u32 parameter_regs_count = sizeof(parameter_regs) / sizeof(parameter_regs[0]);
 
 
 static void emitData(FILE *, Module, String data, References);
 static void emitName (FILE *, Module module, u32 id);
 static void emitJump(FILE *, const char *inst, const Block *dest);
-static void emitFunctionForward(Arena *, FILE *, Module, StaticValue, const Target *);
+static void emitFunctionForward(Arena *, FILE *, Module, StaticValue *, const Target *);
 static void emitBlockForward(Codegen *, Block *);
 static void emitInstForward(Codegen *c, IrRef i);
 static inline Storage registerSize(u16 size);
@@ -198,7 +207,7 @@ void emitX64AsmSimple(FILE *out, Arena *arena, Module module, const Target *targ
 		if (reloc.def_kind == Static_Function && reloc.def_state) {
 			fprintf(out, "_%.*s:\n", STRING_PRINTAGE(reloc.name));
 			assert(reloc.type.kind == Kind_Function);
-			emitFunctionForward(arena, out, module, reloc, target);
+			emitFunctionForward(arena, out, module, &module.ptr[i], target);
 		}
 	}
 
@@ -277,24 +286,23 @@ static u32 roundUp(u32 x)  {
 	return ((x + 7) / 8) * 8;
 }
 
-static void emitFunctionForward (Arena *arena, FILE *out, Module module, StaticValue reloc, const Target *target) {
-	IrList ir = reloc.function_ir;
-	Block *entry = reloc.function_entry;
-	bool mem_return = isMemory(typeSize(*reloc.type.function.rettype, target));
+static void emitFunctionForward (Arena *arena, FILE *out, Module module, StaticValue *reloc, const Target *target) {
+	Block *entry = reloc->function_entry;
+	bool mem_return = isMemory(typeSize(*reloc->type.function.rettype, target));
 	Codegen c = {
 		.arena = arena,
 		.out = out,
 		.is_memory_return = mem_return,
-		.storage = calloc(ir.len, sizeof(Storage)),
+		.storage = calloc(reloc->function_ir.len, sizeof(Storage)),
 		.module = module,
 		.parameters_found = mem_return,
 	};
 
 	Blocks linearized = {0};
-	scheduleBlocksStraight(entry, &linearized);
+	scheduleBlocksStraight(arena, entry, &linearized);
 	assert(linearized.len);
-	decimateIr(&ir, linearized);
-	reloc.function_ir = ir;
+	decimateIr(&reloc->function_ir, linearized);
+	IrList ir = reloc->function_ir;
 	c.ir = ir;
 	free(linearized.ptr);
 
@@ -318,11 +326,17 @@ static void emitFunctionForward (Arena *arena, FILE *out, Module module, StaticV
 	}
 
 	u32 mem_params = c.stack_allocated + 8;
+	u32 normal_params_found = mem_return;
 	for (u32 i = 0; i < ir.len; i++) {
 		Inst inst = ir.ptr[i];
-		if (inst.kind == Ir_Parameter && isMemory(inst.size)) {
-			c.storage[i] = mem_params;
-			mem_params += inst.size;
+		bool bigg = inst.size > 8;
+		if (inst.kind == Ir_Parameter) {
+			if (isMemory(inst.size) || normal_params_found + bigg >= parameter_regs_count) {
+				c.storage[i] = mem_params;
+				mem_params += inst.size;
+			} else {
+				normal_params_found += 1 + bigg;
+			}
 		}
 	}
 
@@ -337,16 +351,6 @@ static void emitFunctionForward (Arena *arena, FILE *out, Module module, StaticV
 	free(c.storage);
 }
 
-const Register parameter_regs[] = {
-	RDI,
-	RSI,
-	RDX,
-	RCX,
-	R8,
-	R9,
-};
-
-static const u32 parameter_regs_count = sizeof(parameter_regs) / sizeof(parameter_regs[0]);
 
 static void copyTo (Codegen *c, const char *to, i32 to_offset, const char *from, i32 from_offset, u16 size) {
 	long offset = 0;
@@ -375,12 +379,12 @@ static bool loadMaybeBigTo (Codegen *c, Register reg1, Register reg2, IrRef i) {
 	bool bigg = size > 8;
 
 	u32 reduced_size = bigg ? 8 : size;
-	fprintf(c->out, "  mov %s, [rsp+%lu]\n",
+	fprintf(c->out, " mov %s, [rsp+%lu]\n",
 		registerSized(reg1, reduced_size),
 		(ulong) c->storage[i]);
 
 	if (bigg) {
-		fprintf(c->out, "  mov %s, [rsp+%lu]\n",
+		fprintf(c->out, " mov %s, [rsp+%lu]\n",
 			registerSized(reg2, size - reduced_size),
 			(ulong) c->storage[i] + 8);
 	}
@@ -583,10 +587,8 @@ static void emitInstForward(Codegen *c, IrRef i) {
 			"rsp", c->storage[inst.binop.lhs] + inst.binop.rhs, inst.size);
 	} break;
 	case Ir_Parameter: {
-		if (!isMemory(inst.size)) {
-			assert(c->parameters_found < parameter_regs_count);
-
-			bool bigg = inst.size > 8;
+		bool bigg = inst.size > 8;
+		if (c->parameters_found + bigg < parameter_regs_count && !isMemory(inst.size)) {
 			u32 sizea = bigg ? 8 : inst.size;
 			fprintf(c->out, " mov [rsp+%lu], %s	; param\n", (ulong) c->storage[i],
 				registerSized(parameter_regs[c->parameters_found], sizea));
@@ -635,44 +637,50 @@ static void emitInstForward(Codegen *c, IrRef i) {
 		ValuesSpan params = inst.call.parameters;
 		bool memory_return = isMemory(inst.size);
 
+		fprintf(c->out, "\t; call\n");
 		u32 param_slot = memory_return;
 		if (memory_return)
-			fprintf(c->out, "  lea rdi, [rsp+%lu]\n",
+			fprintf(c->out, " lea rdi, [rsp+%lu]\n",
 				(ulong) c->storage[i]);
 
+		// SYTYL All kinds of copypasta between parameter taking and
+		// argument passing. Need to unify caller and callee definitions
+		// per ABI.
 		u32 stack_memory = 0;
 		for (u32 p = 0; p < params.len; p++) {
 			u32 size = valueSize(c, params.ptr[p]);
-			if (isMemory(size))
+			bool bigg = size > 8;
+			if (isMemory(size) || param_slot + bigg >= parameter_regs_count)
 				stack_memory += size;
+			else
+				param_slot += 1 + bigg;
 		}
 
 		i32 stack_mem_pos = -stack_memory;
+
+		param_slot = memory_return;
 		for (u32 p = 0; p < params.len; p++) {
-			assert(param_slot < parameter_regs_count);
 			IrRef param = params.ptr[p];
 			u16 param_size = valueSize(c, param);
-			if (isMemory(param_size)) {
+			bool bigg = param_size > 8;
+			if (isMemory(param_size) || param_slot + bigg >= parameter_regs_count) {
 				copyTo(c, "rsp", stack_mem_pos, "rsp", c->storage[p], param_size);
 				stack_mem_pos += param_size;
 			} else {
 				bool bigg = loadMaybeBigTo(c, parameter_regs[param_slot], parameter_regs[param_slot+1], param);
-				param_slot++;
-
-				if (bigg) {
-					assert(param_slot < parameter_regs_count);
-					param_slot++;
-				}
+				param_slot += 1 + bigg;
 			}
 		}
 		assert(stack_mem_pos == 0);
 
 
 		if (stack_memory)
-			fprintf(c->out, "  add rsp, %lu\n", (ulong) stack_memory);
+			fprintf(c->out, " sub rsp, %lu\n", (ulong) stack_memory);
+		if (inst.call.is_vararg)
+			fprintf(c->out, " mov al, %d\n", (int) params.len);
 		fprintf(c->out, "  call qword [rsp+%lu]\n", (ulong) c->storage[inst.call.function_ptr] + stack_memory);
 		if (stack_memory)
-			fprintf(c->out, "  sub rsp, %lu\n", (ulong) stack_memory);
+			fprintf(c->out, "  add rsp, %lu\n", (ulong) stack_memory);
 
 		if (!memory_return) {
 			fprintf(c->out, "  mov %s, %s\n", valueName(c, i),
@@ -706,7 +714,6 @@ static inline Storage registerSize (u16 size) {
 		return RSIZE_QWORD;
 	unreachable;
 }
-
 
 static inline const char *registerSized(Register stor, u16 size) {
 	return register_names[(stor & ~RSIZE_MASK) | registerSize(size)];

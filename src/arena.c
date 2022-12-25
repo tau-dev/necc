@@ -19,36 +19,35 @@ struct ArenaBlock {
 
 Arena create_arena(size_t block_size) {
 	assert(block_size > 0);
+#ifdef NDEBUG
 	return (Arena) {
 		.last_used = block_size,
 		.block_size = block_size,
 	};
+#else
+	// Use a block size of 0 so that each allocation is separate, for easier debugging.
+	return (Arena) {.last_used = 1};
+#endif
 }
 
 void *aalloc(Arena* arena, size_t size) {
-	assert(size <= arena->block_size);
+	assert(arena->last_used);
 	size_t alignment = alignof(max_align_t);
 	size = (size + alignment - 1) / alignment * alignment;
 
-#ifdef NDEBUG
 	if (arena->last_used + size >= arena->block_size) {
-		ArenaBlock *new = malloc(arena->block_size + BLOCK_HEADER);
+		u32 next_size = size >= arena->block_size ? size : arena->block_size;
+		ArenaBlock *new = malloc(next_size + BLOCK_HEADER);
 		if (!new) {
 			puts("ERROR: Out ouf memory on arena extension.");
 			exit(EXIT_FAILURE);
 		}
+		arena->total_used += next_size + BLOCK_HEADER;
 		new->next = arena->last_block;
 
 		arena->last_block = new;
 		arena->last_used = 0;
 	}
-#else
-	ArenaBlock *new = malloc(size + BLOCK_HEADER);
-	new->next = arena->last_block;
-	arena->last_block = new;
-	arena->last_used = 0;
-#endif
-
 	void *res = arena->last_block->data + arena->last_used;
 	arena->last_used += size;
 	return res;
@@ -65,7 +64,10 @@ char *adupez(Arena *arena, const char *c) {
 }
 
 
-void free_arena(Arena* arena) {
+void free_arena(Arena* arena, const char *name) {
+// #ifndef NDEBUG
+	fprintf(stderr, "Arena freeing %llu KiB of %s\n", (unsigned long long) arena->total_used / 1024, name);
+// #endif
 	while (arena->last_block != NULL) {
 		ArenaBlock *next = arena->last_block->next;
 		free(arena->last_block);

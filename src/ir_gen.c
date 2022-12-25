@@ -14,7 +14,7 @@ performed in a separate step.
 
 
 IrRef append (IrBuild *build, Inst inst) {
-	PUSH (build->ir, inst);
+	PUSH(build->ir, inst);
 	return build->ir.len - 1;
 }
 
@@ -27,7 +27,7 @@ IrRef genStackAllocFixed (IrBuild *build, u32 size) {
 	return genStackAlloc(build, r);
 }
 IrRef genStackAlloc (IrBuild *build, IrRef size) {
-	return append(build, (Inst) {Ir_StackAlloc, PTR_SIZE, {.alloc = {size}}});
+	return append(build, (Inst) {Ir_StackAlloc, PTR_SIZE, .alloc = {size}});
 }
 
 void genReturnVal (IrBuild *build, IrRef val) {
@@ -62,8 +62,8 @@ void genSwitch (IrBuild *build, IrRef val) {
 	};
 }
 
-Block *newBlock (IrBuild *build, Arena *arena, String label) {
-	Block *new_block = ALLOC(arena, Block);
+Block *newBlock (IrBuild *build, String label) {
+	Block *new_block = ALLOC(build->block_arena, Block);
 	*new_block = (Block) { .label = label, .id = build->block_count++ };
 	return new_block;
 }
@@ -75,8 +75,8 @@ void startBlock (IrBuild *build, Block *block) {
 	build->prev_store_op = IR_REF_NONE;
 }
 
-Block *startNewBlock (IrBuild *build, Arena *arena, String label) {
-	Block *blk = newBlock(build, arena, label);
+Block *startNewBlock (IrBuild *build, String label) {
+	Block *blk = newBlock(build, label);
 	startBlock(build, blk);
 	return blk;
 }
@@ -280,7 +280,7 @@ IrRef genLessThanOrEquals(IrBuild *build, IrRef a, IrRef b, u16 size) {
 
 IrRef genImmediateInt (IrBuild *build, long long i, u16 size) {
 	assert(size <= 8);
-	return append(build, (Inst) {Ir_Constant, size, {.constant = i}});
+	return append(build, (Inst) {Ir_Constant, size, .constant = i});
 }
 
 IrRef genImmediateReal (IrBuild *build, double r) {
@@ -291,41 +291,47 @@ IrRef genImmediateReal (IrBuild *build, double r) {
 
 IrRef genTrunc (IrBuild *build, IrRef source, u16 target) {
 	Inst *inst = build->ir.ptr;
-	assert(inst[source].size > target);
+	assert(inst[source].size >= target);
+	if (inst[source].size == target)
+		return source;
 	if (inst[source].kind == Ir_Constant)
 		return genImmediateInt(build, inst[source].constant & (((u64) 1 << target*8) - 1), target);
 
-	return append(build, (Inst) {Ir_Truncate, target, {source}});
+	return append(build, (Inst) {Ir_Truncate, target, .unop = source});
 }
 
 IrRef genSignExt (IrBuild *build, IrRef source, u16 target) {
 	Inst *inst = build->ir.ptr;
-	assert(inst[source].size < target);
+	assert(inst[source].size <= target);
+	if (inst[source].size == target)
+		return source;
 	if (inst[source].kind == Ir_Constant) {
 		// TODO Actually sign extend the constant
 		return genImmediateInt(build, inst[source].constant, target);
 	}
 
 
-	return append(build, (Inst) {Ir_SignExtend, target, {source}});
+	return append(build, (Inst) {Ir_SignExtend, target, .unop = source});
 }
 
 IrRef genZeroExt (IrBuild *build, IrRef source, u16 target) {
 	Inst *inst = build->ir.ptr;
-	assert(inst[source].size < target);
+	assert(inst[source].size <= target);
+	if (inst[source].size == target)
+		return source;
 	if (inst[source].kind == Ir_Constant)
 		return genImmediateInt(build, inst[source].constant, target);
 
-	return append(build, (Inst) {Ir_ZeroExtend, target, {source}});
+	return append(build, (Inst) {Ir_ZeroExtend, target, .unop = source});
 }
 
-IrRef genCall (IrBuild *build, IrRef func, ValuesSpan args, u16 size) {
-	IrRef call = append(build, (Inst) {Ir_Call, size, .call = {func, args, build->prev_mem_op}});
+IrRef genCall (IrBuild *build, IrRef func, ValuesSpan args, u16 size, bool is_vararg) {
+	IrRef call = append(build, (Inst) {Ir_Call, size, .call = {func, args, build->prev_mem_op, is_vararg}});
 	build->prev_mem_op = call;
 	build->prev_store_op = call;
 
-	PUSH (build->insertion_block->mem_instructions, call);
-	PUSH (build->insertion_block->ordered_instructions, call);
+	PUSH_A(build->block_arena, build->insertion_block->mem_instructions, call);
+	PUSH_A(build->block_arena, build->insertion_block->ordered_instructions, call);
 	return call;
 }
 
@@ -338,7 +344,7 @@ IrRef genLoad (IrBuild *build, IrRef ref, u16 size) {
 		.mem = { .address = ref, .ordered_after = build->prev_store_op }
 	});
 	build->prev_mem_op = load;
-	PUSH (build->insertion_block->mem_instructions, load);
+	PUSH_A(build->block_arena, build->insertion_block->mem_instructions, load);
 	return load;
 }
 
@@ -351,8 +357,8 @@ IrRef genStore (IrBuild *build, IrRef dest, IrRef value) {
 	build->prev_mem_op = store;
 	build->prev_store_op = store;
 
-	PUSH (build->insertion_block->mem_instructions, store);
-	PUSH (build->insertion_block->ordered_instructions, store);
+	PUSH_A(build->block_arena, build->insertion_block->mem_instructions, store);
+	PUSH_A(build->block_arena, build->insertion_block->ordered_instructions, store);
 	return store;
 }
 
@@ -363,7 +369,7 @@ IrRef genPhiIn (IrBuild *build, u16 size) {
 
 IrRef genPhiOut (IrBuild *build, IrRef source) {
 	u32 inst = append(build, (Inst) {Ir_PhiOut, build->ir.ptr[source].size, .phi_out = {source, IR_REF_NONE, IR_REF_NONE}});
-	PUSH(build->insertion_block->ordered_instructions, inst);
+	PUSH_A(build->block_arena, build->insertion_block->ordered_instructions, inst);
 	return inst;
 }
 

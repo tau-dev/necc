@@ -27,7 +27,7 @@ IrRef genImmediateReal(IrBuild *, double r);
 IrRef genTrunc(IrBuild *, IrRef source, u16 target);
 IrRef genSignExt(IrBuild *, IrRef source, u16 target);
 IrRef genZeroExt(IrBuild *, IrRef source, u16 target);
-IrRef genCall(IrBuild *, IrRef func, ValuesSpan args, u16 size);
+IrRef genCall(IrBuild *, IrRef func, ValuesSpan args, u16 size, bool is_vararg);
 IrRef genGlobal(IrBuild *, u32 id);
 IrRef genLoad(IrBuild *, IrRef ref, u16 size);
 IrRef genStore(IrBuild *, IrRef dest, IrRef value);
@@ -39,11 +39,11 @@ void genReturnVal(IrBuild *, IrRef val);
 void genBranch(IrBuild *, IrRef condition);
 void genJump(IrBuild *, Block *blk);
 void genSwitch(IrBuild *, IrRef val);
-Block *newBlock(IrBuild *build, Arena *arena, String label);
+Block *newBlock(IrBuild *build, String label);
 void startBlock(IrBuild *, Block *blk);
+Block *startNewBlock(IrBuild *build, String label);
 void discardBlock(Block *blk);
 void discardIrBuilder(IrBuild *);
-Block *startNewBlock(IrBuild *build, Arena *arena, String label);
 
 void printBlock(FILE *dest, Block *entry, IrList ir);
 

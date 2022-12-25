@@ -23,6 +23,7 @@ typedef struct {
 	IrRef function_ptr;
 	ValuesSpan parameters;
 	IrRef ordered_after;
+	bool is_vararg;
 } Call;
 
 
@@ -199,6 +200,7 @@ typedef struct Block {
 typedef struct IrBuild {
 	IrList ir;
 	Block *entry;
+	Arena *block_arena;
 
 	u32 block_count;
 	Block *insertion_block;

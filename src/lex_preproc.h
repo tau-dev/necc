@@ -1,33 +1,11 @@
 #pragma once
 #include "util.h"
 #include "types.h"
+#include "common.h"
 
 
 typedef enum {
-	Tok_Identifier,
-	Tok_Integer,
-	Tok_Real,
-	Tok_String,
-
-	Tok_OpenParen,
-	Tok_CloseParen,
-	Tok_OpenBrace,
-	Tok_CloseBrace,
-	Tok_OpenBracket,
-	Tok_CloseBracket,
-
-	Tok_Semicolon,
-	Tok_Comma,
-	Tok_Colon,
-	Tok_Dot,
-	Tok_TripleDot,
-
-	Tok_Question,
-	Tok_Arrow,
-	Tok_DoubleAmpersand,
-	Tok_DoublePipe,
-	Tok_DoublePlus,
-	Tok_DoubleMinus,
+	Tok_EOF,
 
 	Tok_Key_If,
 	Tok_Key_Else,
@@ -75,14 +53,43 @@ typedef enum {
 	Tok_Key_Threadlocal,
 	Tok_Key_Inline,
 	Tok_Key_Noreturn,
-
-	Tok_Key_VaList,
+	Tok_Key_StaticAssert,
 
 	Tok_Key_File,
 	Tok_Key_Line,
 
 	Tok_Key_First = Tok_Key_If,
 	Tok_Key_Last = Tok_Key_Line,
+
+	Tok_Intrinsic,
+
+	Tok_Identifier,
+	Tok_String,
+	Tok_Real,
+	Tok_Int,
+	Tok_UInt,
+	Tok_Long,
+	Tok_ULong,
+
+	Tok_OpenParen,
+	Tok_CloseParen,
+	Tok_OpenBrace,
+	Tok_CloseBrace,
+	Tok_OpenBracket,
+	Tok_CloseBracket,
+
+	Tok_Semicolon,
+	Tok_Comma,
+	Tok_Colon,
+	Tok_Dot,
+	Tok_TripleDot,
+
+	Tok_Question,
+	Tok_Arrow,
+	Tok_DoubleAmpersand,
+	Tok_DoublePipe,
+	Tok_DoublePlus,
+	Tok_DoubleMinus,
 
 	Tok_PreprocDirective, // Directive or stringified argument.
 	Tok_PreprocConcatenate,
@@ -123,29 +130,30 @@ typedef enum {
 	Tok_HatEquals = Tok_Hat | Tok_EQUALED,
 	Tok_TildeEquals = Tok_Tilde | Tok_EQUALED,
 
-	Tok_EOF,
 
 	Tok_Equalable_Start = Tok_Equals,
 	Tok_Assignment_Start = Tok_PlusEquals,
 } TokenKind;
+
+STATIC_ASSERT(Tok_EQUALED > Tok_Tilde && !(Tok_EQUALED & Tok_Tilde),
+		"Tok_EQUALED must follow all other tokens");
 
 const char *tokenName(TokenKind k);
 // Dynamically allocates.
 // [currently unused]
 const char *tokenNameHighlighted(TokenKind k);
 
-typedef struct {
+
+typedef struct Token {
 	TokenKind kind;
 	u8 preceded_by_space;
 
 	union {
-		struct {
-			long long integer;
-			BasicType int_type;
-		} literal;
-		String identifier;
+		i64 integer_s;
+		u64 integer_u;
 		double real;
-		String string;
+		Symbol *symbol;
+		u32 symbol_idx; // Only used by the lexer
 	} val;
 } Token;
 
@@ -159,6 +167,9 @@ typedef struct {
 
 typedef LIST(SourceFile*) FileList;
 
+
+
+
 // All members allocated with malloc
 typedef struct {
 	FileList files;
@@ -167,6 +178,9 @@ typedef struct {
 	TokenPosition *positions;
 	u32 count;
 	u32 capacity;
+
+	SymbolList symbols;
+	Symbol *func_sym; // STYLE THIS IS TERRYBLY CRUFTY
 } Tokenization;
 
 typedef struct {

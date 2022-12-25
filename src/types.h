@@ -4,6 +4,7 @@
 
 typedef struct Type Type;
 typedef struct Declaration Declaration;
+typedef struct Symbol Symbol;
 
 typedef LIST(Declaration) DeclList;
 
@@ -15,6 +16,7 @@ typedef enum {
 	Int_int,
 	Int_long,
 	Int_longlong,
+
 	Int_unsigned = 8,
 } BasicType;
 
@@ -103,13 +105,13 @@ struct Function {
 
 typedef struct CompoundMember {
 	Type type;
-	String name;
+	Symbol *name;
 	u32 offset;
 } CompoundMember;
 
 typedef struct Declaration {
 	Type type;
-	String name;
+	Symbol *name;
 } Declaration;
 
 typedef enum {

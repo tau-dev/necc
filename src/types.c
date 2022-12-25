@@ -333,7 +333,7 @@ void printTypeTail (Type t, char **pos, const char *end) {
 		for (size_t i = 0; i < t.function.parameters.len; i++) {
 			Declaration param = t.function.parameters.ptr[i];
 
-			printComplete(pos, end, param.type, param.name);
+			printComplete(pos, end, param.type, param.name->name);
 
 			if (i + 1 < t.function.parameters.len)
 				printto(pos, end, ", ");

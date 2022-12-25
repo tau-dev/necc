@@ -152,10 +152,10 @@ static inline uint64_t wyhash64(uint64_t A, uint64_t B) { A ^= 0xa0761d6478bd642
 static inline uint64_t wyrand(uint64_t *seed) { *seed += 0xa0761d6478bd642full; return _wymix(*seed, *seed^0xe7037ed1a0b428dbull);}
 
 //convert any 64 bit pseudo random numbers to uniform distribution [0, 1). It can be combined with wyrand, wyhash64 or wyhash.
-static inline double wy2u01(uint64_t r) { const double _wynorm = 1.0/(1ull << 52); return (r >> 12)*_wynorm;}
+// static inline double wy2u01(uint64_t r) { const double _wynorm = 1.0/(1ull << 52); return (r >> 12)*_wynorm;}
 
 //convert any 64 bit pseudo random numbers to APPROXIMATE Gaussian distribution. It can be combined with wyrand, wyhash64 or wyhash.
-static inline double wy2gau(uint64_t r) { const double _wynorm = 1.0/(1ull << 20); return ((r&0x1fffff)+((r >> 21)&0x1fffff)+((r >> 42)&0x1fffff))*_wynorm-3.0;}
+// static inline double wy2gau(uint64_t r) { const double _wynorm = 1.0/(1ull << 20); return ((r&0x1fffff)+((r >> 21)&0x1fffff)+((r >> 42)&0x1fffff))*_wynorm-3.0;}
 
 #if (!WYHASH_32BIT_MUM)
 //fast range integer random number generation on [0, k) credit to Daniel Lemire. May not work when WYHASH_32BIT_MUM = 1. It can be combined with wyrand, wyhash64 or wyhash.

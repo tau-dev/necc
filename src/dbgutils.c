@@ -33,17 +33,30 @@ const char *sz(String s) {
 }
 
 void tokz(Token t) {
-	if (t.kind == Tok_Identifier) {
+	switch (t.kind) {
+	case Tok_Identifier:
 		appendz("‘");
-		append(t.val.identifier);
+		append(t.val.symbol->name);
 		appendz("’");
-	} else if (t.kind == Tok_String) {
+		break;
+	case Tok_String:
 		appendz("\"");
-		append(t.val.identifier);
+		append(t.val.symbol->name);
 		appendz("\"");
-	} else if (t.kind == Tok_Integer) {
+		break;
+	case Tok_Int:
 		appendz("[int]");
-	} else {
+		break;
+	case Tok_UInt:
+		appendz("[uint]");
+		break;
+	case Tok_Long:
+		appendz("[long]");
+		break;
+	case Tok_ULong:
+		appendz("[ulong]");
+		break;
+	default: {
 		const char *c = tokenName(t.kind);
 		if (c) {
 			appendz(c);
@@ -52,6 +65,7 @@ void tokz(Token t) {
 			snprintf(buf, 16, "[unkown:%d]", (int) t.kind);
 			appendz(buf);
 		}
+	}
 	}
 }
 

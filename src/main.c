@@ -155,6 +155,7 @@ static FILE *openOut(const char *name) {
 Target target_x64_linux_gcc = {
 	.ptrdiff = {Kind_Basic, .basic = Int_long},
 	.intptr = {Kind_Basic, .basic = Int_long},
+	.enum_int = {Kind_Basic, .basic = Int_int},
 	.typesizes = {
 		[Int_bool] = I8,
 		[Int_char] = I8,
@@ -165,6 +166,7 @@ Target target_x64_linux_gcc = {
 		[Int_longlong] = I64,
 	},
 	.ptr_size = I64,
+	.int_size = I32,
 	.version = Version_GNU,
 };
 
@@ -173,6 +175,7 @@ static String checkIncludePath(Arena *, const char *path);
 int main (int argc, char **args) {
 	String input = {0};
 	Arena arena = create_arena(16 * 1024);
+	printf("sizeof(Inst): %d\n", (int) sizeof(Inst));
 
 	Options opt = {
 		.target = target_x64_linux_gcc,
@@ -269,8 +272,16 @@ int main (int argc, char **args) {
 	// TODO
 // 	predefine(arena, macros, "__DATE__", 1);
 // 	predefine(arena, macros, "__TIME__", 1);
+	if (opt.target.version & Features_C23) {
+		PUSH(paths.system_macros, zstr("__STDC_VERSION__=202301L"));
+	} else if (opt.target.version & Features_C11) {
+		PUSH(paths.system_macros, zstr("__STDC_VERSION__=201710L"));
+	} else if (opt.target.version & Features_C99) {
+		PUSH(paths.system_macros, zstr("__STDC_VERSION__=199901L"));
+	}
+
+
 	if (opt.target.version & Features_C99) {
-// 		PUSH(paths.system_macros, "__STDC_VERSION__=???");
 		PUSH(paths.system_macros, zstr("__STDC_HOSTED__"));
 	}
 
@@ -301,7 +312,7 @@ int main (int argc, char **args) {
 		StaticValue *val = &module.ptr[i];
 		if (val->def_state == Def_Defined && val->def_kind == Static_Function) {
 			Blocks linearized = {0};
-			scheduleBlocksStraight(val->function_entry, &linearized);
+			scheduleBlocksStraight(&arena, val->function_entry, &linearized);
 			if (opt_store_load)
 				innerBlockPropagate(val->function_ir, linearized);
 			resolveCopies(val->function_ir);
@@ -359,10 +370,18 @@ int main (int argc, char **args) {
 
 
 #ifndef NDEBUG
-	free_arena(&arena);
+	free_arena(&arena, "code");
 	for (u32 i = 0; i < tokens.files.len; i++)
 		free(tokens.files.ptr[i]);
+	for (u32 i = 0; i < module.len; i++) {
+		StaticValue *val = &module.ptr[i];
+		if (val->def_kind == Static_Variable)
+			free(val->value_references.ptr);
+		else
+			free(val->function_ir.ptr);
+	}
 
+	free(tokens.symbols.ptr);
 	free(tokens.tokens);
 	free(tokens.positions);
 	free(tokens.files.ptr);

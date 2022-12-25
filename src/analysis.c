@@ -195,9 +195,9 @@ void calcLifetimes (IrList ir, ValuesSpan lastuses) {
 
 
 // TODO Schedule ordered by id.
-static void scheduleBlockStraight (Block *blk, Block *prev, Blocks *dest, u32 id) {
+static void scheduleBlockStraight (Arena *a, Block *blk, Block *prev, Blocks *dest, u32 id) {
 	if (prev)
-		PUSH(blk->incoming, prev);
+		PUSH_A(a, blk->incoming, prev);
 	if (blk->visited == id) return;
 
 	blk->visited = id;
@@ -205,18 +205,18 @@ static void scheduleBlockStraight (Block *blk, Block *prev, Blocks *dest, u32 id
 
 	switch (blk->exit.kind) {
 	case Exit_Unconditional:
-		scheduleBlockStraight(blk->exit.unconditional, blk, dest, id);
+		scheduleBlockStraight(a, blk->exit.unconditional, blk, dest, id);
 		break;
 	case Exit_Branch:
 // 		if (blk->exit.branch.on_false->id < blk->exit.branch.on_true)
-		scheduleBlockStraight(blk->exit.branch.on_false, blk, dest, id);
-		scheduleBlockStraight(blk->exit.branch.on_true, blk, dest, id);
+		scheduleBlockStraight(a, blk->exit.branch.on_false, blk, dest, id);
+		scheduleBlockStraight(a, blk->exit.branch.on_true, blk, dest, id);
 		break;
 	case Exit_Switch: {
 		Switch s = blk->exit.switch_;
 		for (u32 i = 0; i < s.cases.len; i++)
-			scheduleBlockStraight(s.cases.ptr[i].dest, blk, dest, id);
-		scheduleBlockStraight(s.default_case, blk, dest, id);
+			scheduleBlockStraight(a, s.cases.ptr[i].dest, blk, dest, id);
+		scheduleBlockStraight(a, s.default_case, blk, dest, id);
 	} break;
 	case Exit_Return: break;
 	case Exit_None: unreachable;
@@ -226,9 +226,9 @@ static void scheduleBlockStraight (Block *blk, Block *prev, Blocks *dest, u32 id
 }
 
 
-void scheduleBlocksStraight (Block *blk, Blocks *dest) {
+void scheduleBlocksStraight (Arena *a, Block *blk, Blocks *dest) {
 	static u32 invocation = 1;
-	scheduleBlockStraight(blk, NULL, dest, invocation);
+	scheduleBlockStraight(a, blk, NULL, dest, invocation);
 	invocation++;
 }
 

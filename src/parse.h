@@ -65,18 +65,6 @@ struct NameTaggedType {
 	Type type;
 };
 
-typedef struct Symbol Symbol;
-typedef struct Symbol {
-	String name;
-
-	OrdinaryIdentifier *ordinary;
-	NameTaggedType *nametagged;
-
-	struct {
-		Block *block;
-		const Token *def_location;
-	} label;
-} Symbol;
 
 typedef struct {
 	u32 splice_pos;

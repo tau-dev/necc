@@ -61,16 +61,30 @@ typedef LIST(String) StringList;
 
 
 #if (__STDC_VERSION__ >= 201904L) || (defined(_MSC_VER) && (_MSC_VER >= 1911) && (_MSVC_LANG >= 201703L))
+
 #define FALLTHROUGH [[fallthrough]]
 #define nodiscard [[nodiscard]]
+#define STATIC_ASSERT static_assert
+
 #elif defined(__GNUC__)
+
 #define FALLTHROUGH __attribute__((fallthrough))
 #define nodiscard __attribute__((warn_unused_result))
+
 #else
+
 #define FALLTHROUGH
 #define nodiscard
+
 #endif
 
+
+
+#if __STDC_VERSION__ >= 201100L
+#define STATIC_ASSERT static_assert
+#else
+#define STATIC_ASSERT(x,y) extern int _lul
+#endif
 
 
 #define uchar uint8_t
@@ -114,6 +128,7 @@ typedef struct {
 	u32 used;
 	u32 capacity;
 } StringMap;
+
 
 
 
