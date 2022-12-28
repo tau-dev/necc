@@ -151,7 +151,8 @@ typedef enum {
 static Declaration parseDeclarator(Parse *, Type base_type, Namedness);
 static nodiscard bool allowedNoDeclarator(Parse *, Type base_type);
 // static Declaration parseDeclarator (Parse* parse, const Token **tok, Type base_type);
-static void initializeDefinition(Parse *, OrdinaryIdentifier *, Type);
+static void initializeStaticDefinition (Parse *, OrdinaryIdentifier *, Type, const Token *init_token);
+static void initializeAutoDefinition (Parse *, OrdinaryIdentifier *, Type, const Token *init_token);
 static void parseInitializer(Parse *, InitializationDest);
 static bool tryIntConstant (Parse *, Value, u64 *result);
 static bool tryEatStaticAssert(Parse *);
@@ -169,6 +170,7 @@ static Value dereference(Parse *, Value v);
 static Value pointerAdd(IrBuild *, Value lhs, Value rhs, Parse *op_parse, const Token *);
 static bool comparablePointers(Parse *, Type a, Type b);
 static void parseTypedefDecls(Parse *, Type base_type);
+static u32 parseStringLiteral(Parse *);
 static Attributes parseAttributes(Parse *);
 static void popScope(Parse *, Scope);
 static nodiscard Scope pushScope(Parse *);
@@ -177,14 +179,11 @@ static OrdinaryIdentifier *define(Parse *, Declaration, u8 storage, const Token 
 
 // Parses all top level declarations into a Module.
 void parse (Arena *code_arena, Tokenization tokens, Options *opt, Module *module) {
-	// Used only as a scratch buffer for constructing constants at the
-	// top level. Kind of inefficient, but very straightforward.
-	IrBuild global_ir = {.block_arena = code_arena};
-	startNewBlock(&global_ir, zstr("dummy"));
-
 	Parse parse = {
-		.arena = create_arena(16 * 1024),
-		.build = global_ir,
+		.arena = create_arena(256 * 1024L),
+		// Used only as a scratch buffer for constructing constants at the
+		// top level. Kind of inefficient, but very straightforward.
+		.build = {.block_arena = code_arena},
 		.code_arena = code_arena,
 		.tokens = tokens,
 		.target = opt->target,
@@ -192,6 +191,7 @@ void parse (Arena *code_arena, Tokenization tokens, Options *opt, Module *module
 		.pos = tokens.tokens,
 		.module = module,
 	};
+	startNewBlock(&parse.build, zstr("dummy"));
 
 	while (parse.pos->kind != Tok_EOF) {
 		u8 storage;
@@ -228,12 +228,13 @@ void parse (Arena *code_arena, Tokenization tokens, Options *opt, Module *module
 			bool object_def = decl.type.kind != Kind_Function && parse.pos->kind == Tok_Equals;
 
 			OrdinaryIdentifier *ord = define(&parse, decl, storage, type_token, primary,
-					function_def | object_def ? parse.pos : NULL, /* file_scope */ true);
+					function_def || object_def ? parse.pos : NULL, /* file_scope */ true);
 
 
 			if (function_def) {
 				// TODO Allow old-style definitions before C23
 
+				IrBuild global_ir = parse.build;
 				parse.current_func_type = decl.type.function;
 				parseFunction(&parse, decl.name, tokens.func_sym);
 				parse.scope_depth = 0;
@@ -245,7 +246,8 @@ void parse (Arena *code_arena, Tokenization tokens, Options *opt, Module *module
 				parse.build = global_ir;
 				break;
 			} else if (object_def) {
-				initializeDefinition(&parse, ord, decl.type);
+				const Token *eq = parse.pos++;
+				initializeStaticDefinition(&parse, ord, decl.type, eq);
 			}
 
 			if (!tryEat(&parse, Tok_Comma)) {
@@ -268,7 +270,7 @@ void parse (Arena *code_arena, Tokenization tokens, Options *opt, Module *module
 			parseerror(&parse, val->decl_location, "TODO(phrasing) static identifier was never defined");
 	}
 
-	discardIrBuilder(&global_ir);
+	discardIrBuilder(&parse.build);
 	popScope(&parse, (Scope) {0});
 	free_arena(&parse.arena, "parse temporaries");
 }
@@ -351,6 +353,7 @@ static IrRef coerce(Value v, Type t, Parse *, const Token *);
 static IrRef toBoolean(Parse *, const Token *, Value v);
 static IrRef coercerval(Value v, Type t, Parse *, const Token *, bool allow_casts);
 static Value immediateIntVal(Parse *, Type typ, u64 val);
+static inline void removeEnumness(Type *t);
 
 void parseFunction (Parse *parse, Symbol *symbol, Symbol *func_sym) {
 	IrBuild *build = &parse->build;
@@ -747,11 +750,23 @@ static void parseStatement (Parse *parse, bool *had_non_declaration) {
 			const Token *decl_token = parse->pos;
 			Declaration decl = parseDeclarator(parse, base_type, Decl_Named);
 
-			const Token *definer = parse->pos->kind == Tok_Equals ? parse->pos : NULL;
+			const Token *definer = NULL;
+			if (parse->pos->kind == Tok_Equals)
+				definer = parse->pos++;
 			OrdinaryIdentifier *ord = define(parse, decl, storage, primary, decl_token,
 					definer, /* file_scope */ false);
 
-			initializeDefinition(parse, ord, decl.type);
+			if (ord->kind == Sym_Value_Auto) {
+				ord->value = (Value) {decl.type, genStackAllocFixed(build, typeSize(decl.type, &parse->target)), Ref_LValue};
+				if (definer)
+					initializeAutoDefinition(parse, ord, decl.type, definer);
+			} else {
+				if (definer)
+					initializeStaticDefinition(parse, ord, decl.type, definer);
+			}
+
+			if (!definer && decl.type.kind == Kind_VLArray && decl.type.array.count == IR_REF_NONE)
+				parseerror(parse, decl_token, "cannot infer size of array without initializer");
 		} while (tryEat(parse, Tok_Comma));
 
 		expect(parse, Tok_Semicolon);
@@ -1328,6 +1343,8 @@ static Value parseExprRightUnary (Parse *parse) {
 					} else {
 						if (arg.typ.kind == Kind_Basic)
 							inst = intPromote(arg, parse, primary).inst;
+						else
+							inst = rvalue(arg, parse).inst;
 					}
 					PUSH_A(parse->code_arena, arguments, inst);
 				} while (tryEat(parse, Tok_Comma));
@@ -1472,35 +1489,9 @@ static Value parseExprBase (Parse *parse) {
 // 	case Tok_Real:
 // 		return (Value) {{Kind_Basic, {Basic_double}}, genImmediateReal(t.val.real)};
 	case Tok_String: {
-		const Token *scan = parse->pos - 1;
-
-		u32 len = t.val.symbol->name.len;
-		while (parse->pos->kind == Tok_String) {
-			len += parse->pos->val.symbol->name.len;
-			parse->pos++;
-		}
-		char *data = aalloc(parse->code_arena, len + 1);
-		char *insert = data;
-		while (scan->kind == Tok_String) {
-			String str = scan->val.symbol->name;
-			memcpy(insert, str.ptr, str.len);
-			insert += str.len;
-			scan++;
-		}
-		insert[0] = 0;
-		Type strtype = {
-			.kind = Kind_Array,
-			.array = {.inner = &chartype, .count = len + 1},
-		};
-		PUSH(*parse->module, ((StaticValue) {
-			.type = strtype,
-			.decl_location = parse->pos-1,
-			.def_kind = Static_Variable,
-			.def_state = Def_Defined,
-			.value_data = {len + 1, data},
-		}));
-		u32 id = parse->module->len - 1;
-
+		parse->pos--;
+		u32 id = parseStringLiteral(parse);
+		Type strtype = parse->module->ptr[id].type;
 		return (Value) { strtype, genGlobal(build, id), Ref_LValue };
 	}
 	case Tok_Key_Alignof: {
@@ -1588,6 +1579,41 @@ static Value parseExprBase (Parse *parse) {
 	}
 }
 
+static u32 parseStringLiteral(Parse *parse) {
+	const Token *begin = parse->pos;
+
+	u32 len = 0;
+	while (parse->pos->kind == Tok_String) {
+		len += parse->pos->val.symbol->name.len;
+		parse->pos++;
+	}
+	char *data = aalloc(parse->code_arena, len + 1);
+	char *insert = data;
+	const Token *scan = begin;
+	while (scan->kind == Tok_String) {
+		String str = scan->val.symbol->name;
+		memcpy(insert, str.ptr, str.len);
+		insert += str.len;
+		scan++;
+	}
+	*insert = 0;
+	Type strtype = {
+		.kind = Kind_Array,
+		.array = {.inner = &chartype, .count = len + 1},
+	};
+
+	u32 id = parse->module->len;
+	PUSH(*parse->module, ((StaticValue) {
+		.type = strtype,
+		.decl_location = begin,
+		.is_used = true, // Conservative assumption until implementing an appropriate analysis pass.
+		.def_kind = Static_Variable,
+		.def_state = Def_Defined,
+		.value_data = {len + 1, data},
+	}));
+	return id;
+}
+
 static Attributes parseAttributes (Parse *parse) {
 	Attributes result = 0;
 	while (parse->pos[0].kind == Tok_OpenBracket && parse->pos[1].kind == Tok_OpenBracket) {
@@ -1599,124 +1625,137 @@ static Attributes parseAttributes (Parse *parse) {
 }
 
 
-// More redundant state. See the comment on define().
-static void initializeDefinition (Parse *parse, OrdinaryIdentifier *ord, Type type) {
-	const Token *init_token = NULL;
-	if (parse->pos->kind == Tok_Equals) {
-		init_token = parse->pos;
-		parse->pos++;
-	}
+static void initializeAutoDefinition (Parse *parse, OrdinaryIdentifier *ord, Type type, const Token *init_token) {
+	assert(ord->kind == Sym_Value_Auto);
+	InitializationDest dest = { .type = type, .address = ord->value.inst };
 
-	bool unspecified_size = false;
 	if (type.kind == Kind_VLArray) {
 		if (type.array.count == IR_REF_NONE) {
-			unspecified_size = true;
-			if (!init_token)
-				parseerror(parse, NULL, "cannot infer size of array without initializer");
-		} else if (init_token) {
+			IrBuild *build = &parse->build;
+			Inst *size_inst = &build->ir.ptr[parse->build.ir.ptr[dest.address].alloc.size];
+			assert(size_inst->kind == Ir_Constant);
+			dest.type = *dest.type.array.inner;
+
+			if (parse->pos->kind == Tok_String && dest.type.kind == Kind_Basic && dest.type.basic == Int_char) {
+				// TODO Big constants
+				u32 id = parseStringLiteral(parse);
+				StaticValue *val = &parse->module->ptr[id];
+				u32 count = val->value_data.len;
+				size_inst->constant = count;
+				ord->value.typ.kind = Kind_Array;
+				ord->value.typ.array.count = count;
+
+				u32 loaded = genLoad(build, genGlobal(build, id), count);
+				genStore(build, dest.address, loaded);
+				return;
+			}
+			expect(parse, Tok_OpenBrace);
+
+			u32 member_size = typeSize(dest.type, &parse->target);
+			u32 count = 0;
+			while (true) {
+				if (tryEat(parse, Tok_CloseBrace))
+					break;
+
+				parseInitializer(parse, dest);
+				count++;
+
+				if (!tryEat(parse, Tok_Comma)) {
+					expect(parse, Tok_CloseBrace);
+					break;
+				}
+			}
+
+			size_inst->constant = count * member_size;
+			ord->value.typ.kind = Kind_Array;
+			ord->value.typ.array.count = count;
+			return;
+		} else {
 			requires(parse, "initialization of variable-length arrays", Features_C23);
 
 			expect(parse, Tok_OpenBrace);
 			expect(parse, Tok_CloseBrace);
 
 			parseerror(parse, NULL, "TODO Implement VLA initializers");
+			return;
 		}
 	}
 
-	StaticValue *static_val = NULL;
+	if (typeSize(type, &parse->target) == 0)
+		parseerror(parse, init_token, "cannot initialize incomplete type %s", printTypeHighlighted(&parse->arena, type));
+
+	parseInitializer(parse, dest);
+}
+
+static void initializeStaticDefinition (Parse *parse, OrdinaryIdentifier *ord, Type type, const Token *init_token) {
+	assert(ord->kind == Sym_Value_Static);
+	StaticValue *static_val = &parse->module->ptr[ord->static_id];
 	RefsList refs = { 0 };
-	InitializationDest dest = { .type = type };
+	InitializationDest dest = { .type = type, .reloc_references = &refs };
 
-	if (ord->kind == Sym_Value_Auto) {
-		ord->value = (Value) {type, genStackAllocFixed(&parse->build, typeSize(type, &parse->target)), Ref_LValue};
-		dest.address = ord->value.inst;
-	} else {
-		assert(ord->kind == Sym_Value_Static);
-		static_val = &parse->module->ptr[ord->static_id];
-// 		assert(type == static_val->type);
-		dest.reloc_references = &refs;
-	}
+	if (type.kind == Kind_VLArray) {
+		if (type.array.count == IR_REF_NONE) {
+			static_val->type.kind = Kind_Array;
+			if (parse->pos->kind == Tok_String) {
+				// TODO Type checking
+				String str = parse->pos->val.symbol->name;
+				parse->pos++;
+				// TODO Concatenation etc.
 
-	if (unspecified_size) {
-		assert(init_token);
-		if (parse->pos->kind == Tok_String) {
-			// TODO Type checking
-			String str = parse->pos->val.symbol->name;
-			parse->pos++;
-			// TODO Concatenation etc.
-
-			if (static_val) {
 				MutableString data = ALLOCN(parse->code_arena, char, str.len + 1);
 				memcpy(data.ptr, str.ptr, str.len);
 				data.ptr[str.len] = 0;
 
-				static_val->type.kind = Kind_Array;
 				static_val->type.array.count = data.len;
 				static_val->value_data = (String) {data.len, data.ptr};
-			} else {
-				assert(!"TODO");
+				return;
 			}
-			return;
-		}
-		expect(parse, Tok_OpenBrace);
-		dest.type = *dest.type.array.inner;
+			expect(parse, Tok_OpenBrace);
+			dest.type = *dest.type.array.inner;
 
-		u32 member_size = typeSize(dest.type, &parse->target);
-		u32 count = 0;
-		while (true) {
-			if (tryEat(parse, Tok_CloseBrace))
-				break;
-			count++;
-			if (static_val && count * member_size > dest.reloc_data.len) {
-				dest.reloc_data = (MutableString) ALLOCN(parse->code_arena, char,
-						dest.reloc_data.len + count * member_size);
+			u32 member_size = typeSize(dest.type, &parse->target);
+			u32 count = 0;
+			while (true) {
+				if (tryEat(parse, Tok_CloseBrace))
+					break;
+				count++;
+				if (count * member_size > dest.reloc_data.len) {
+					dest.reloc_data = (MutableString) ALLOCN(parse->code_arena, char,
+							dest.reloc_data.len + count * member_size);
+				}
+
+				parseInitializer(parse, dest);
+				dest.offset = count * member_size;
+
+				if (!tryEat(parse, Tok_Comma)) {
+					expect(parse, Tok_CloseBrace);
+					break;
+				}
 			}
 
-			parseInitializer(parse, dest);
-
-			if (!tryEat(parse, Tok_Comma)) {
-				expect(parse, Tok_CloseBrace);
-				break;
-			}
-		}
-
-		if (static_val) {
 			static_val = &parse->module->ptr[ord->static_id];
-			static_val->type.kind = Kind_Array;
+
 			static_val->type.array.count = count;
 			static_val->value_data = (String) {count * member_size, dest.reloc_data.ptr};
 			static_val->value_references = (References) {refs.len, refs.ptr};
+			return;
 		} else {
-			ord->value.typ.kind = Kind_Array;
-			ord->value.typ.array.count = count;
-			Inst *size = &parse->build.ir.ptr[parse->build.ir.ptr[dest.address].alloc.size];
-			assert(size->kind == Ir_Constant);
-			size->constant = count * member_size;
+			unreachable;
 		}
-	} else if (init_token) {
-		if (typeSize(type, &parse->target) == 0)
-			parseerror(parse, NULL, "cannot initialize incomplete type %s", printTypeHighlighted(&parse->arena, type));
-		if (static_val) {
-			dest.reloc_data = (MutableString) ALLOCN(parse->code_arena, char,
-					typeSize(type, &parse->target));
-
-			memset(dest.reloc_data.ptr, 0, typeSize(dest.type, &parse->target));
-			parseInitializer(parse, dest);
-			static_val = &parse->module->ptr[ord->static_id];
-			static_val->value_data = (String) {dest.reloc_data.len, dest.reloc_data.ptr};
-			static_val->value_references = (References) {refs.len, refs.ptr};
-		} else {
-			parseInitializer(parse, dest);
-		}
-	} else if (static_val) {
-		// STYLE Copypasta from above.
-		dest.reloc_data = (MutableString) ALLOCN(parse->code_arena, char,
-				typeSize(type, &parse->target));
-
-		static_val->value_data = (String) {dest.reloc_data.len, dest.reloc_data.ptr};
-		memset(dest.reloc_data.ptr, 0, typeSize(dest.type, &parse->target));
-		static_val = &parse->module->ptr[ord->static_id];
 	}
+
+	if (typeSize(type, &parse->target) == 0)
+		parseerror(parse, init_token, "cannot initialize incomplete type %s", printTypeHighlighted(&parse->arena, type));
+
+	dest.reloc_data = (MutableString) ALLOCN(parse->code_arena, char,
+			typeSize(type, &parse->target));
+
+	memset(dest.reloc_data.ptr, 0, typeSize(dest.type, &parse->target));
+	parseInitializer(parse, dest);
+
+	static_val = &parse->module->ptr[ord->static_id];
+	static_val->value_data = (String) {dest.reloc_data.len, dest.reloc_data.ptr};
+	static_val->value_references = (References) {refs.len, refs.ptr};
 }
 
 static Value parseIntrinsic (Parse *parse, Intrinsic i) {
@@ -1757,14 +1796,10 @@ static void parseInitializer (Parse *parse, InitializationDest dest) {
 		}
 	} else {
 		const Token *begin = parse->pos;
-		Value got = rvalue(parseExprAssignment(parse), parse);
-		Inst inst = parse->build.ir.ptr[got.inst];
-		if (inst.kind != Ir_Constant && inst.kind != Ir_Reloc) {
-			if (dest.reloc_data.ptr)
-				parseerror(parse, begin, "expected a static initializer (TODO print the non-static culprit)");
-
+		IrRef got = coerce(parseExprAssignment(parse), dest.type, parse, begin);
+		Inst inst = parse->build.ir.ptr[got];
+		if (inst.kind != Ir_Constant && inst.kind != Ir_Reloc)
 			requires(parse, "non-constant initializers", Features_C99);
-		}
 
 		IrBuild *build = &parse->build;
 		if (dest.reloc_data.ptr) {
@@ -1773,36 +1808,36 @@ static void parseInitializer (Parse *parse, InitializationDest dest) {
 					dest.reloc_data.ptr + dest.offset,
 					&inst.constant,
 					inst.size);
-			} else {
-				assert(inst.kind == Ir_Reloc);
-				StaticValue *val = &parse->module->ptr[inst.reloc.id];
+			} else if (inst.kind == Ir_Reloc) {
+				Reference ref = {dest.offset, inst.reloc.id, inst.reloc.offset};
+				PUSH(*dest.reloc_references, ref);
+			} else if (inst.kind == Ir_Load && parse->build.ir.ptr[inst.mem.address].kind == Ir_Reloc) {
+				Inst loadfrom = parse->build.ir.ptr[inst.mem.address];
+				// Load value from a constant static.
+				// Ugly hack, need to represent a loaded Reloc in the IR.
+				StaticValue *val = &parse->module->ptr[loadfrom.reloc.id];
+				if (val->def_kind != Static_Variable || !(val->type.qualifiers & Qualifier_Const))
+					parseerror(parse, NULL, "TODO: ???");
 
-				if (isByref(got)) {
-					// Load value from a constant static value
-					if (val->def_kind != Static_Variable || !(val->type.qualifiers & Qualifier_Const))
-						parseerror(parse, NULL, "TODO: ???");
-					// TODO This does not yet copy references from the static value.
-					StaticValue *src = &parse->module->ptr[inst.reloc.id];
-					memcpy(
-						dest.reloc_data.ptr + dest.offset,
-						src->value_data.ptr + inst.reloc.offset,
-						inst.size
-					);
-				} else {
-					Reference ref = {dest.offset, inst.reloc.id, inst.reloc.offset};
-					PUSH(*dest.reloc_references, ref);
-				}
+				// TODO This does not yet copy references from the static value.
+				memcpy(
+					dest.reloc_data.ptr + dest.offset,
+					val->value_data.ptr + loadfrom.reloc.offset,
+					inst.size
+				);
+			} else {
+				parseerror(parse, begin, "expected a static initializer (TODO print the non-static culprit)");
 			}
 		} else {
 			IrRef offset = genImmediateInt(build, dest.offset, parse->target.ptr_size);
 			IrRef dest_addr = genAdd(build, dest.address, offset);
-			genStore(build, dest_addr, coerce(got, dest.type, parse, begin));
+			genStore(build, dest_addr, got);
 		}
 	}
 }
 
 // Clang and GCC allow unnamed members to be braced. By my reading, the
-// standard does not actually allow that, but it still needs to be
+// standard does not actually permit that, but it still needs to be
 // supported here.
 static void tryParseDesignator(Parse *, InitializationDest, u32 *outermost_member_idx);
 static void parseBracedInitializer (Parse *parse, InitializationDest dest) {
@@ -1891,7 +1926,7 @@ static void tryParseDesignator (Parse *parse, InitializationDest dest, u32 *oute
 				have_outermost_member_idx = true;
 			}
 			current = *current.array.inner;
-			// PERFOMANCE Computing this size on every designator is slightly wasteful.
+			// PERFORMANCE Computing this size on every designator is slightly wasteful.
 			total_offset += pos * typeSize(current, &parse->target);
 		} else {
 			break;
@@ -1901,11 +1936,18 @@ static void tryParseDesignator (Parse *parse, InitializationDest dest, u32 *oute
 	if (have_outermost_member_idx) {
 		expect(parse, Tok_Equals);
 	} else {
-		if (current.kind == Kind_Array && current.kind != Kind_VLArray) {
+		if (current.kind == Kind_Array) {
+			if (*outermost_member_idx >= current.array.count)
+				parseerror(parse, NULL, "encountered more members than expected");
 			current = *current.array.inner;
+			total_offset = *outermost_member_idx * typeSize(current, &parse->target);
 		} else {
 			Type res = resolveType(dest.type);
-			current = res.members.ptr[*outermost_member_idx].type;
+			if (*outermost_member_idx >= res.members.len)
+				parseerror(parse, NULL, "encountered more members than expected");
+			CompoundMember member = res.members.ptr[*outermost_member_idx];
+			current = member.type;
+			total_offset = member.offset;
 		}
 	}
 
@@ -1948,7 +1990,8 @@ static Type parseTypeBase (Parse *parse, u8 *storage) {
 	if (!tryParseTypeBase(parse, &type, storage)) {
 		if (parse->pos->kind == Tok_Identifier) {
 			requires(parse, "default types of int", Features_DefaultInt);
-			*storage = Storage_Unspecified;
+			if (storage)
+				*storage = Storage_Unspecified;
 			return BASIC_INT;
 		}
 		parseerror(parse, parse->pos, "expected a type name");
@@ -1958,6 +2001,8 @@ static Type parseTypeBase (Parse *parse, u8 *storage) {
 
 static nodiscard Type parseStructUnionBody(Parse *parse, bool is_struct);
 
+// declaration-specifiers if storage_dest is given,
+// specifier-qualifier-list if storage_dest is NULL.
 static bool tryParseTypeBase (Parse *parse, Type *type, u8 *storage_dest) {
 	// TODO Type names (e.g. arguments to sizeof) and parameters cannot have storage class.
 	const Token *begin = parse->pos;
@@ -1977,9 +2022,13 @@ static bool tryParseTypeBase (Parse *parse, Type *type, u8 *storage_dest) {
 	while (is_type_token) {
 		switch (parse->pos->kind) {
 		case Tok_Key_Double:
-			// TODO
+			// Ugly hacks to patch over TODO Floating point numbers!
 			base.kind = Kind_Basic;
 			base.basic = Int_int;
+			if (longness[0])
+				longness[1] = parse->pos;
+			else
+				longness[0] = parse->pos;
 			bases++;
 			break;
 		case Tok_Key_Float:
@@ -2102,46 +2151,81 @@ static bool tryParseTypeBase (Parse *parse, Type *type, u8 *storage_dest) {
 			parse->pos++;
 			Attributes attr = parseAttributes(parse);
 			(void) attr;
-			if (tryEat(parse, Tok_Identifier)) {
-				// TODO
+
+			base.kind = Kind_Enum;
+			base.basic = parse->target.enum_int;
+			modifiable = false;
+
+			Symbol *named = NULL;
+			NameTaggedType *tagged = NULL;
+			if (parse->pos->kind == Tok_Identifier) {
+				named = parse->pos->val.symbol;
+				parse->pos++;
+				tagged = named->nametagged;
 			}
-			expect(parse, Tok_OpenBrace);
 
-			for (i32 value = 0;; value++) {
-				const Token *primary = parse->pos;
-				Symbol *name = expect(parse, Tok_Identifier).val.symbol;
+			if (tryEat(parse, Tok_Colon)) {
+				requires(parse, "explicity enum-underlying types", Features_C23);
+				const Token *type_token = parse->pos;
+				Type underlying = parseTypeBase(parse, NULL);
+				if (underlying.kind != Kind_Basic)
+					parseerror(parse, type_token, "the underlying type of an enumeration must be an integer type, %s is not permitted", printTypeHighlighted(&parse->arena, underlying));
+				base.basic = underlying.basic;
+			}
 
-				if (tryEat(parse, Tok_Equals)) {
-					const Token *expr_token = parse->pos;
-					Value val = parseExprAssignment(parse);
+			if (!tagged) {
+				expect(parse, Tok_OpenBrace);
 
-					u64 int_val;
-					if (!tryIntConstant(parse, val, &int_val))
-						parseerror(parse, expr_token, "enumeration values must be constant expressions");
-					// TODO Range check this downcast.
-					value = int_val;
-				}
-				bool new;
-				OrdinaryIdentifier *ident = genOrdSymbol(parse, name, &new);
-				if (!new)
-					redefinition(parse, NULL, ident->def_location, name);
+				for (i32 value = 0;; value++) {
+					const Token *primary = parse->pos;
+					Symbol *name = expect(parse, Tok_Identifier).val.symbol;
 
-				ident->kind = Sym_EnumConstant;
-				ident->decl_location = ident->def_location = primary;
-				ident->enum_constant = value;
+					if (tryEat(parse, Tok_Equals)) {
+						const Token *expr_token = parse->pos;
+						Value val = parseExprAssignment(parse);
 
-				if (tryEat(parse, Tok_Comma)) {
-					if (tryEat(parse, Tok_CloseBrace)) {
-						requires(parse, "trailing comma in enumerator list", Features_C99);
+						u64 int_val;
+						if (!tryIntConstant(parse, val, &int_val))
+							parseerror(parse, expr_token, "enumeration values must be constant expressions");
+						// TODO Range check this downcast.
+						value = int_val;
+					}
+					bool new;
+					OrdinaryIdentifier *ident = genOrdSymbol(parse, name, &new);
+					if (!new)
+						redefinition(parse, NULL, ident->def_location, name);
+
+					ident->kind = Sym_EnumConstant;
+					ident->decl_location = ident->def_location = primary;
+					ident->enum_constant = value;
+
+					if (tryEat(parse, Tok_Comma)) {
+						if (tryEat(parse, Tok_CloseBrace)) {
+							requires(parse, "trailing comma in enumerator list", Features_C99);
+							break;
+						}
+					} else {
+						expect(parse, Tok_CloseBrace);
 						break;
 					}
-				} else {
-					expect(parse, Tok_CloseBrace);
-					break;
 				}
 			}
-			base.kind = Kind_Enum;
-			modifiable = false;
+
+			if (named) {
+				if (!tagged) {
+					tagged = ALLOC(parse->code_arena, NameTaggedType);
+					*tagged = (NameTaggedType) {
+						.name = named->name,
+						.shadowed = named->nametagged,
+						.scope_depth = parse->scope_depth,
+						.type = base,
+					};
+					named->nametagged = tagged;
+				}
+				base.kind = Kind_Enum_Named;
+				base.nametagged = tagged;
+			}
+
 			parse->pos--;
 		} break;
 		case Tok_Key_Long:
@@ -2451,6 +2535,7 @@ static bool allowedNoDeclarator (Parse *parse, Type base_type) {
 	case Kind_Union:
 	case Kind_Union_Named:
 	case Kind_Enum:
+	case Kind_Enum_Named:
 		return tryEat(parse, Tok_Semicolon);
 	default:
 		return false;
@@ -2566,7 +2651,7 @@ static Declaration parseDeclarator (Parse *parse, Type base_type, Namedness name
 			enclosing = inner;
 			inner = inner->function.rettype;
 		} else if (tryEat(parse, Tok_OpenBracket)) {
-			const Token *primary = parse->pos - 1;
+// 			const Token *primary = parse->pos - 1;
 			if (enclosing && enclosing->kind == Kind_Function)
 				parseerror(parse, NULL, "a function cannot return an array. You may want to return a pointer to an array instead");
 
@@ -2594,10 +2679,17 @@ static Declaration parseDeclarator (Parse *parse, Type base_type, Namedness name
 				inner->kind = Kind_VLArray;
 				inner->array.count = IR_REF_NONE;
 			} else {
-				inner->array.count = coerce(parseExprAssignment(parse), parse->target.ptrdiff, parse, primary);
-				if (parse->build.ir.ptr[inner->array.count].kind != Ir_Constant) {
+				u64 count;
+				Value count_val = parseExprAssignment(parse);
+				if (tryIntConstant(parse, count_val, &count)) {
+					if (count > 1000000)
+						parseerror(parse, NULL, "%llu items is too big, for now", (unsigned long long) count);
+					inner->array.count = count;
+				} else {
 					requires(parse, "variable length arrays", Features_C99);
-					parseerror(parse,NULL, "TODO Support VLA");
+					inner->kind = Kind_VLArray;
+					inner->array.count = count_val.inst;
+					parseerror(parse, NULL, "TODO Support VLA");
 				}
 			}
 
@@ -2982,6 +3074,7 @@ static Value dereference (Parse *parse, Value v) {
 
 static Value intPromote (Value val, Parse *p, const Token *primary) {
 	val = rvalue(val, p);
+	removeEnumness(&val.typ);
 
 	if (val.typ.kind != Kind_Basic)
 		parseerror(p, primary, "expected a scalar type, got %s", printTypeHighlighted(&p->arena, val.typ));
@@ -3002,7 +3095,7 @@ static void discardValue(Parse *parse, const Token *token, Value v) {
 	(void) v;
 }
 
-// Performs array to pointer, function to pointer, enum to int and
+// Performs array to pointer, function to pointer and
 // lvalue conversions as necessary. Those are strictly speaking separate
 // concerns, but all of them need to be applied almost everywhere, with
 // a couple of exceptions each that need to be treated specially anyway.
@@ -3020,8 +3113,6 @@ Value rvalue (Value v, Parse *parse) {
 		v.inst = genLoad(&parse->build, v.inst, typeSize(v.typ, &parse->target));
 		v.typ.qualifiers = 0;
 	}
-	if (v.typ.kind == Kind_Enum)
-		v.typ = parse->target.enum_int;
 	v.category = Ref_RValue;
 	return v;
 }
@@ -3049,8 +3140,9 @@ static IrRef coercerval (Value v, Type t, Parse *p, const Token *primary, bool a
 
 	if (t.kind == Kind_Void)
 		return IR_REF_NONE;
-	if (t.kind == Kind_Enum)
-		t = p->target.enum_int;
+	removeEnumness(&v.typ);
+	removeEnumness(&t);
+
 	if (typeCompatible(t, v.typ))
 		return v.inst;
 	if (t.kind == Kind_Basic && t.basic == Int_bool)
@@ -3103,6 +3195,15 @@ static Value immediateIntVal (Parse *p, Type typ, u64 val) {
 	};
 }
 
+static inline void removeEnumness(Type *type) {
+	if (type->kind == Kind_Enum_Named) {
+		type->kind = Kind_Basic;
+		// FIXME The enum may not be complete yet
+		type->basic = type->nametagged->type.basic;
+	} else if (type->kind == Kind_Enum) {
+		type->kind = Kind_Basic;
+	}
+}
 static void requires (Parse *parse, const char *desc, Features required) {
 	if (!(parse->target.version & required)) {
 		parseerror(parse, NULL, "%s are not supported under the current target (%s)",

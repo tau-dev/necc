@@ -165,12 +165,12 @@ void printMsg (Log level, SourceFile source, u32 offset) {
 	}
 	}
 
-	const char *const messages[] = {
+	const char *const messages[3] = {
 		[Log_Err]  = "error:   ",
 		[Log_Warn] = "warning: ",
 		[Log_Info] = "info:    ",
 	};
-	const char *const highlights[] = {
+	const char *const highlights[3] = {
 		[Log_Err]  = REDBOLD,
 		[Log_Warn] = YELLOW,
 		[Log_Info] = CYAN,

@@ -155,7 +155,7 @@ static FILE *openOut(const char *name) {
 Target target_x64_linux_gcc = {
 	.ptrdiff = {Kind_Basic, .basic = Int_long},
 	.intptr = {Kind_Basic, .basic = Int_long},
-	.enum_int = {Kind_Basic, .basic = Int_int},
+	.enum_int = Int_int,
 	.typesizes = {
 		[Int_bool] = I8,
 		[Int_char] = I8,
@@ -174,7 +174,7 @@ static String checkIncludePath(Arena *, const char *path);
 
 int main (int argc, char **args) {
 	String input = {0};
-	Arena arena = create_arena(16 * 1024);
+	Arena arena = create_arena(256 * 1024);
 	printf("sizeof(Inst): %d\n", (int) sizeof(Inst));
 
 	Options opt = {
@@ -248,7 +248,7 @@ int main (int argc, char **args) {
 	}
 
 	if (input.ptr == NULL)
-		generalFatal("Please supply a file name. (Use \"-h\" to show usage informaion.)\n");
+		generalFatal("Please supply a file name. (Use \"-h\" to show usage information.)\n");
 
 	if (!had_output)
 		assembly_out = stdout_marker;
@@ -317,7 +317,6 @@ int main (int argc, char **args) {
 				innerBlockPropagate(val->function_ir, linearized);
 			resolveCopies(val->function_ir);
 			decimateIr(&val->function_ir, linearized);
-// 			decimateIr(&val->function_ir, linearized);
 			free(linearized.ptr);
 		}
 	}
@@ -331,7 +330,6 @@ int main (int argc, char **args) {
 				fprintf(dest, "public ");
 
 			if (val.def_state != Def_Defined) {
-// 				assert(val.name.len); // TODO Where do these come from?
 				fprintf(dest, "extern %.*s\n", STRING_PRINTAGE(val.name));
 			} else if (val.def_kind == Static_Function) {
 				fprintf(dest, "%s:\n", printDeclarator(&arena, val.type, val.name));
@@ -385,6 +383,11 @@ int main (int argc, char **args) {
 	free(tokens.tokens);
 	free(tokens.positions);
 	free(tokens.files.ptr);
+
+	free(paths.user_include_dirs.ptr);
+	free(paths.sys_include_dirs.ptr);
+	free(paths.command_line_macros.ptr);
+	free(paths.system_macros.ptr);
 #endif
 	return 0;
 }

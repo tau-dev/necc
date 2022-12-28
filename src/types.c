@@ -45,6 +45,7 @@ bool arrayUnknownSize (Type t) {
 // Result of 0 means incomplete type.
 u32 typeSize (Type t, const Target *target) {
 	switch (t.kind) {
+	case Kind_Enum_Named:
 	case Kind_Union_Named:
 	case Kind_Struct_Named: {
 		Type actual = t.nametagged->type;
@@ -52,8 +53,10 @@ u32 typeSize (Type t, const Target *target) {
 			return 0; // Incomplete
 		if (t.kind == Kind_Struct_Named)
 			assert(actual.kind == Kind_Struct);
-		else
+		else if (t.kind == Kind_Union_Named)
 			assert(actual.kind == Kind_Union);
+		else
+			assert(actual.kind == Kind_Enum);
 		return typeSize(actual, target);
 	}
 	case Kind_Union:
@@ -128,6 +131,7 @@ bool fnTypeCompatible (FunctionType a, FunctionType b) {
 	return true;
 }
 
+// PERFORMANCE Probably important.
 bool typeCompatible (Type a, Type b) {
 	if (a.kind != b.kind) {
 		if (b.kind == Kind_Enum) {
@@ -184,6 +188,8 @@ static void printComplete (char **pos, const char *end, Type t, String name) {
 	case Kind_Struct_Named:
 	case Kind_Union:
 	case Kind_Union_Named:
+	case Kind_Enum:
+	case Kind_Enum_Named:
 		break;
 	default:
 		printto(pos, end, " ");
@@ -262,15 +268,20 @@ void printTypeBase(Type t, char **pos, const char *end) {
 	case Kind_Struct:
 		printto(pos, end, "struct [anonymous]");
 		break;
+	case Kind_Enum:
+		printto(pos, end, "enum [anonymous]");
+		break;
 	case Kind_Struct_Named:
 		printto(pos, end, "struct %.*s", STRING_PRINTAGE(t.nametagged->name));
 		break;
 	case Kind_Union_Named:
-		printto(pos, end, "struct %.*s", STRING_PRINTAGE(t.nametagged->name));
+		printto(pos, end, "union %.*s", STRING_PRINTAGE(t.nametagged->name));
 		break;
-	case Kind_Enum:
-		printto(pos, end, "enum [anonymous]");
+	case Kind_Enum_Named:
+		printto(pos, end, "enum %.*s", STRING_PRINTAGE(t.nametagged->name));
 		break;
+	default:
+		unreachable;
 	}
 }
 
@@ -333,7 +344,7 @@ void printTypeTail (Type t, char **pos, const char *end) {
 		for (size_t i = 0; i < t.function.parameters.len; i++) {
 			Declaration param = t.function.parameters.ptr[i];
 
-			printComplete(pos, end, param.type, param.name->name);
+			printComplete(pos, end, param.type, param.name ? param.name->name : STRING_EMPTY);
 
 			if (i + 1 < t.function.parameters.len)
 				printto(pos, end, ", ");

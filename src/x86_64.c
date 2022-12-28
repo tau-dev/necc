@@ -16,6 +16,15 @@ prepass.
 
 */
 
+
+
+#define BUF 100000
+// Maximum amount of data expected to be emitted by a single call to emit().
+#define MAX_LINE 1000
+static char buf[BUF];
+static char *insert = buf;
+
+
 typedef unsigned long ulong;
 typedef unsigned long long ullong;
 
@@ -59,6 +68,7 @@ typedef enum {
 typedef struct {
 	Arena *arena;
 	FILE *out;
+	FILE *debugout;
 	IrList ir;
 	Module module;
 
@@ -165,27 +175,33 @@ const Register parameter_regs[] = {
 static const u32 parameter_regs_count = sizeof(parameter_regs) / sizeof(parameter_regs[0]);
 
 
-static void emitData(FILE *, Module, String data, References);
-static void emitName (FILE *, Module module, u32 id);
-static void emitJump(FILE *, const char *inst, const Block *dest);
+static void emitData(Codegen *, Module, String data, References);
+static void emitDataLine(FILE *, u32 len, const char *data);
+static void emitDataString(u32 len, const char *data);
+static void emitDataRaw(u32 len, const char *data);
+static void emitName(Codegen *, Module module, u32 id);
+static void emitJump(Codegen *, const char *inst, const Block *dest);
 static void emitFunctionForward(Arena *, FILE *, Module, StaticValue *, const Target *);
 static void emitBlockForward(Codegen *, Block *);
 static void emitInstForward(Codegen *c, IrRef i);
 static inline Storage registerSize(u16 size);
-static inline const char *registerSized(Register, u16);
+static inline Register registerSized(Register, u16);
 static const char *sizeOp(u16 size);
 static bool isMemory(u16 size);
 static u16 valueSize(Codegen *, IrRef);
-static const char *valueName(Codegen *, IrRef);
-static const char *storageName(Codegen *, Storage);
+static void emit(Codegen *c, const char *fmt, ...);
+static void flushit(FILE *f);
 
 int splice_dest_order(const void *a, const void *b) {
 	return (i32) ((Reference*) a)->splice_pos - (i32) ((Reference*) b)->splice_pos;
 }
 
 void emitX64AsmSimple(FILE *out, Arena *arena, Module module, const Target *target) {
-	fprintf(out, "use64\n"
-	     "format ELF64\n");
+	Codegen globals = {.out = out};
+#ifndef NDEBUG
+	globals.debugout = stderr;
+#endif
+	fprintf(out, "use64\nformat ELF64\n");
 
 	for (u32 i = 0; i < module.len; i++) {
 		StaticValue reloc = module.ptr[i];
@@ -200,86 +216,76 @@ void emitX64AsmSimple(FILE *out, Arena *arena, Module module, const Target *targ
 			fprintf(out, "public _%.*s as '%.*s'\n", STRING_PRINTAGE(reloc.name), STRING_PRINTAGE(reloc.name));
 	}
 
-	fprintf(out, "\n\n"
-	     "section '.text' executable\n");
+	emit(&globals, "\n\n"
+	     "section '.text' executable");
 	for (u32 i = 0; i < module.len; i++) {
 		StaticValue reloc = module.ptr[i];
 		if (reloc.def_kind == Static_Function && reloc.def_state) {
-			fprintf(out, "_%.*s:\n", STRING_PRINTAGE(reloc.name));
+			emit(&globals, "_S:", reloc.name);
 			assert(reloc.type.kind == Kind_Function);
 			emitFunctionForward(arena, out, module, &module.ptr[i], target);
 		}
 	}
 
-	fprintf(out, "\n\n"
-	     "section '.data' writeable\n");
+	emit(&globals, "\n\n"
+	     "section '.data' writeable");
 	for (u32 i = 0; i < module.len; i++) {
 		StaticValue reloc = module.ptr[i];
 		if (reloc.def_kind == Static_Variable
 			&& !(reloc.type.qualifiers & Qualifier_Const)
 			&& reloc.def_state)
 		{
-			emitName(out, module, i);
-			emitData(out, module, reloc.value_data, reloc.value_references);
+			emitName(&globals, module, i);
+			emitData(&globals, module, reloc.value_data, reloc.value_references);
 		}
 	}
 
-	fprintf(out, "\n\n"
-	     "section '.rodata'\n");
+	emit(&globals, "\n\n"
+	     "section '.rodata'");
 	for (u32 i = 0; i < module.len; i++) {
 		StaticValue reloc = module.ptr[i];
 		if (reloc.def_kind == Static_Variable
 			&& (reloc.type.qualifiers & Qualifier_Const)
 			&& reloc.def_state)
 		{
-			emitName(out, module, i);
-			emitData(out, module, reloc.value_data, reloc.value_references);
+			emitName(&globals, module, i);
+			emitData(&globals, module, reloc.value_data, reloc.value_references);
 		}
 	}
-	printf("\n");
+	(void)emitData;
+	flushit(out);
 }
 
-static void emitName (FILE *out, Module module, u32 id) {
+static void emitName (Codegen *c, Module module, u32 id) {
 	StaticValue reloc = module.ptr[id];
-	fprintf(out, "align 8\n");
-	// STYLE Copypasta from valueName
+	emit(c, "align 8");
 	if (reloc.name.len)
-		fprintf(out, "_%.*s:\n", STRING_PRINTAGE(reloc.name));
+		emit(c, "_S: ; I bytes", reloc.name, reloc.value_data.len);
 	else
-		fprintf(out, "__%lu:\n", (ulong) id);
+		emit(c, "__I: ; I bytes", id, reloc.value_data.len);
 }
 
-static void emitData (FILE *out, Module module, String data, References references) {
+static void emitData (Codegen *c, Module module, String data, References references) {
 	if (references.len) {
 		qsort(references.ptr, references.len, sizeof(references.ptr[0]),
 			splice_dest_order);
 	}
 
 	u32 pos = 0;
-	for (u32 r = 0; r < references.len; r++) {
-		Reference ref = references.ptr[r];
-		if (pos < ref.splice_pos) {
-			fprintf(out, " db 0%hhxh", data.ptr[pos]);
-			pos++;
-			while (pos < references.ptr[r].splice_pos) {
-				fprintf(out, ",0%hhxh", data.ptr[pos]);
-				pos++;
-			}
-			fprintf(out, "\n");
-		}
-		fprintf(out, " dq %.*s %+lld\n", STRING_PRINTAGE(module.ptr[ref.source_id].name), (long long) ref.offset);
-		pos += 8;
+	for (u32 i = 0; i < references.len; i++) {
+		Reference ref = references.ptr[i];
+		assert(ref.splice_pos >= pos);
+		emitDataLine(c->out, ref.splice_pos - pos, data.ptr + pos);
+
+		StaticValue reloc = module.ptr[ref.source_id];
+		if (reloc.name.len)
+			emit(c, " dq _S~L", reloc.name, ref.offset);
+		else
+			emit(c, " dq __I~L", ref.source_id, ref.offset);
+		pos = ref.splice_pos + 8;
 	}
 
-	if (pos < data.len) {
-		fprintf(out, " db 0%hhxh", data.ptr[pos]);
-		pos++;
-		while (pos < data.len) {
-			fprintf(out, ",0%hhxh", data.ptr[pos]);
-			pos++;
-		}
-		fprintf(out, "\n");
-	}
+	emitDataLine(c->out, data.len - pos, data.ptr + pos);
 }
 
 static u32 roundUp(u32 x)  {
@@ -287,6 +293,7 @@ static u32 roundUp(u32 x)  {
 }
 
 static void emitFunctionForward (Arena *arena, FILE *out, Module module, StaticValue *reloc, const Target *target) {
+// 	return;
 	Block *entry = reloc->function_entry;
 	bool mem_return = isMemory(typeSize(*reloc->type.function.rettype, target));
 	Codegen c = {
@@ -324,6 +331,7 @@ static void emitFunctionForward (Arena *arena, FILE *out, Module module, StaticV
 		c.storage[i] = c.stack_allocated;
 		c.stack_allocated += roundUp(inst.size);
 	}
+	// TODO mem returns
 
 	u32 mem_params = c.stack_allocated + 8;
 	u32 normal_params_found = mem_return;
@@ -340,36 +348,36 @@ static void emitFunctionForward (Arena *arena, FILE *out, Module module, StaticV
 		}
 	}
 
-	fprintf(c.out, " add rsp, %lu\n", (ulong) c.stack_allocated);
+	emit(&c, " sub rsp, I", c.stack_allocated);
 	if (c.is_memory_return)
-		fprintf(c.out, " mov r15, rdi\n");
+		emit(&c, " push rdi");
 
 	emitBlockForward(&c, entry);
 
-	if (c.is_memory_return)
-		fprintf(c.out, " mov r15, rdi\n");
 	free(c.storage);
 }
 
 
-static void copyTo (Codegen *c, const char *to, i32 to_offset, const char *from, i32 from_offset, u16 size) {
-	long offset = 0;
+static void copyTo (Codegen *c, Register to_addr, i32 to_offset, Register from_addr, i32 from_offset, u16 size) {
+	i32 offset = 0;
+	to_addr = registerSized(to_addr, 8);
+	from_addr = registerSized(from_addr, 8);
 	while (size - offset > 8) {
-		fprintf(c->out, " mov r8, [%s%+ld]\n", from, offset+from_offset);
-		fprintf(c->out, " mov [%s%+ld], r8 \n", to, offset+to_offset);
+		emit(c, " mov r8, [R~I]", from_addr, offset+from_offset);
+		emit(c, " mov [R~I], r8", to_addr, offset+to_offset);
 		offset += 8;
 	}
 
 	// This will break for non-power-of-two remainders.
-	const char *tmp = registerSized(R8, size - offset);
-	fprintf(c->out, " mov %s, [%s%+ld]\n", tmp, from, offset+from_offset);
-	fprintf(c->out, " mov [%s%+ld], %s \n", to, offset+to_offset, tmp);
+	Register tmp = registerSized(R8, size - offset);
+	emit(c, " mov R, [R~I]", tmp, from_addr, offset+from_offset);
+	emit(c, " mov [R~I], R", to_addr, offset+to_offset, tmp);
 }
 
 
-static const char *loadTo (Codegen *c, Register reg, IrRef i) {
-	const char *dest = registerSized(reg, c->ir.ptr[i].size);
-	fprintf(c->out, " mov %s, %s\n", dest, storageName(c, c->storage[i]));
+static Register loadTo (Codegen *c, Register reg, IrRef i) {
+	Register dest = registerSized(reg, c->ir.ptr[i].size);
+	emit(c, " mov R, #", dest, i);
 	return dest;
 }
 
@@ -379,23 +387,19 @@ static bool loadMaybeBigTo (Codegen *c, Register reg1, Register reg2, IrRef i) {
 	bool bigg = size > 8;
 
 	u32 reduced_size = bigg ? 8 : size;
-	fprintf(c->out, " mov %s, [rsp+%lu]\n",
-		registerSized(reg1, reduced_size),
-		(ulong) c->storage[i]);
+	emit(c, " mov R, #", registerSized(reg1, reduced_size), i);
 
-	if (bigg) {
-		fprintf(c->out, " mov %s, [rsp+%lu]\n",
-			registerSized(reg2, size - reduced_size),
-			(ulong) c->storage[i] + 8);
-	}
+	if (bigg)
+		emit(c, " mov R, [rsp+I]", registerSized(reg2, size - reduced_size), c->storage[i] + 8);
 
 	return bigg;
 }
 
 
-static void triple (Codegen *c, const char *msg, IrRef lhs, IrRef rhs, IrRef dest) {
-	const char *rax = loadTo(c, RAX, lhs);
-	fprintf(c->out, " %s %s, %s\n mov %s, %s\n", msg, rax, valueName(c, rhs), valueName(c, dest), rax);
+static void triple (Codegen *c, const char *inst, IrRef lhs, IrRef rhs, IrRef dest) {
+	Register rax = loadTo(c, RAX, lhs);
+	emit(c, " Z R, #", inst, rax, rhs);
+	emit(c, " mov #, R", dest, rax);
 }
 
 // This backend performs _no_ register allocation.
@@ -407,11 +411,8 @@ static void emitBlockForward (Codegen *c, Block *block) {
 	assert(block->exit.kind != Exit_None);
 
 
-	fprintf(c->out, ".%.*s%lu:\n", STRING_PRINTAGE(block->label), (ulong) block->id);
+	emit(c, ".SI:", block->label, block->id);
 
-	if (block->first_inst == 0) { // entry
-		fprintf(c->out, " sub rsp, %d\n", (int) c->stack_allocated);
-	}
 	IrRefList false_phis = {0};
 
 	for (u32 i = block->first_inst; i < block->inst_end; i++) {
@@ -428,51 +429,49 @@ static void emitBlockForward (Codegen *c, Block *block) {
 	switch (exit.kind) {
 	case Exit_Unconditional:
 		if (exit.unconditional->visited == visit_id)
-			emitJump(c->out, "jmp", exit.unconditional);
+			emitJump(c, "jmp", exit.unconditional);
 
 		emitBlockForward(c, exit.unconditional);
 		break;
 	case Exit_Branch: {
-		const char *condition = valueName(c, exit.branch.condition);
-		fprintf(c->out, " test dword %s, -1\n", condition);
-		emitJump(c->out, "jnz", exit.branch.on_true);
+		emit(c, " test dword #, -1", exit.branch.condition);
+		emitJump(c, "jnz", exit.branch.on_true);
 
 
 		for (u32 k = 0; k < false_phis.len; k++) {
 			Inst inst  = c->ir.ptr[false_phis.ptr[k]];
-			fprintf(c->out, " mov %s, %s	; phi-out\n",
-				valueName(c, inst.phi_out.on_false),
-				loadTo(c, RAX, inst.phi_out.source));
+			emit(c, " mov #, R	; phi-out",
+				inst.phi_out.on_false, loadTo(c, RAX, inst.phi_out.source));
 		}
 
 		if (exit.branch.on_false->visited == visit_id)
-			emitJump(c->out, "jmp", exit.branch.on_false);
+			emitJump(c, "jmp", exit.branch.on_false);
 
 		emitBlockForward(c, exit.branch.on_false);
 		emitBlockForward(c, exit.branch.on_true);
 	} break;
 	case Exit_Switch: {
 		assert(!false_phis.len);
-		const char *condition = valueName(c, exit.switch_.value);
 		Cases cases = exit.switch_.cases;
 
 		for (u32 i = 0; i < cases.len; i++) {
-			fprintf(c->out, " cmp %s, %llu\n", condition, (ullong) cases.ptr[i].value);
-			emitJump(c->out, "je", cases.ptr[i].dest);
+			emit(c, " cmp #, L", exit.switch_.value, cases.ptr[i].value);
+			emitJump(c, "je", cases.ptr[i].dest);
 		}
 
-		emitJump(c->out, "jnz", exit.switch_.default_case);
+		emitJump(c, "jnz", exit.switch_.default_case);
 	} break;
 	case Exit_Return:
 		if (exit.ret != IR_REF_NONE) {
 			if (c->is_memory_return) {
-				copyTo(c, "r15", 0, "rsp", c->storage[exit.ret], valueSize(c, exit.ret));
-				fprintf(c->out, " mov rax, r15\n");
+				assert(!"TODO Memory returns");
+				copyTo(c, RAX, 0, RSP, c->storage[exit.ret], valueSize(c, exit.ret));
 			} else {
 				loadMaybeBigTo(c, RAX, RDX, exit.ret);
 			}
 		}
-		fprintf(c->out, " ret %lu\n\n", (ulong) c->stack_allocated);
+		emit(c, " add rsp, I", c->stack_allocated);
+		emit(c, " ret");
 		break;
 	case Exit_None: unreachable;
 	}
@@ -491,138 +490,124 @@ static void emitInstForward(Codegen *c, IrRef i) {
 	case Ir_Sub: triple(c, "sub", inst.binop.lhs, inst.binop.rhs, i); break;
 	case Ir_Mul: triple(c, "imul", inst.binop.lhs, inst.binop.rhs, i); break;
 	case Ir_Div:
-		fprintf(c->out, " xor rdx, rdx\n");
+		emit(c, " xor rdx, rdx");
 		loadTo(c, RAX, inst.binop.lhs);
-		fprintf(c->out, " idiv %s %s\n mov %s, %s\n",
-				sizeOp(inst.size), valueName(c, inst.binop.rhs), valueName(c, i),
-				registerSized(RAX, inst.size));
+		emit(c, " idiv Z #", sizeOp(inst.size), inst.binop.rhs);
+		emit(c, " mov #, R", i, registerSized(RAX, inst.size));
 		break;
 	case Ir_Mod:
-		fprintf(c->out, " xor rdx, rdx\n");
+		emit(c, " xor rdx, rdx");
 		loadTo(c, RAX, inst.binop.lhs);
-		fprintf(c->out, " idiv %s %s\n mov %s, %s\n",
-				sizeOp(inst.size), valueName(c, inst.binop.rhs), valueName(c, i),
-				registerSized(RDX, inst.size));
+		emit(c, " idiv Z #", sizeOp(inst.size), inst.binop.rhs);
+		emit(c, " mov #, R", i, registerSized(RDX, inst.size));
 		break;
 	case Ir_BitOr: triple(c, "or", inst.binop.lhs, inst.binop.rhs, i); break;
 	case Ir_BitXor: triple(c, "xor", inst.binop.lhs, inst.binop.rhs, i); break;
 	case Ir_BitAnd: triple(c, "and", inst.binop.lhs, inst.binop.rhs, i); break;
 	case Ir_BitNot: {
-		const char *reg = loadTo(c, RAX, inst.unop);
-		fprintf(c->out, "not %s\n"
-		     " mov %s, %s\n", reg, valueName(c, i), reg);
-
+		Register reg = loadTo(c, RAX, inst.unop);
+		emit(c, " not R", reg);
+		emit(c, " mov #, R", i, reg);
 	} break;
 	case Ir_LessThan: {
-		fprintf(c->out, " cmp %s, %s\n"
-		     " setl al\n"
-		     " movzx rsi, al\n"
-		     " mov %s, %s\n",
-		     valueName(c, inst.binop.lhs),
-		     loadTo(c, RAX, inst.binop.rhs),
-		     valueName(c, i),
-		     registerSized(RSI, inst.size));
+		emit(c, " cmp #, R", inst.binop.lhs, loadTo(c, RAX, inst.binop.rhs));
+		emit(c, " setl al");
+		emit(c, " movzx rsi, al");
+		emit(c, " mov #, R", i, registerSized(RSI, inst.size));
 	} break;
 	case Ir_LessThanOrEquals: {
-		fprintf(c->out, " cmp %s, %s\n"
-		     " setle al\n"
-		     " movzx rsi, al\n"
-		     " mov %s, %s\n",
-		     valueName(c, inst.binop.lhs),
-		     loadTo(c, RAX, inst.binop.rhs),
-		     valueName(c, i),
-		     registerSized(RSI, inst.size));
+		emit(c, " cmp #, R", inst.binop.lhs, loadTo(c, RAX, inst.binop.rhs));
+		emit(c, " setle al");
+		emit(c, " movzx rsi, al");
+		emit(c, " mov #, R", i, registerSized(RSI, inst.size));
 	} break;
 	case Ir_Equals: {
-		fprintf(c->out, " cmp %s, %s\n"
-		     " sete al\n"
-		     " movzx rsi, al\n"
-		     " mov %s, %s\n",
-		     valueName(c, inst.binop.lhs),
-		     loadTo(c, RAX, inst.binop.rhs),
-		     valueName(c, i),
-		     registerSized(RSI, inst.size));
+		emit(c, " cmp #, R", inst.binop.lhs, loadTo(c, RAX, inst.binop.rhs));
+		emit(c, " sete al");
+		emit(c, " movzx rsi, al");
+		emit(c, " mov #, R", i, registerSized(RSI, inst.size));
 	} break;
 	case Ir_ShiftLeft: {
 		loadTo(c, RCX, inst.binop.rhs);
-		const char *reg = loadTo(c, R8, inst.binop.rhs);
-		fprintf(c->out, " xor rax, rax\n"
-			" shld %s, rax\n"
-			" mov %s, %s\n",
-		    reg, valueName(c, i), reg);
+		Register shiftee = loadTo(c, R8, inst.binop.lhs);
+		emit(c, " xor rax, rax");
+		emit(c, " shld R, R, cl", shiftee, registerSized(RAX, inst.size));
+		emit(c, " mov #, R", i, shiftee);
 	} break;
 	case Ir_ShiftRight: {
 		loadTo(c, RCX, inst.binop.rhs);
-		const char *reg = loadTo(c, R8, inst.binop.rhs);
-		fprintf(c->out, " xor rax, rax\n"
-			" shrd %s, rax\n"
-			" mov %s, %s\n",
-		    reg, valueName(c, i), reg);
+		Register shiftee = loadTo(c, R8, inst.binop.lhs);
+		emit(c, " xor rax, rax");
+		emit(c, " shrd R, R, cl", shiftee, registerSized(RAX, inst.size));
+		emit(c, " mov #, R", i, shiftee);
+		loadTo(c, RCX, inst.binop.rhs);
 	} break;
 	case Ir_Truncate: {
-		const char *reg = registerSized(RAX, c->ir.ptr[i].size);
-		fprintf(c->out, " mov %s, %s\n", reg, valueName(c, inst.unop));
-		fprintf(c->out, " mov %s %s, %s\n", sizeOp(c->ir.ptr[i].size), valueName(c, i), reg);
+		Register reg = registerSized(RAX, c->ir.ptr[i].size);
+		emit(c, " mov R, #", reg, inst.unop);
+		emit(c, " mov Z #, R", sizeOp(c->ir.ptr[i].size), i, reg);
 	} break;
 	case Ir_SignExtend: {
-		const char *reg = registerSized(RSI, inst.size);
-		fprintf(c->out, " movsx%s %s, %s %s\n mov %s, %s\n",
-			(valueSize(c, inst.unop) > 2 ? "d" : ""), reg, sizeOp(valueSize(c, inst.unop)), valueName(c, inst.unop),
-			valueName(c, i), reg);
+		Register reg = registerSized(RSI, inst.size);
+		emit(c, " movsxZ R, Z #",
+			(valueSize(c, inst.unop) > 2 ? "d" : ""), reg, sizeOp(valueSize(c, inst.unop)), inst.unop);
+		emit(c, " mov #, R", i, reg);
 	} break;
 	case Ir_ZeroExtend: {
-		fprintf(c->out, " xor rax, rax\n mov %s, %s\n mov %s, %s\n",
-			registerSized(RAX, valueSize(c, inst.unop)),  valueName(c, inst.unop),
-			valueName(c, i), registerSized(RAX, inst.size));
+		emit(c, " xor rax, rax");
+		emit(c, " mov R, #", registerSized(RAX, valueSize(c, inst.unop)), inst.unop);
+		emit(c, " mov #, R", i, registerSized(RAX, inst.size));
 	} break;
-
 	case Ir_Store: {
-		copyTo(c, loadTo(c, RAX, inst.mem.address), 0, "rsp", c->storage[inst.mem.source], inst.size);
+		copyTo(c, loadTo(c, RAX, inst.mem.address), 0, RSP, c->storage[inst.mem.source], inst.size);
 	} break;
 	case Ir_Load: {
-		copyTo(c, "rsp", c->storage[i], loadTo(c, RAX, inst.mem.address), 0, inst.size);
+		copyTo(c, RSP, c->storage[i], loadTo(c, RAX, inst.mem.address), 0, inst.size);
 	} break;
 	case Ir_Access: {
-		copyTo(c, "rsp", c->storage[i],
-			"rsp", c->storage[inst.binop.lhs] + inst.binop.rhs, inst.size);
+		copyTo(c, RSP, c->storage[i],
+			RSP, c->storage[inst.binop.lhs] + inst.binop.rhs, inst.size);
 	} break;
 	case Ir_Parameter: {
 		bool bigg = inst.size > 8;
 		if (c->parameters_found + bigg < parameter_regs_count && !isMemory(inst.size)) {
 			u32 sizea = bigg ? 8 : inst.size;
-			fprintf(c->out, " mov [rsp+%lu], %s	; param\n", (ulong) c->storage[i],
+			emit(c, " mov [rsp+I], R	; param", c->storage[i],
 				registerSized(parameter_regs[c->parameters_found], sizea));
 			c->parameters_found++;
 			if (bigg) {
 				assert(c->parameters_found < parameter_regs_count);
-				fprintf(c->out, " mov [rsp+%lu], %s	; param\n", (ulong) c->storage[i] + 8,
+				emit(c, "mov [rsp+I], R	; param", c->storage[i] + 8,
 					registerSized(parameter_regs[c->parameters_found], inst.size - sizea));
 				c->parameters_found++;
 			}
 		}
 	} break;
 	case Ir_Constant:
-		fprintf(c->out, " mov %s %s, %lld\n", sizeOp(inst.size),
-				valueName(c, i), (long long) inst.constant);
+		assert(inst.size <= 8);
+		if (inst.size > 4 && inst.constant > INT32_MAX) {
+			emit(c, " mov Z #, I", sizeOp(4), i, (i32) inst.constant);
+			emit(c, " mov Z [rsp+I], I", sizeOp(4), c->storage[i] + 4, (u32) (inst.constant >> 32));
+		} else {
+			emit(c, " mov Z #, I", sizeOp(inst.size), i, (i32) inst.constant);
+		}
 		break;
 	case Ir_StackAlloc:
-		fprintf(c->out, " lea rax, [rsp+%lu]	; alloc\n",  (ulong) inst.alloc.known_offset);
-		fprintf(c->out, " mov %s, rax\n", valueName(c, i));
+		emit(c, " lea rax, [rsp+I]	; alloc", inst.alloc.known_offset);
+		emit(c, " mov #, rax", i);
 		break;
 	case Ir_Reloc:
 		assert(inst.size == 8);
-		fprintf(c->out, " mov qword %s, ", valueName(c, i));
 		String name = c->module.ptr[inst.reloc.id].name;
 		if (name.len)
-			fprintf(c->out, "_%.*s", STRING_PRINTAGE(name));
+			emit(c, " mov qword #, _S~L", i, name, inst.reloc.offset);
 		else
-			fprintf(c->out, "__%lu", (ulong) inst.reloc.id);
-		fprintf(c->out, "%+lld\n", (long long) inst.reloc.offset);
+			emit(c, " mov qword #, __I~L", i, inst.reloc.id, inst.reloc.offset);
 		break;
 	case Ir_PhiOut: {
 		if (inst.phi_out.on_true != IR_REF_NONE) {
-			copyTo(c, "rsp", c->storage[inst.phi_out.on_true],
-				"rsp", c->storage[inst.phi_out.source],
+			copyTo(c, RSP, c->storage[inst.phi_out.on_true],
+				RSP, c->storage[inst.phi_out.source],
 				valueSize(c, inst.phi_out.source));
 		}
 	} break;
@@ -637,11 +622,10 @@ static void emitInstForward(Codegen *c, IrRef i) {
 		ValuesSpan params = inst.call.parameters;
 		bool memory_return = isMemory(inst.size);
 
-		fprintf(c->out, "\t; call\n");
+		emit(c, "\t; call");
 		u32 param_slot = memory_return;
 		if (memory_return)
-			fprintf(c->out, " lea rdi, [rsp+%lu]\n",
-				(ulong) c->storage[i]);
+			emit(c, " lea rdi, #", i);
 
 		// SYTYL All kinds of copypasta between parameter taking and
 		// argument passing. Need to unify caller and callee definitions
@@ -664,30 +648,30 @@ static void emitInstForward(Codegen *c, IrRef i) {
 			u16 param_size = valueSize(c, param);
 			bool bigg = param_size > 8;
 			if (isMemory(param_size) || param_slot + bigg >= parameter_regs_count) {
-				copyTo(c, "rsp", stack_mem_pos, "rsp", c->storage[p], param_size);
+				copyTo(c, RSP, stack_mem_pos, RSP, c->storage[p], param_size);
 				stack_mem_pos += param_size;
+			} else if (bigg) {
+				loadMaybeBigTo(c, parameter_regs[param_slot], parameter_regs[param_slot+1], param);
+				param_slot += 2;
 			} else {
-				bool bigg = loadMaybeBigTo(c, parameter_regs[param_slot], parameter_regs[param_slot+1], param);
-				param_slot += 1 + bigg;
+				loadTo(c, parameter_regs[param_slot], param);
+				param_slot += 1;
 			}
 		}
 		assert(stack_mem_pos == 0);
 
 
 		if (stack_memory)
-			fprintf(c->out, " sub rsp, %lu\n", (ulong) stack_memory);
-		if (inst.call.is_vararg)
-			fprintf(c->out, " mov al, %d\n", (int) params.len);
-		fprintf(c->out, "  call qword [rsp+%lu]\n", (ulong) c->storage[inst.call.function_ptr] + stack_memory);
+			emit(c, " sub rsp, I", stack_memory);
+		emit(c, " call qword [rsp+I]", c->storage[inst.call.function_ptr] + stack_memory);
 		if (stack_memory)
-			fprintf(c->out, "  add rsp, %lu\n", (ulong) stack_memory);
+			emit(c, " add rsp, I", stack_memory);
 
 		if (!memory_return) {
-			fprintf(c->out, "  mov %s, %s\n", valueName(c, i),
-				registerSized(RAX, inst.size > 8 ? 8 : inst.size));
-			if (inst.size > 8) {
-				fprintf(c->out, "  mov [rsp+%lu], %s\n", (ulong) c->storage[i]+8,
-					registerSized(RDX, inst.size - 8));
+			bool bigg = inst.size > 8;
+			emit(c, " mov #, R", i, registerSized(RAX, bigg ? 8 : inst.size));
+			if (bigg) {
+				emit(c, " mov [rsp+I], R", c->storage[i]+8, registerSized(RDX, inst.size - 8));
 			}
 		}
 	} break;
@@ -695,8 +679,8 @@ static void emitInstForward(Codegen *c, IrRef i) {
 	}
 }
 
-static void emitJump(FILE *out, const char *inst, const Block *dest) {
-	fprintf(out, " %s .%.*s%lu\n\n", inst, STRING_PRINTAGE(dest->label), (ulong) dest->id);
+static void emitJump (Codegen *c, const char *inst, const Block *dest) {
+	emit(c, " Z .SI", inst, dest->label, dest->id);
 }
 
 // static bool isSpilled(Storage s) {
@@ -715,8 +699,8 @@ static inline Storage registerSize (u16 size) {
 	unreachable;
 }
 
-static inline const char *registerSized(Register stor, u16 size) {
-	return register_names[(stor & ~RSIZE_MASK) | registerSize(size)];
+static inline Register registerSized(Register stor, u16 size) {
+	return (stor & ~RSIZE_MASK) | registerSize(size);
 }
 
 static const char *sizeOp (u16 size) {
@@ -739,14 +723,183 @@ static bool isMemory(u16 size) {
 	return size > 16;
 }
 
-static const char *valueName (Codegen *c, IrRef ref) {
-	assert(ref != IR_REF_NONE);
-	return storageName(c, c->storage[ref]);
+static inline bool printable(char c) {
+	return c >= ' ' && c <= '~' && c != '"';
 }
 
-#define BUF 100
-static char buf[BUF] = {0};
-static const char *storageName (Codegen *c, Storage store) {
-	snprintf(buf, BUF, "[rsp+%lu]", (ulong) store);
-	return adupez(c->arena, buf);
+
+// Spending a bit of time to compress the assembly is totally worth it.
+static void emitDataLine (FILE *out, u32 len, const char *data) {
+	u32 raw_begin;
+	u32 string_begin;
+	u32 i = 0;
+
+	while (i < len) {
+		u32 end = i + (buf + BUF - insert) / 5 - 20;
+		if (end > len) end = len;
+
+		raw_begin = i;
+		while (i < end && !printable(data[i])) i++;
+		string_begin = i;
+		while (i < end && printable(data[i])) i++;
+
+		if (i - string_begin < 3) {
+			emitDataRaw(i - raw_begin, data + raw_begin);
+		} else {
+			emitDataRaw(string_begin - raw_begin, data + raw_begin);
+			emitDataString(i - string_begin, data + string_begin);
+		}
+
+		if (insert > buf + (BUF - MAX_LINE))
+			flushit(out);
+	}
+}
+
+static void emitDataString (u32 len, const char *data) {
+	memcpy(insert, " db \"", 5);
+	insert += 5;
+	memcpy(insert, data, len);
+	insert += len;
+	memcpy(insert, "\"\n", 2);
+	insert += 2;
+}
+
+static void emitDataRaw (u32 len, const char *data) {
+	assert(len * 5 < BUF - MAX_LINE);
+	if (len == 0)
+		return;
+
+	static const char hexchars[] = "0123456789abcdef";
+
+	memcpy(insert, " db ", 4);
+	insert += 4;
+	u32 pos = 0;
+	while (pos < len) {
+		uchar c = data[pos++];
+		*insert++ = '0';
+		if (c/16) {
+			*insert++ = hexchars[c/16];
+			*insert++ = hexchars[c%16];
+		} else if (c % 16) {
+			*insert++ = hexchars[c%16];
+		}
+		*insert++ = 'h';
+		*insert++ = ',';
+	}
+	insert[-1] = '\n';
+}
+
+
+/*
+
+Formatting:
+
+Z const char *
+S String
+~ signed
+I 32 bit
+L 64 bit
+# IrRef
+R Register
+H hex char
+
+*/
+
+
+static void emitInt(u64 i);
+
+
+static void emit (Codegen *c, const char *fmt, ...) {
+	va_list args;
+	va_start(args, fmt);
+	for (const char *p = fmt; *p; p++) {
+		switch (*p) {
+		case 'Z': {
+			const char *str = va_arg(args, const char *);
+			u32 len = strlen(str);
+			if (len)
+				memcpy(insert, str, len);
+			insert += len;
+		} break;
+		case 'S': {
+			String str = va_arg(args, String);
+			if (str.len)
+				memcpy(insert, str.ptr, str.len);
+			insert += str.len;
+		} break;
+		case 'R': {
+			const char *name = register_names[va_arg(args, Register)];
+			u32 len = strlen(name);
+			memcpy(insert, name, len);
+			insert += len;
+		} break;
+		case '#': {
+			memcpy(insert, "[rsp+", 5);
+			insert += 5;
+			emitInt(c->storage[va_arg(args, IrRef)]);
+			memcpy(insert, "]", 1);
+			insert += 1;
+		} break;
+		case 'I':
+			emitInt(va_arg(args, u32));
+			break;
+		case 'L':
+			emitInt(va_arg(args, u64));
+			break;
+		case '~': {
+			p++;
+			if (*p == 'I') {
+				i32 val = va_arg(args, i32);
+				if (val >= 0) {
+					*insert++ = '+';
+					emitInt(val);
+				} else {
+					// TODO Will break for I32_MIN, which can not be inverted.
+					*insert++ = '-';
+					emitInt(-val);
+				}
+			} else {
+				assert(*p == 'L');
+				i64 val = va_arg(args, i64);
+				if (val >= 0) {
+					*insert++ = '+';
+					emitInt(val);
+				} else {
+					// TODO Will break for I32_MIN, which can not be inverted.
+					*insert++ = '-';
+					emitInt(-val);
+				}
+			}
+		} break;
+		default:
+			assert(!(*p >= 'A' && *p <= 'Z'));
+			*insert++ = *p;
+		}
+	}
+	*insert++ = '\n';
+	va_end(args);
+
+	if (insert > buf + (BUF - MAX_LINE))
+		flushit(c->out);
+}
+
+static void flushit (FILE *f) {
+	(void) f;
+	fwrite(buf, 1, insert-buf, f);
+	insert = buf;
+}
+
+static void emitInt (u64 i) {
+	if (i < 9) {
+		*insert++ = '0' + i;
+		return;
+	}
+
+	u64 place = i < 1000000U ? 100000U : 10000000000000000000ULL;
+	while (i / place == 0) place /= 10;
+
+	while (place != 0) {
+		*insert++ = '0' + (i / place) % 10;
+		place /= 10;
+	}
 }

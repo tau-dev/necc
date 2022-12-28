@@ -14,12 +14,12 @@ typedef enum {
 } Category;
 
 
-// PERFOMANCE Reduce size
+// PERFORMANCE Reduce size
 typedef struct {
 	Type typ;
 
 	IrRef inst;
-	// ReferenceClass. ir holds the direct value only for
+	// ReferenceClass. inst holds the direct value only for
 	// Reference_RValue, pointer to the actual value otherwise.
 	u8 category;
 	u8 no_discard;

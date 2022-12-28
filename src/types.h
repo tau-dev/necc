@@ -27,8 +27,9 @@ typedef enum {
 	Kind_Struct,
 	Kind_Union_Named,
 	Kind_Union,
-	Kind_Pointer,
+	Kind_Enum_Named,
 	Kind_Enum,
+	Kind_Pointer,
 	Kind_Array,
 	Kind_VLArray,
 	// Decays to Kind_FunctionPtr by rvalue() conversion. Handled

@@ -15,12 +15,12 @@ Combined lexer and preprocessor.
 
 #define ARRSIZE(x) sizeof(x)/sizeof(x[0])
 
-bool isSpace(char);
-bool isAlpha(char c);
-bool isHexDigit(char c);
-int hexToInt(char c);
-bool isDigit(char c);
-bool isAlnum(char c);
+static inline bool isSpace(char);
+static inline bool isAlpha(char c);
+static inline bool isHexDigit(char c);
+static inline int hexToInt(char c);
+static inline bool isDigit(char c);
+static inline bool isAlnum(char c);
 
 
 typedef struct {
@@ -200,9 +200,6 @@ static _Noreturn void lexerrorOffset (SourceFile source, u32 offset, const char 
     va_end(args);
     fprintf(stderr, ".\n");
 
-// #ifndef NDEBUG
-// 	PRINT_STACK_TRACE;
-// #endif
 	exit(1);
 }
 
@@ -215,9 +212,6 @@ static _Noreturn void lexerror (SourceFile source, const char *pos, const char *
     va_end(args);
     fprintf(stderr, ".\n");
 
-// #ifndef NDEBUG
-// 	PRINT_STACK_TRACE;
-// #endif
 	exit(1);
 }
 
@@ -229,9 +223,6 @@ static void lexwarning (SourceFile source, const char *pos, const char *msg, ...
     vfprintf(stderr, msg, args);
     va_end(args);
     fprintf(stderr, ".\n");
-// #ifndef NDEBUG
-// 	PRINT_STACK_TRACE;
-// #endif
 }
 
 String processStringLiteral(Arena *arena, String src);
@@ -390,7 +381,9 @@ static Token getToken (Arena *str_arena, SourceFile src, SymbolList *syms, const
 			if (*pos == '\\') pos++;
 			pos++;
 		}
-		// TODO Error reporting
+		if (*pos == '\0')
+			lexerror(src, pos, "missing close paren");
+
 		String val = processStringLiteral(str_arena, (String) {pos - begin, begin});
 		tok = (Token) {Tok_String, .val.symbol_idx = getSymbolId(syms, val)};
 	} break;
@@ -574,7 +567,7 @@ Tokenization lex (Arena *generated_strings, String filename, Paths paths) {
 		const char *pos;
 	} Inclusion;
 
-	Arena macro_arena = create_arena(2048);
+	Arena macro_arena = create_arena(256 * 1024L);
 	Tokenization t = {0};
 
 	StringMap sources = {0};
@@ -635,7 +628,6 @@ Tokenization lex (Arena *generated_strings, String filename, Paths paths) {
 		if (tok.kind == Tok_PreprocDirective) {
 			if (!line_begin)
 				lexerror(source, begin, "a preprocessor directive must be the first token of a line");
-			String directive = t.symbols.ptr[tok.val.symbol_idx].name;
 			while (pos[0] == ' ' || pos[0] == '\t') pos++;
 
 			enum Directive dir = t.symbols.ptr[tok.val.symbol_idx].directive;
@@ -688,6 +680,8 @@ Tokenization lex (Arena *generated_strings, String filename, Paths paths) {
 					}
 					pos++;
 				}
+				if (pos == begin)
+					lexerror(source, pos, "#include expects <FILENAME> or \"FILENAME\"");
 
 				String includefilename = {pos - begin, begin};
 
@@ -791,7 +785,7 @@ Tokenization lex (Arena *generated_strings, String filename, Paths paths) {
 
 			} break;
 			default:
-				lexerror(source, directive.ptr, "unknown preprocessor directive");
+				lexerror(source, begin, "unknown preprocessor directive");
 			}
 			first_line_in_file = false;
 			continue;
@@ -958,7 +952,7 @@ static bool expandInto (const ExpansionParams ex, Tokenization *dest, bool is_ar
 }
 
 // Allocates the argument list.
-// PERFOMANCE A single Tokenization per argument list should be
+// PERFORMANCE A single Tokenization per argument list should be
 // enough if Replacements store offset and length.
 static Tokenization *takeArguments(const ExpansionParams ex, Macro *mac) {
 	assert(mac->is_function_like);
@@ -1213,7 +1207,7 @@ static String restOfLine (SourceFile source, const char **pos) {
 static SpaceClass tryGobbleSpace (SourceFile source, const char **p) {
 	const char *pos = *p;
 	SpaceClass spacing = Space_Regular;
-	while (true) {
+	while (*pos) {
 		// TODO Do I really want to handle the ??/ trigraph everywhere
 		// that newlines need to be skipped? Consider the performance
 		// impact versus replacing all trigraphs on file input.
@@ -1229,17 +1223,17 @@ static SpaceClass tryGobbleSpace (SourceFile source, const char **p) {
 				lexerror(source, begin, "comment must end before end of file");
 			pos += 2;
 		} else {
-			if (!isSpace(pos[0])) {
-				if (pos == *p)
-					return Space_None;
-				*p = pos;
-				return spacing;
-			}
+			if (!isSpace(pos[0]))
+				break;
 			if (pos[0] == '\n')
 				spacing = Space_Linebreak;
 			pos++;
 		}
 	}
+	if (pos == *p)
+		return Space_None;
+	*p = pos;
+	return spacing;
 }
 
 // PERFORMANCE This function is potentially a very hot path. Optimize!
@@ -1653,7 +1647,7 @@ void strPrintToken (char **dest, const char *end, Symbol *symbols, Token t) {
 	}
 }
 
-bool isSpace (char c) {
+static inline bool isSpace (char c) {
 	switch (c) {
 		case ' ':
 		case '\n':
@@ -1667,18 +1661,18 @@ bool isSpace (char c) {
 	}
 }
 
-bool isAlpha (char c) {
+static inline bool isAlpha (char c) {
 	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_';
 }
 
-bool isHexDigit (char c) {
+static inline bool isHexDigit (char c) {
 	if (c >= '0' && c <= '9')
 		return true;
 	c |= 32;
 	return c >= 'a' && c <= 'f';
 }
 
-int hexToInt (char c) {
+static inline int hexToInt (char c) {
 	if (c >= '0' && c <= '9')
 		return c - '0';
 	c |= 32;
@@ -1686,11 +1680,11 @@ int hexToInt (char c) {
 	return c - 'a';
 }
 
-bool isDigit (char c) {
+static inline bool isDigit (char c) {
 	return c >= '0' && c <= '9';
 }
 
-bool isAlnum (char c) {
+static inline bool isAlnum (char c) {
 	return isAlpha(c) || isDigit(c);
 }
 
@@ -1707,7 +1701,10 @@ static const char *defineMacro (
 
 	Macro *mac = ALLOC(arena, Macro);
 	*mac = (Macro) {name, source.idx};
-	getSymbol(symbols, name)->macro = mac;
+	Symbol *sym = getSymbol(symbols, name);
+	if (sym->macro)
+		free(sym->macro->tokens.ptr);
+	sym->macro = mac;
 
 
 	u32 param_count = 0;

@@ -6,7 +6,7 @@
 typedef struct Target {
 	Type ptrdiff;
 	Type intptr;
-	Type enum_int;
+	BasicType enum_int;
 	PrimitiveSize ptr_size;
 	PrimitiveSize int_size;
 	PrimitiveSize typesizes[Int_unsigned];
