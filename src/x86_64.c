@@ -627,7 +627,7 @@ static void emitInstForward(Codegen *c, IrRef i) {
 		if (memory_return)
 			emit(c, " lea rdi, #", i);
 
-		// SYTYL All kinds of copypasta between parameter taking and
+		// STYLE All kinds of copypasta between parameter taking and
 		// argument passing. Need to unify caller and callee definitions
 		// per ABI.
 		u32 stack_memory = 0;
@@ -663,6 +663,9 @@ static void emitInstForward(Codegen *c, IrRef i) {
 
 		if (stack_memory)
 			emit(c, " sub rsp, I", stack_memory);
+
+		// Necessary for va-arg calls. TODO Mark up call instructions with that info.
+		emit(c, " mov eax, 0", stack_memory);
 		emit(c, " call qword [rsp+I]", c->storage[inst.call.function_ptr] + stack_memory);
 		if (stack_memory)
 			emit(c, " add rsp, I", stack_memory);
@@ -776,14 +779,16 @@ static void emitDataRaw (u32 len, const char *data) {
 	u32 pos = 0;
 	while (pos < len) {
 		uchar c = data[pos++];
-		*insert++ = '0';
+		if (c > 9 || c == 0)
+			*insert++ = '0';
 		if (c/16) {
 			*insert++ = hexchars[c/16];
 			*insert++ = hexchars[c%16];
 		} else if (c % 16) {
 			*insert++ = hexchars[c%16];
 		}
-		*insert++ = 'h';
+		if (c > 9)
+			*insert++ = 'h';
 		*insert++ = ',';
 	}
 	insert[-1] = '\n';

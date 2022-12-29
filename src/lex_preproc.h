@@ -168,8 +168,6 @@ typedef struct {
 typedef LIST(SourceFile*) FileList;
 
 
-
-
 // All members allocated with malloc
 typedef struct {
 	FileList files;
@@ -180,7 +178,7 @@ typedef struct {
 	u32 capacity;
 
 	SymbolList symbols;
-	Symbol *func_sym; // STYLE THIS IS TERRYBLY CRUFTY
+	Symbol *func_sym; // STYLE THIS IS TERRIBLY CRUFTY
 } Tokenization;
 
 typedef struct {
@@ -189,8 +187,8 @@ typedef struct {
 
 	StringList command_line_macros;
 	StringList system_macros;
-} Paths; // Now a significant misnomer. Oh well.
+} LexParams;
 
 typedef LIST(Token) Token_List;
 
-Tokenization lex(Arena *generated_strings, String filename, Paths paths);
+Tokenization lex(Arena *generated_strings, String filename, LexParams paths);

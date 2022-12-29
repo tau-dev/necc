@@ -30,6 +30,10 @@ typedef enum {
 	F_NoStdInc,
 	F_EmitIr,
 	F_EmitAssembly,
+	F_EmitExe,
+	F_EmitObj,
+	F_EmitDeps,
+	F_EmitLocalDeps,
 
 	F_OptSimple,
 	F_OptStoreLoad,
@@ -43,6 +47,7 @@ static Name flags[] = {
 	{"v", F_Version},
 	{"version", F_Version},
 	{"D", F_Define},
+	{"def", F_Define},
 	{"g", F_Debug},
 	{"debug", F_Debug},
 	{"std", F_Standard},
@@ -50,10 +55,19 @@ static Name flags[] = {
 	{"I", F_Include},
 	{"stdinc", F_StdInc},
 	{"nostdinc", F_NoStdInc},
+
 	{"ir", F_EmitIr},
 	{"as", F_EmitAssembly},
+	{"o", F_EmitExe},
+	{"out", F_EmitExe},
+	{"c", F_EmitObj},
+	{"obj", F_EmitObj},
+	{"M", F_EmitDeps},
+	{"deps", F_EmitDeps},
+	{"MM", F_EmitLocalDeps},
+	{"localdeps", F_EmitLocalDeps},
+
 	{"O", F_OptSimple},
-	{"O1", F_OptSimple},
 	{"Ostore-load", F_OptStoreLoad},
 	{"Werr", F_Werror},
 	{"Werror", F_Werror},
@@ -65,39 +79,40 @@ const char *help_string = "Usage:\n"
 	"  %s [options] file...\n"
 	"\n"
 	"Options:\n"
-	" -v, -version    Print the compiler version.\n"
-	" -g, -debug      Emit debug information (TODO).\n"
+	" -v/-version     Print the compiler version.\n"
+	" -g/-debug       Emit debug information (TODO).\n"
 	" -std <version>  Select the used version of the C standard. Options:\n"
 	"                   c89, c99, c11/c17, c23/latest, gnu, ms, lax.\n"
 	" -I <path>       Add <path> as an include directory.\n"
 	" -stdinc <path>  Add <path> as a standard library headers include directory.\n"
-	" -D <def>        Define a preprocessor macro. <def> may be a name, which will be defined as ‘1’, or a name followed by ‘=’ and the intended replacement list.\n"
-	" -nostdinc       Disable standard include paths.\n"
+	" -D/-def <macro> Define a preprocessor macro. <macro> should be the name of the macro, optionally followed by ‘=’ and the intended replacement list.\n"
+	" -nostdinc       Disable default standard include paths.\n"
 	" -nostdlib       Do not link to the standard library. (TODO)\n"
 	" -simple-types   Print types (in declaration lists or error messages) in an easier-to-parse left-to-right syntax. (TODO)\n"
-	" -Werr, -Werror  Fail the compilation when a warning is generated.\n"
+	" -Werr/-Werror   Fail the compilation if warnings are generated.\n"
 	"\n"
-	"The following output options write to stdout by default, or may be followed by ‘=<FILNAME>’ to specify an output file. Default: ‘-as’.\n"
-	" -o, -out        Generate an executable. (TODO)\n"
-	" -c, -obj        Generate an object file. (TODO)\n"
+	"The following output options write to stdout by default, or may be followed by ‘=<FILENAME>’ to specify an output file. Default: ‘-o=a.out’.\n"
+	" -o/-out         Generate an executable.\n"
+	" -c/-obj         Generate an object file.\n"
 	" -lib            Generate an archive. (TODO)\n"
-	" -so, -dll       Generate a shared/dynamically linked library. (TODO)\n"
+	" -so/-dll        Generate a shared/dynamically linked library. (TODO)\n"
 	" -as             Generate assembly code in the flat assembler format.\n"
 	" -cpp            Print the preprocessed source. (TODO)\n"
-	" -M, -deps       Print a Makefile-compatible dependency list of all #included files. (TODO)\n"
+	" -M/-deps        Print a Makefile-compatible dependency list of all #included files.\n"
+	" -MM/-localdeps  Same as above, but do not mention system header files.\n"
 	" -decls          Print a list of top-level declarations in the code. (TODO)\n"
 	" -all-decls      Print a list of all declarations in the code. (TODO)\n"
 	" -std-decls      Print a list of all declarations in the code, including those from standard library headers. (TODO)\n"
 	"                   Declaration lists are a sequence of lines consisting of ‘<filename>:<line>:<column>:<def-kind>:<name>:<type>’,\n"
 	"                   where a non-top-level <name> is qualified by a ‘.’-separated path of its containers,\n"
-	"                   and <def-kind> is either ‘type’, ‘macro’, ‘decl’, ‘tentative-def’ or ‘def’.\n"
+	"                   and <def-kind> is either ‘decl’, ‘def’, ‘type’ or ‘macro’.\n"
 	"\n"
 	"Optimizations:\n"
-	" -O, -O1         Perform simple optimizations: -Ostore-load.\n"
+	" -O              Perform optimizations: -Ostore-load.\n"
 	" -Ostore-load    Fold simple store-load sequences.\n"
 	"\n"
-	"For debugging the compiler:\n"
-	" -ir             Print the intermediate representation.\n"
+	"Options to assist in fixing compiler errors:\n"
+	" -ir             (Output option) Print the intermediate representation.\n"
 	" -crash          Crash when generating an error.\n"
 	"\n";
 
@@ -171,11 +186,13 @@ Target target_x64_linux_gcc = {
 };
 
 static String checkIncludePath(Arena *, const char *path);
+static void emitIr(Arena *arena, const char *ir_out, Module module);
+static void emitDeps(const char *deps_out, const char *out_name, FileList files, bool emit_system_files);
+static const char *concat(Arena *arena, ...);
 
 int main (int argc, char **args) {
 	String input = {0};
 	Arena arena = create_arena(256 * 1024);
-	printf("sizeof(Inst): %d\n", (int) sizeof(Inst));
 
 	Options opt = {
 		.target = target_x64_linux_gcc,
@@ -184,12 +201,17 @@ int main (int argc, char **args) {
 		.warn_compare = true,
 	};
 
-	const char *assembly_out = NULL;
 	const char *ir_out = NULL;
+	const char *assembly_out = NULL;
+	const char *obj_out = NULL;
+	const char *exe_out = NULL;
+	const char *deps_out = NULL;
+	const char *localdeps_out = NULL;
+
 	bool stdinc = true;
 	bool opt_store_load = false;
 
-	Paths paths = {0};
+	LexParams paths = {0};
 
 	for (int i = 1; i < argc; i++) {
 		if (args[i][0] == '-') {
@@ -213,26 +235,30 @@ int main (int argc, char **args) {
 			case F_Debug: opt.gen_debug = true; break;
 			case F_EmitIr: setOut(&ir_out, direct_arg); break;
 			case F_EmitAssembly: setOut(&assembly_out, direct_arg); break;
-			case F_Standard:
-				i++;
-				i32 v = find(args[i], versions);
+			case F_EmitObj: setOut(&obj_out, direct_arg); break;
+			case F_EmitExe: setOut(&exe_out, direct_arg); break;
+			case F_EmitDeps: setOut(&deps_out, direct_arg); break;
+			case F_EmitLocalDeps: setOut(&localdeps_out, direct_arg); break;
+			case F_Standard: {
+				const char *arg = direct_arg ? direct_arg : args[++i];
+				i32 v = find(arg, versions);
 				if (v == -1)
 					fprintf(stderr, "%swarning: %sIgnoring unknown version name %s\n", YELLOW, RESET, args[i]);
 				else
 					opt.target.version = v;
-				break;
-			case F_Include:
-				i++;
-				PUSH(paths.user_include_dirs, checkIncludePath(&arena, args[i]));
-				break;
+			} break;
+			case F_Include: {
+				const char *arg = direct_arg ? direct_arg : args[++i];
+				PUSH(paths.user_include_dirs, checkIncludePath(&arena, arg));
+			} break;
 			case F_Define:
 				i++;
 				PUSH(paths.command_line_macros, zstr(args[i]));
 				break;
-			case F_StdInc:
-				i++;
-				PUSH(paths.sys_include_dirs, checkIncludePath(&arena, args[i]));
-				break;
+			case F_StdInc: {
+				const char *arg = direct_arg ? direct_arg : args[++i];
+				PUSH(paths.sys_include_dirs, checkIncludePath(&arena, arg));
+			} break;
 			case F_NoStdInc: stdinc = false; break;
 			case F_OptSimple:
 				opt_store_load = true;
@@ -247,17 +273,32 @@ int main (int argc, char **args) {
 		}
 	}
 
-	if (input.ptr == NULL)
+	if (!input.len)
 		generalFatal("Please supply a file name. (Use \"-h\" to show usage information.)\n");
 
 	if (!had_output)
-		assembly_out = stdout_marker;
+		exe_out = "a.out";
+
+// 	char tmp_obj[L_tmpnam] = {0};
+// 	char tmp_asm[L_tmpnam] = {0};
+
+	if (exe_out && !obj_out) {
+// 		tmpnam(tmp_obj);
+// 		obj_out = tmp_obj;
+		obj_out = "/tmp/a.obj";
+	}
+	if (obj_out && !assembly_out) {
+// 		tmpnam(tmp_asm);
+// 		assembly_out = tmp_asm;
+		assembly_out = "/tmp/a.s";
+	}
 
 	i32 i;
 	for (i = input.len - 1; i >= 0; i--) {
 		if (input.ptr[i] == '/')
 			break;
 	}
+	String input_directory = {i+1, input.ptr};
 
 	if (stdinc) {
 		PUSH(paths.sys_include_dirs, zstr(MUSL_DIR "/arch/generic/"));
@@ -265,7 +306,7 @@ int main (int argc, char **args) {
 		PUSH(paths.sys_include_dirs, zstr(MUSL_DIR "/obj/include/"));
 		PUSH(paths.sys_include_dirs, zstr(MUSL_DIR "/include/"));
 	}
-	PUSH(paths.user_include_dirs, ((String) {i+1, input.ptr}));
+	PUSH(paths.user_include_dirs, input_directory);
 
 
 	PUSH(paths.system_macros, zstr("__STDC__"));
@@ -299,15 +340,26 @@ int main (int argc, char **args) {
 	}
 
 
-	// The Real Work happens now.
 
+	// The Real Work happens now.
 	Tokenization tokens = lex(&arena, input, paths);
+
+	const char *out_name = exe_out ? exe_out :
+		obj_out ? obj_out : "a.out";
+	if (deps_out)
+		emitDeps(deps_out, out_name, tokens.files, true);
+	if (localdeps_out)
+		emitDeps(localdeps_out, out_name, tokens.files, false);
+
+	if (!ir_out && !assembly_out && !obj_out && !exe_out)
+		return 0;
+
 	parse(&arena, tokens, &opt, &module);
 
 	if (opt.emitted_warnings && opt.error_on_warnings)
 		generalFatal("generated warnings");
 
-	// Analyses and transformations:
+	// Analyses and transformations
 	for (u32 i = 0; i < module.len; i++) {
 		StaticValue *val = &module.ptr[i];
 		if (val->def_state == Def_Defined && val->def_kind == Static_Function) {
@@ -321,51 +373,26 @@ int main (int argc, char **args) {
 		}
 	}
 
-	// Output:
+	// Output
 	if (ir_out) {
-		FILE *dest = openOut(ir_out);
-		for (u32 i = 0; i < module.len; i++) {
-			StaticValue val = module.ptr[i];
-			if (val.is_public)
-				fprintf(dest, "public ");
-
-			if (val.def_state != Def_Defined) {
-				fprintf(dest, "extern %.*s\n", STRING_PRINTAGE(val.name));
-			} else if (val.def_kind == Static_Function) {
-				fprintf(dest, "%s:\n", printDeclarator(&arena, val.type, val.name));
-				printBlock(dest, val.function_entry, val.function_ir);
-			} else {
-				if (val.type.qualifiers & Static_Variable)
-					fprintf(dest, "variable ");
-				else
-					fprintf(dest, "constant ");
-				String name = val.name;
-				if (name.len == 0)
-					name = zstr("[anon]");
-				fprintf(dest, "%d (%.*s):\n", (int) i, STRING_PRINTAGE(name));
-
-				bool is_string = true;
-				String data = val.value_data;
-				for (u32 i = 0; i < data.len - 1; i++) {
-					if (data.ptr[i] < 32 || (uchar) data.ptr[i] >= 128)
-						is_string = false;
-				}
-				is_string = is_string && data.ptr[data.len - 1] == 0;
-				if (is_string) {
-					fprintf(dest, "\"%.*s\"\n", STRING_PRINTAGE(data));
-				} else {
-					for (u32 i = 0; i < data.len; i++) {
-						fprintf(dest, "%02hhx ", data.ptr[i]);
-					}
-					fprintf(dest, "\n");
-				}
-			}
-		}
+		emitIr(&arena, ir_out, module);
 	}
 
-	if (assembly_out)
-		emitX64AsmSimple(openOut(assembly_out), &arena, module, &target_x64_linux_gcc);
-
+	if (assembly_out) {
+		FILE *dest = openOut(assembly_out);
+		emitX64AsmSimple(dest, &arena, module, &target_x64_linux_gcc);
+		fclose(dest);
+	}
+	if (obj_out) {
+		assert(assembly_out);
+		const char *cmd = concat(&arena, "fasm -m500000 \"", assembly_out, "\" \"", obj_out, "\"", 0);
+		system(cmd);
+	}
+	if (exe_out) {
+		assert(obj_out);
+		const char *cmd = concat(&arena, "musl-gcc -static \"", obj_out, "\" -o", exe_out, 0);
+		system(cmd);
+	}
 
 #ifndef NDEBUG
 	free_arena(&arena, "code");
@@ -393,7 +420,7 @@ int main (int argc, char **args) {
 }
 
 
-static String checkIncludePath(Arena *arena, const char *path) {
+static String checkIncludePath (Arena *arena, const char *path) {
 	if (!isDirectory(path))
 		generalFatal("could not open include path %s.\n", path);
 	u32 len = strlen(path);
@@ -406,3 +433,90 @@ static String checkIncludePath(Arena *arena, const char *path) {
 	return (String) {len + 1, c};
 }
 
+
+static void emitIr (Arena *arena, const char *ir_out, Module module) {
+	FILE *dest = openOut(ir_out);
+	for (u32 i = 0; i < module.len; i++) {
+		StaticValue val = module.ptr[i];
+		if (val.is_public)
+			fprintf(dest, "public ");
+
+		if (val.def_state != Def_Defined) {
+			fprintf(dest, "extern %.*s\n", STRING_PRINTAGE(val.name));
+		} else if (val.def_kind == Static_Function) {
+			fprintf(dest, "%s:\n", printDeclarator(arena, val.type, val.name));
+			printBlock(dest, val.function_entry, val.function_ir);
+		} else {
+			if (val.type.qualifiers & Static_Variable)
+				fprintf(dest, "variable ");
+			else
+				fprintf(dest, "constant ");
+			String name = val.name;
+			if (name.len == 0)
+				name = zstr("[anon]");
+			fprintf(dest, "%d (%.*s):\n", (int) i, STRING_PRINTAGE(name));
+
+			bool is_string = true;
+			String data = val.value_data;
+			for (u32 i = 0; i < data.len - 1; i++) {
+				if (data.ptr[i] < 32 || (uchar) data.ptr[i] >= 128)
+					is_string = false;
+			}
+			is_string = is_string && data.ptr[data.len - 1] == 0;
+			if (is_string) {
+				fprintf(dest, "\"%.*s\"\n", STRING_PRINTAGE(data));
+			} else {
+				for (u32 i = 0; i < data.len; i++) {
+					fprintf(dest, "%02hhx ", data.ptr[i]);
+				}
+				fprintf(dest, "\n");
+			}
+		}
+	}
+	fclose(dest);
+}
+
+static void emitDeps (const char *deps_out, const char *out_name, FileList files, bool emit_system_files) {
+	const u32 max_line = 80;
+	FILE *dest = openOut(deps_out);
+
+	fprintf(dest, "%s:", out_name);
+	u32 line_length = strlen(out_name) + 1;
+	for (u32 i = 0; i < files.len; i++) {
+		SourceFile *f = files.ptr[i];
+		if (f->kind == Source_Regular || (f->kind == Source_StandardHeader && emit_system_files)) {
+			u32 elem_length = f->path.len + f->name.len + 1;
+			if (line_length + elem_length > max_line) {
+				fprintf(dest, " \\\n ");
+				line_length = 1;
+			}
+			fprintf(dest, " %.*s%.*s", STRING_PRINTAGE(f->path), STRING_PRINTAGE(f->name));
+			line_length += elem_length;
+		}
+	}
+	fprintf(dest, "\n");
+	fclose(dest);
+}
+
+static const char *concat (Arena *arena, ...) {
+	va_list args;
+	va_start(args, arena);
+	u32 len = 1;
+	for (const char *str = va_arg(args, const char*); str; str = va_arg(args, const char*)) {
+		len += strlen(str);
+	}
+
+	char *joined = aalloc(arena, len);
+	char *insert = joined;
+	va_end(args);
+	va_start(args, arena);
+	for (const char *str = va_arg(args, const char*); str; str = va_arg(args, const char*)) {
+		u32 l = strlen(str);
+		memcpy(insert, str, l);
+		insert += l;
+	}
+	va_end(args);
+
+	joined[len-1] = 0;
+	return joined;
+}

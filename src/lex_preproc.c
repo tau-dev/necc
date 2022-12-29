@@ -561,7 +561,7 @@ static const char *defineMacro(Arena *arena, Arena *generated_strings, SymbolLis
 static void predefineMacros(Arena *arena, Arena *genrated_strings, SymbolList *, FileList *, StringList to_define, SourceKind);
 static bool tokenHasSymbol(TokenKind k);
 
-Tokenization lex (Arena *generated_strings, String filename, Paths paths) {
+Tokenization lex (Arena *generated_strings, String filename, LexParams paths) {
 	typedef struct {
 		u16 file;
 		const char *pos;

@@ -69,10 +69,11 @@ char *adupez(Arena *arena, const char *c) {
 
 
 void free_arena(Arena* arena, const char *name) {
-#ifndef NDEBUG
-	fprintf(stderr, "Arena freeing %llu KiB of %s\n", (unsigned long long) arena->total_used / 1024, name);
-	fprintf(stderr, "%llu calls to malloc so far.\n", (unsigned long long) allocations);
-#endif
+	(void) name;
+// #ifndef NDEBUG
+// 	fprintf(stderr, "Arena freeing %llu KiB of %s\n", (unsigned long long) arena->total_used / 1024, name);
+// 	fprintf(stderr, "%llu calls to malloc so far.\n", (unsigned long long) allocations);
+// #endif
 	while (arena->last_block != NULL) {
 		ArenaBlock *next = arena->last_block->next;
 		free(arena->last_block);
