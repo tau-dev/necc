@@ -1,6 +1,6 @@
 #pragma once
 
-#include "ir.h"
+#include "arena.h"
 
 typedef struct Type Type;
 typedef struct Declaration Declaration;
@@ -63,6 +63,10 @@ enum {
 	Qualifier_Atomic = 8,
 };
 
+
+// TODO The only reason for inner Types not to be const* is that the
+// declarator parser needs to do some crufty fix-ups. Make that better!
+
 typedef struct {
 	Type *rettype;
 	DeclList parameters;
@@ -98,11 +102,6 @@ typedef struct Type {
 	};
 } Type;
 
-struct Function {
-	FunctionType type;
-	Block *entry;
-	IrList ir;
-};
 
 typedef struct CompoundMember {
 	Type type;

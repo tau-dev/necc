@@ -15,8 +15,20 @@ typedef struct Function Function;
 typedef u32 IrRef;
 typedef SPAN(IrRef) ValuesSpan;
 typedef LIST(IrRef) IrRefList;
-typedef LIST(Inst) IrList;
 typedef LIST(Block*) Blocks;
+
+typedef struct {
+	u16 size;
+} Parameter;
+typedef SPAN(Parameter) ParameterSpan;
+
+typedef struct {
+	u32 len;
+	u32 capacity;
+	Inst *ptr;
+	SPAN(Parameter) params;
+	Block *entry;
+} IrList;
 
 
 typedef struct {
@@ -38,7 +50,9 @@ typedef enum {
 	Ir_StackDealloc, // Not referred to
 	Ir_Copy,
 	Ir_Load,
+	Ir_LoadVolatile,
 	Ir_Store, // Not referred to
+	Ir_StoreVolatile, // Not referred to
 
 	Ir_Access,
 	Ir_Truncate,
@@ -61,15 +75,11 @@ typedef enum {
 	Ir_Equals,
 	Ir_ShiftLeft,
 	Ir_ShiftRight,
+
+	Ir_VaStart,
+	Ir_VaArg,
 } InstKind;
 
-typedef enum {
-	I8 = 1,
-	I16 = 2,
-	I32 = 4,
-	I64 = 8,
-	I128 = 16,
-} PrimitiveSize;
 
 // typedef SPAN(PhiNode) PhiNodes;
 
@@ -92,12 +102,16 @@ typedef struct Inst {
 			IrRef rhs;
 		} binop;
 		struct {
+			IrRef val;
+			u32 offset;
+		} unop_const;
+		struct {
 			IrRef size;
 			u32 known_offset; // STYLE Without this, instructions could be immutable
 		} alloc;
 		struct {
 			IrRef address;
-			IrRef source; // Only used for loads
+			IrRef source; // Only used for stores
 			// Defines an ordering of memory accesses. This is not
 			// actually useful for stores, which are put into
 			// ordered_instructions. I cannot tell what to do about that
@@ -126,6 +140,7 @@ typedef struct Inst {
 	case Ir_Sub: \
 	case Ir_Mul: \
 	case Ir_Div: \
+	case Ir_Mod: \
 	case Ir_BitOr: \
 	case Ir_BitXor: \
 	case Ir_BitAnd: \
@@ -134,14 +149,27 @@ typedef struct Inst {
 	case Ir_LessThanOrEquals: \
 	case Ir_ShiftLeft: \
 	case Ir_ShiftRight: \
-	case Ir_Access
+	case Ir_Copy
 
 #define UNOP_CASES \
 	case Ir_BitNot: \
 	case Ir_Truncate: \
 	case Ir_SignExtend: \
-	case Ir_ZeroExtend
+	case Ir_ZeroExtend: \
+	case Ir_FloatToInt: \
+	case Ir_IntToFloat: \
+	case Ir_StackDealloc: \
+	case Ir_VaArg
 
+#define UNOP_CONST_CASES \
+	case Ir_Access: \
+	case Ir_VaStart
+
+#define ZEROOP_CASES \
+	case Ir_Reloc: \
+	case Ir_Constant: \
+	case Ir_Parameter: \
+	case Ir_PhiIn
 
 typedef struct {
 	IrRef condition;
@@ -199,7 +227,6 @@ typedef struct Block {
 
 typedef struct IrBuild {
 	IrList ir;
-	Block *entry;
 	Arena *block_arena;
 
 	u32 block_count;

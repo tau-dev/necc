@@ -28,7 +28,7 @@ static char *insert = buf;
 typedef unsigned long ulong;
 typedef unsigned long long ullong;
 
-typedef u16 Storage;
+typedef u32 Storage;
 
 
 
@@ -64,6 +64,12 @@ typedef enum {
 } Register;
 
 
+typedef struct {
+	u32 storage;
+	u8 registers;
+	Register reg1;
+	Register reg2;
+} ParamInfo;
 
 typedef struct {
 	Arena *arena;
@@ -77,7 +83,10 @@ typedef struct {
 	IrRef used_registers[GENERAL_PURPOSE_REGS_END];
 	u32 stack_allocated;
 	bool is_memory_return;
-	u32 parameters_found;
+	u32 vaarg_gp_offset;
+	u32 vaarg_reg_saves;
+	u32 vaarg_overflow_args;
+	SPAN(ParamInfo) param_info;
 } Codegen;
 
 
@@ -153,11 +162,13 @@ const char *register_names[STACK_BEGIN] = {
 	[R15 + RSIZE_QWORD] = "r15",
 };
 
+// Registers rbx, r12 - r15 are callee-save, rsp and rbp are special.
 const Register caller_saved[] = {
+	RAX,
 	RCX,
+	RDX,
 	RSI,
 	RDI,
-	RBP,
 	R8,
 	R9,
 	R10,
@@ -173,6 +184,7 @@ const Register parameter_regs[] = {
 	R9,
 };
 static const u32 parameter_regs_count = sizeof(parameter_regs) / sizeof(parameter_regs[0]);
+
 
 
 static void emitData(Codegen *, Module, String data, References);
@@ -294,26 +306,61 @@ static u32 roundUp(u32 x)  {
 
 static void emitFunctionForward (Arena *arena, FILE *out, Module module, StaticValue *reloc, const Target *target) {
 // 	return;
-	Block *entry = reloc->function_entry;
+	Block *entry = reloc->function_ir.entry;
 	bool mem_return = isMemory(typeSize(*reloc->type.function.rettype, target));
-	Codegen c = {
-		.arena = arena,
-		.out = out,
-		.is_memory_return = mem_return,
-		.storage = calloc(reloc->function_ir.len, sizeof(Storage)),
-		.module = module,
-		.parameters_found = mem_return,
-	};
+	bool is_vararg = reloc->type.function.is_vararg;
+
 
 	Blocks linearized = {0};
 	scheduleBlocksStraight(arena, entry, &linearized);
 	assert(linearized.len);
 	decimateIr(&reloc->function_ir, linearized);
-	IrList ir = reloc->function_ir;
-	c.ir = ir;
+// 	calcUsage(ir, c.usage);
 	free(linearized.ptr);
 
-// 	calcUsage(ir, c.usage);
+	IrList ir = reloc->function_ir;
+
+	Codegen c = {
+		.arena = arena,
+		.out = out,
+		.is_memory_return = mem_return,
+		.storage = calloc(ir.len, sizeof(Storage)),
+		.module = module,
+		.param_info = ALLOCN(arena, ParamInfo, ir.params.len),
+		.ir = ir,
+	};
+
+
+
+	// A memory return uses up the first parameter register for the
+	// destination address.
+	u32 normal_params_found = mem_return;
+	c.stack_allocated = 8 * mem_return;
+
+	// First mark parameters in order.
+	for (u32 i = 0; i < ir.params.len; i++) {
+		u32 size = ir.params.ptr[i].size;
+		bool bigg = size > 8;
+		bool is_register = !isMemory(size) && normal_params_found + bigg < parameter_regs_count;
+		c.param_info.ptr[i].registers = is_register ? 1 + bigg : 0;
+
+		if (is_register) {
+			u32 reduced_size = bigg ? 8 : size;
+			c.param_info.ptr[i].reg1 = registerSized(parameter_regs[normal_params_found], reduced_size);
+			normal_params_found++;
+
+			if (bigg) {
+				c.param_info.ptr[i].reg2 = registerSized(parameter_regs[normal_params_found], size - reduced_size);
+				normal_params_found++;
+			}
+
+			c.param_info.ptr[i].storage = c.stack_allocated;
+			c.stack_allocated += roundUp(size);
+		}
+	}
+
+	if (is_vararg)
+		c.stack_allocated = 48;
 
 
 	for (u32 i = 0; i < ir.len; i++) {
@@ -325,34 +372,44 @@ static void emitFunctionForward (Arena *arena, FILE *out, Module module, StaticV
 			assert(sz.kind == Ir_Constant);
 			c.stack_allocated += roundUp(sz.constant);
 		}
-		if (inst.kind == Ir_Parameter && isMemory(inst.size))
+		if (inst.kind == Ir_Parameter)
 			continue;
-
 		c.storage[i] = c.stack_allocated;
 		c.stack_allocated += roundUp(inst.size);
 	}
-	// TODO mem returns
+
+
+	emit(&c, " sub rsp, I", c.stack_allocated);
+
+	if (c.is_memory_return)
+		emit(&c, " mov [rsp], rdi");
 
 	u32 mem_params = c.stack_allocated + 8;
-	u32 normal_params_found = mem_return;
-	for (u32 i = 0; i < ir.len; i++) {
-		Inst inst = ir.ptr[i];
-		bool bigg = inst.size > 8;
-		if (inst.kind == Ir_Parameter) {
-			if (isMemory(inst.size) || normal_params_found + bigg >= parameter_regs_count) {
-				c.storage[i] = mem_params;
-				mem_params += inst.size;
-			} else {
-				normal_params_found += 1 + bigg;
-			}
+
+	for (u32 i = 0; i < c.param_info.len; i++) {
+		ParamInfo info = c.param_info.ptr[i];
+		if (info.registers) {
+			emit(&c, " mov [rsp+I], R", info.storage, info.reg1);
+
+			if (info.registers == 2)
+				emit(&c, "mov [rsp+I], R", info.storage + 8, info.reg2);
+		} else {
+			c.param_info.ptr[i].storage = mem_params;
+			mem_params += roundUp(ir.params.ptr[i].size);
 		}
 	}
 
-	emit(&c, " sub rsp, I", c.stack_allocated);
-	if (c.is_memory_return)
-		emit(&c, " push rdi");
+	if (is_vararg) {
+		c.vaarg_reg_saves = 0;
+		c.vaarg_gp_offset = normal_params_found * 8;
+		c.vaarg_overflow_args = mem_params;
+		for (u32 i = normal_params_found; i < parameter_regs_count; i++) {
+			emit(&c, " mov [rsp+I], R", i*8, registerSized(parameter_regs[i], I64));
+		}
+	}
 
 	emitBlockForward(&c, entry);
+	emit(&c, "");
 
 	free(c.storage);
 }
@@ -411,7 +468,7 @@ static void emitBlockForward (Codegen *c, Block *block) {
 	assert(block->exit.kind != Exit_None);
 
 
-	emit(c, ".SI:", block->label, block->id);
+	emit(c, ".S_I:", block->label, block->id);
 
 	IrRefList false_phis = {0};
 
@@ -464,13 +521,13 @@ static void emitBlockForward (Codegen *c, Block *block) {
 	case Exit_Return:
 		if (exit.ret != IR_REF_NONE) {
 			if (c->is_memory_return) {
-				assert(!"TODO Memory returns");
+				emit(c, " mov rax, [rsp+I]", c->stack_allocated);
 				copyTo(c, RAX, 0, RSP, c->storage[exit.ret], valueSize(c, exit.ret));
 			} else {
 				loadMaybeBigTo(c, RAX, RDX, exit.ret);
 			}
 		}
-		emit(c, " add rsp, I", c->stack_allocated);
+		emit(c, " add rsp, I", c->stack_allocated + (c->is_memory_return ? 8 : 0));
 		emit(c, " ret");
 		break;
 	case Exit_None: unreachable;
@@ -558,10 +615,12 @@ static void emitInstForward(Codegen *c, IrRef i) {
 		emit(c, " mov R, #", registerSized(RAX, valueSize(c, inst.unop)), inst.unop);
 		emit(c, " mov #, R", i, registerSized(RAX, inst.size));
 	} break;
-	case Ir_Store: {
+	case Ir_Store:
+	case Ir_StoreVolatile: {
 		copyTo(c, loadTo(c, RAX, inst.mem.address), 0, RSP, c->storage[inst.mem.source], inst.size);
 	} break;
-	case Ir_Load: {
+	case Ir_Load:
+	case Ir_LoadVolatile: {
 		copyTo(c, RSP, c->storage[i], loadTo(c, RAX, inst.mem.address), 0, inst.size);
 	} break;
 	case Ir_Access: {
@@ -569,19 +628,8 @@ static void emitInstForward(Codegen *c, IrRef i) {
 			RSP, c->storage[inst.binop.lhs] + inst.binop.rhs, inst.size);
 	} break;
 	case Ir_Parameter: {
-		bool bigg = inst.size > 8;
-		if (c->parameters_found + bigg < parameter_regs_count && !isMemory(inst.size)) {
-			u32 sizea = bigg ? 8 : inst.size;
-			emit(c, " mov [rsp+I], R	; param", c->storage[i],
-				registerSized(parameter_regs[c->parameters_found], sizea));
-			c->parameters_found++;
-			if (bigg) {
-				assert(c->parameters_found < parameter_regs_count);
-				emit(c, "mov [rsp+I], R	; param", c->storage[i] + 8,
-					registerSized(parameter_regs[c->parameters_found], inst.size - sizea));
-				c->parameters_found++;
-			}
-		}
+		ParamInfo info = c->param_info.ptr[inst.unop];
+		c->storage[i] = info.storage;
 	} break;
 	case Ir_Constant:
 		assert(inst.size <= 8);
@@ -618,11 +666,42 @@ static void emitInstForward(Codegen *c, IrRef i) {
 	case Ir_FloatToInt: {
 		assert(!"TODO codegen float stuff");
 	} break;
+	case Ir_VaStart: {
+		loadTo(c, RAX, inst.binop.lhs);
+		// State of affairs: rhs should be the last parameter, but it is currently ignored.
+
+		emit(c, " mov dword [rax], I", c->vaarg_gp_offset);
+		emit(c, " mov dword [rax+4], 48");
+		emit(c, " lea rdx, [rsp+I]", c->stack_allocated + 8);
+		emit(c, " mov qword [rax+8], rdx");
+		emit(c, " lea rdx, [rsp+I]", c->vaarg_reg_saves);
+		emit(c, " mov qword [rax+16], rdx");
+	} break;
+	case Ir_VaArg: {
+		loadTo(c, RAX, inst.unop);
+		if (!isMemory(inst.size)) {
+			emit(c, " xor rdx, rdx");
+			emit(c, " mov edx, dword [rax]");
+			emit(c, " cmp edx, I", inst.size <= 8 ? 48 : 40);
+			emit(c, " jae .vaarg_I_overflowarg", i);
+
+			emit(c, " add rdx, qword [rax+16]");
+			emit(c, " add dword [rax], I", inst.size <= 8 ? 8 : 16);
+			emit(c, " jmp .vaarg_I_done", i);
+
+			emit(c, ".vaarg_I_overflowarg:", i);
+		}
+		emit(c, " mov rdx, qword [rax+8]");
+		emit(c, " add qword [rax+8], I", inst.size);
+
+		emit(c, ".vaarg_I_done:", i);
+		copyTo(c, RSP, c->storage[i], RDX, 0, inst.size);
+	} break;
 	case Ir_Call: {
 		ValuesSpan params = inst.call.parameters;
 		bool memory_return = isMemory(inst.size);
 
-		emit(c, "\t; call");
+		emit(c, "	; call");
 		u32 param_slot = memory_return;
 		if (memory_return)
 			emit(c, " lea rdi, #", i);
@@ -648,7 +727,7 @@ static void emitInstForward(Codegen *c, IrRef i) {
 			u16 param_size = valueSize(c, param);
 			bool bigg = param_size > 8;
 			if (isMemory(param_size) || param_slot + bigg >= parameter_regs_count) {
-				copyTo(c, RSP, stack_mem_pos, RSP, c->storage[p], param_size);
+				copyTo(c, RSP, stack_mem_pos, RSP, c->storage[param], param_size);
 				stack_mem_pos += param_size;
 			} else if (bigg) {
 				loadMaybeBigTo(c, parameter_regs[param_slot], parameter_regs[param_slot+1], param);
@@ -678,12 +757,11 @@ static void emitInstForward(Codegen *c, IrRef i) {
 			}
 		}
 	} break;
-	default: unreachable;
 	}
 }
 
 static void emitJump (Codegen *c, const char *inst, const Block *dest) {
-	emit(c, " Z .SI", inst, dest->label, dest->id);
+	emit(c, " Z .S_I", inst, dest->label, dest->id);
 }
 
 // static bool isSpilled(Storage s) {
@@ -739,6 +817,7 @@ static void emitDataLine (FILE *out, u32 len, const char *data) {
 
 	while (i < len) {
 		u32 end = i + (buf + BUF - insert) / 5 - 20;
+		assert(end - i < BUF);
 		if (end > len) end = len;
 
 		raw_begin = i;
@@ -768,7 +847,7 @@ static void emitDataString (u32 len, const char *data) {
 }
 
 static void emitDataRaw (u32 len, const char *data) {
-	assert(len * 5 < BUF - MAX_LINE);
+	assert(len * 5 < BUF);
 	if (len == 0)
 		return;
 

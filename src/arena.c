@@ -38,7 +38,7 @@ void *aalloc(Arena* arena, size_t size) {
 	size_t alignment = alignof(max_align_t);
 	size = (size + alignment - 1) / alignment * alignment;
 
-	if (arena->last_used + size >= arena->block_size) {
+	if (size && arena->last_used + size > arena->block_size) {
 		u32 next_size = size >= arena->block_size ? size : arena->block_size;
 		ArenaBlock *new = malloc(next_size + BLOCK_HEADER);
 		if (!new) {

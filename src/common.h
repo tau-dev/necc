@@ -2,6 +2,13 @@
 
 // Types that the lexer and the parser need to know.
 
+typedef enum {
+	I8 = 1,
+	I16 = 2,
+	I32 = 4,
+	I64 = 8,
+	I128 = 16,
+} PrimitiveSize;
 
 typedef struct Target {
 	Type ptrdiff;
@@ -9,6 +16,7 @@ typedef struct Target {
 	BasicType enum_int;
 	PrimitiveSize ptr_size;
 	PrimitiveSize int_size;
+	PrimitiveSize valist_size;
 	PrimitiveSize typesizes[Int_unsigned];
 	Version version;
 } Target;

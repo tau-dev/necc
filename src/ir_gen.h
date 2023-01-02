@@ -3,7 +3,7 @@
 #include "ir.h"
 #include "parse.h"
 
-IrRef genParameter(IrBuild *, u16 size);
+IrRef genParameter(IrBuild *, u32 param_id);
 IrRef genStackAlloc(IrBuild *, IrRef size);
 IrRef genStackAllocFixed(IrBuild *, u32 size);
 // IrRef genReturn(IrBuild *);
@@ -29,11 +29,16 @@ IrRef genSignExt(IrBuild *, IrRef source, u16 target);
 IrRef genZeroExt(IrBuild *, IrRef source, u16 target);
 IrRef genCall(IrBuild *, IrRef func, ValuesSpan args, u16 size, bool is_vararg);
 IrRef genGlobal(IrBuild *, u32 id);
-IrRef genLoad(IrBuild *, IrRef ref, u16 size);
-IrRef genStore(IrBuild *, IrRef dest, IrRef value);
+IrRef genLoad(IrBuild *, IrRef ref, u16 size, bool is_volatile);
+IrRef genStore(IrBuild *, IrRef dest, IrRef value, bool is_volatile);
+IrRef genAccess(IrBuild *, IrRef value, IrRef offset, IrRef size);
 IrRef genPhiIn(IrBuild *build, u16 size);
 IrRef genPhiOut(IrBuild *build, IrRef source);
 void setPhiOut(IrBuild *build, IrRef phi, IrRef dest_true, IrRef dest_false);
+
+IrRef genVaStart(IrBuild *build, IrRef va_list_addr, IrRef param);
+IrRef genVaArg(IrBuild *build, IrRef va_list_addr, IrRef size);
+
 void replaceWithCopy(IrList ir, IrRef original, IrRef replacement, IrRef ordered_after);
 void genReturnVal(IrBuild *, IrRef val);
 void genBranch(IrBuild *, IrRef condition);
@@ -42,6 +47,7 @@ void genSwitch(IrBuild *, IrRef val);
 Block *newBlock(IrBuild *build, String label);
 void startBlock(IrBuild *, Block *blk);
 Block *startNewBlock(IrBuild *build, String label);
+
 void discardBlock(Block *blk);
 void discardIrBuilder(IrBuild *);
 

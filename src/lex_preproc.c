@@ -587,7 +587,7 @@ Tokenization lex (Arena *generated_strings, String filename, LexParams paths) {
 
 	SourceFile *initial_source = readAllAlloc(STRING_EMPTY, filename);
 	if (initial_source == NULL)
-		generalFatal("could not open file \"%.*s\"\n", STRING_PRINTAGE(filename));
+		generalFatal("could not open file \"%.*s\"", STRING_PRINTAGE(filename));
 
 	PUSH(t.files, initial_source);
 	SourceFile source = *initial_source;
@@ -823,7 +823,7 @@ Tokenization lex (Arena *generated_strings, String filename, LexParams paths) {
 		appendOneToken(&t, tok, (TokenPosition) {source_pos, source.idx});
 
 		if (tok.kind == Tok_EOF) {
-			assert(source.idx == 0);
+			assert(source.idx == initial_source->idx);
 			break;
 		}
 	}

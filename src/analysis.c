@@ -4,8 +4,8 @@
 
 /*
 
-Routines for analyzing and transforming the IR (the latter part should
-be moved into a separate file at some point).
+Routines for analyzing and transforming the IR (transformations actually
+should be moved into a separate file at some point).
 
 */
 
@@ -29,7 +29,7 @@ static IrRef copyUsed (IrList source, IrRef i, IrList *dest, IrRef *relocs) {
 	if (relocs[i] != IR_REF_NONE) return relocs[i];
 
 	Inst inst = source.ptr[i];
-	switch (inst.kind) {
+	switch ((InstKind) inst.kind) {
 	BINOP_CASES:
 		copyUsed(source, inst.binop.lhs, dest, relocs);
 		copyUsed(source, inst.binop.rhs, dest, relocs);
@@ -37,13 +37,18 @@ static IrRef copyUsed (IrList source, IrRef i, IrList *dest, IrRef *relocs) {
 	UNOP_CASES:
 		copyUsed(source, inst.unop, dest, relocs);
 		break;
+	UNOP_CONST_CASES:
+		copyUsed(source, inst.unop_const.val, dest, relocs);
+		break;
 	case Ir_Store:
+	case Ir_StoreVolatile:
 		if (inst.mem.ordered_after != IR_REF_NONE)
 			copyUsed(source, inst.mem.ordered_after, dest, relocs);
 		copyUsed(source, inst.mem.address, dest, relocs);
 		copyUsed(source, inst.mem.source, dest, relocs);
 		break;
 	case Ir_Load:
+	case Ir_LoadVolatile:
 		if (inst.mem.ordered_after != IR_REF_NONE)
 			copyUsed(source, inst.mem.ordered_after, dest, relocs);
 		copyUsed(source, inst.mem.address, dest, relocs);
@@ -62,7 +67,8 @@ static IrRef copyUsed (IrList source, IrRef i, IrList *dest, IrRef *relocs) {
 		for (u32 p = 0; p < params.len; p++)
 			copyUsed(source, params.ptr[p], dest, relocs);
 		break;
-	default: break;
+	ZEROOP_CASES:
+		break;
 	}
 
 	IrRef new = dest->len;
@@ -74,18 +80,24 @@ static IrRef copyUsed (IrList source, IrRef i, IrList *dest, IrRef *relocs) {
 
 static void applyRelocs (IrList ir, IrRef i, IrRef *relocs) {
 	Inst *inst = &ir.ptr[i];
-	switch (inst->kind) {
+	switch ((InstKind) inst->kind) {
 	BINOP_CASES:
 		inst->binop.lhs = relocs[inst->binop.lhs];
-		inst->binop.rhs = relocs[inst->binop.rhs];
+		if (inst->binop.rhs != IR_REF_NONE)
+			inst->binop.rhs = relocs[inst->binop.rhs];
 		break;
 	UNOP_CASES:
 		inst->unop = relocs[inst->unop];
 		break;
+	UNOP_CONST_CASES:
+		inst->unop_const.val = relocs[inst->unop_const.val];
+		break;
 	case Ir_Store:
+	case Ir_StoreVolatile:
 		inst->mem.source = relocs[inst->mem.source];
 		FALLTHROUGH;
 	case Ir_Load:
+	case Ir_LoadVolatile:
 		inst->mem.address = relocs[inst->mem.address];
 		if (inst->mem.ordered_after != IR_REF_NONE)
 			inst->mem.ordered_after = relocs[inst->mem.ordered_after];
@@ -108,13 +120,14 @@ static void applyRelocs (IrList ir, IrRef i, IrRef *relocs) {
 		for (u32 p = 0; p < params.len; p++)
 			params.ptr[p] = relocs[params.ptr[p]];
 		break;
-	default: break;
+	ZEROOP_CASES:
+		break;
 	}
 }
 
 void decimateIr (IrList *ir, Blocks blocks) {
 	IrRef *relocs = malloc(ir->len * sizeof(IrRef));
-	IrList out = {0};
+	IrList out = {.params = ir->params, .entry = ir->entry};
 
 	for (u32 i = 0; i < ir->len; i++) relocs[i] = IR_REF_NONE;
 
@@ -162,15 +175,21 @@ void calcLifetimes (IrList ir, ValuesSpan lastuses) {
 		switch (inst.kind) {
 		BINOP_CASES:
 			uses[inst.binop.lhs] = i;
-			uses[inst.binop.rhs] = i;
+			if (inst.binop.rhs != IR_REF_NONE)
+				uses[inst.binop.rhs] = i;
 			break;
 		UNOP_CASES:
 			uses[inst.unop] = i;
 			break;
+		UNOP_CONST_CASES:
+			uses[inst.unop_const.val] = i;
+			break;
 		case Ir_Store:
+		case Ir_StoreVolatile:
 			uses[inst.mem.source] = i;
 			FALLTHROUGH;
 		case Ir_Load:
+		case Ir_LoadVolatile:
 			uses[inst.mem.address] = i;
 			if (inst.mem.ordered_after != IR_REF_NONE)
 				uses[inst.mem.ordered_after] = i;
@@ -188,7 +207,8 @@ void calcLifetimes (IrList ir, ValuesSpan lastuses) {
 				uses[params.ptr[p]] = i;
 			}
 			break;
-		default: break;
+		ZEROOP_CASES:
+			break;
 		}
 	}
 }
@@ -238,18 +258,24 @@ void calcUsage (IrList ir, u16 *usage) {
 
 	for (u32 i = 0; i < ir.len; i++) {
 		Inst inst = ir.ptr[i];
-		switch (inst.kind) {
+		switch ((InstKind) inst.kind) {
 		BINOP_CASES:
 			usage[inst.binop.lhs]++;
-			usage[inst.binop.rhs]++;
+			if (inst.binop.rhs != IR_REF_NONE)
+				usage[inst.binop.rhs]++;
 			break;
 		UNOP_CASES:
 			usage[inst.unop]++;
 			break;
+		UNOP_CONST_CASES:
+			usage[inst.unop_const.val]++;
+			break;
 		case Ir_Store:
+		case Ir_StoreVolatile:
 			usage[inst.mem.source]++;
 			FALLTHROUGH;
 		case Ir_Load:
+		case Ir_LoadVolatile:
 			usage[inst.mem.address]++;
 			if (inst.mem.ordered_after != IR_REF_NONE)
 				usage[inst.mem.ordered_after]++;
@@ -267,8 +293,48 @@ void calcUsage (IrList ir, u16 *usage) {
 			ValuesSpan params = inst.call.parameters;
 			for (u32 p = 0; p < params.len; p++)
 				usage[params.ptr[p]]++;
-
 			break;
+		ZEROOP_CASES:
+			break;
+		}
+	}
+}
+
+
+void arithSimplify (IrList ir, u16 *uses) {
+	for (u32 i = 0; i < ir.len; i++) {
+		Inst inst = ir.ptr[i];
+		switch (inst.kind) {
+		case Ir_Equals: {
+			Inst lhs = ir.ptr[inst.binop.lhs];
+			Inst rhs = ir.ptr[inst.binop.rhs];
+			// Handle logical not.
+			if (rhs.kind == Ir_Constant && rhs.constant == 0 && uses[inst.binop.lhs] == 1) {
+				switch (lhs.kind) {
+				case Ir_LessThan:
+					ir.ptr[i].kind = Ir_LessThanOrEquals;
+					ir.ptr[i].binop.lhs = lhs.binop.rhs;
+					ir.ptr[i].binop.rhs = lhs.binop.lhs;
+					break;
+				case Ir_LessThanOrEquals:
+					ir.ptr[i].kind = Ir_LessThanOrEquals;
+					ir.ptr[i].binop.lhs = lhs.binop.rhs;
+					ir.ptr[i].binop.rhs = lhs.binop.lhs;
+					break;
+				case Ir_Equals:
+					if (uses[i] == 0) {
+						// Used for a branch: the positive result is not
+						// restricted to the value 1, so a double
+						// negation can be elided.
+						rhs = ir.ptr[lhs.binop.rhs];
+						if (rhs.kind == Ir_Constant && rhs.constant == 0)
+							replaceWithCopy(ir, i, lhs.binop.lhs, IR_REF_NONE);
+					}
+					break;
+				default: break;
+				}
+			}
+		} break;
 		default: break;
 		}
 	}
@@ -276,13 +342,44 @@ void calcUsage (IrList ir, u16 *usage) {
 
 
 static void decopy (IrList ir, IrRef *ref) {
-	while (ir.ptr[*ref].kind == Ir_Copy)
+	while (ir.ptr[*ref].kind == Ir_Copy) {
+		assert(ir.ptr[*ref].binop.lhs != *ref);
 		*ref = ir.ptr[*ref].binop.lhs;
+	}
 }
 
 static void decopyOrder (IrList ir, IrRef *ref) {
-	while (*ref != IR_REF_NONE && ir.ptr[*ref].kind == Ir_Copy)
+	while (*ref != IR_REF_NONE && ir.ptr[*ref].kind == Ir_Copy) {
+		assert(ir.ptr[*ref].binop.rhs != *ref);
 		*ref = ir.ptr[*ref].binop.rhs;
+	}
+}
+
+
+static bool isMemInstruction(InstKind inst) {
+	switch (inst) {
+	case Ir_Load:
+	case Ir_LoadVolatile:
+	case Ir_Store:
+	case Ir_StoreVolatile:
+	case Ir_Call:
+		return true;
+	default:
+		return false;
+	}
+}
+
+static bool isOrderedInstruction(InstKind inst) {
+	switch (inst) {
+	case Ir_Store:
+	case Ir_StoreVolatile:
+	case Ir_Call:
+	case Ir_PhiOut:
+	case Ir_VaArg:
+		return true;
+	default:
+		return false;
+	}
 }
 
 
@@ -294,7 +391,7 @@ static void cleanUpCopyReplacements(IrList ir, Block *blk) {
 
 	u32 dest_idx = 0;
 	for (u32 k = 0; k < mem.len; k++) {
-		if (ir.ptr[mem.ptr[k]].kind != Ir_Copy) {
+		if (isMemInstruction(ir.ptr[mem.ptr[k]].kind)) {
 			mem.ptr[dest_idx] = mem.ptr[k];
 			dest_idx++;
 		}
@@ -302,31 +399,35 @@ static void cleanUpCopyReplacements(IrList ir, Block *blk) {
 	blk->mem_instructions.len = dest_idx;
 	dest_idx = 0;
 	for (u32 k = 0; k < se.len; k++) {
-		if (ir.ptr[se.ptr[k]].kind != Ir_Copy) {
+		if (isOrderedInstruction(ir.ptr[se.ptr[k]].kind)) {
 			se.ptr[dest_idx] = se.ptr[k];
 			dest_idx++;
-		} else {
-			unreachable; // We are not currently replacing stores or calls.
 		}
 	}
 	blk->ordered_instructions.len = dest_idx;
 }
 
-void resolveCopies (IrList ir) {
+void resolveCopies (IrList ir, Blocks blocks) {
 	for (u32 i = 0; i < ir.len; i++) {
 		Inst *inst = &ir.ptr[i];
 		switch (inst->kind) {
 		BINOP_CASES:
 			decopy(ir, &inst->binop.lhs);
-			decopy(ir, &inst->binop.rhs);
+			if (inst->binop.rhs != IR_REF_NONE)
+				decopy(ir, &inst->binop.rhs);
 			break;
 		UNOP_CASES:
 			decopy(ir, &inst->unop);
 			break;
+		UNOP_CONST_CASES:
+			decopy(ir, &inst->unop_const.val);
+			break;
 		case Ir_Store:
+		case Ir_StoreVolatile:
 			decopy(ir, &inst->mem.source);
 			FALLTHROUGH;
 		case Ir_Load:
+		case Ir_LoadVolatile:
 			decopy(ir, &inst->mem.address);
 			decopyOrder(ir, &inst->mem.ordered_after);
 			break;
@@ -343,10 +444,20 @@ void resolveCopies (IrList ir) {
 			for (u32 p = 0; p < params.len; p++)
 				decopy(ir, &params.ptr[p]);
 			break;
-		default: break;
+		ZEROOP_CASES:
+			break;
 		}
 	}
 
+	for (u32 i = 0; i < blocks.len; i++) {
+		Block *blk = blocks.ptr[i];
+		if (blk->exit.kind == Exit_Return && blk->exit.ret != IR_REF_NONE)
+			decopy(ir, &blk->exit.ret);
+		else if (blk->exit.kind == Exit_Branch)
+			decopy(ir, &blk->exit.branch.condition);
+		else if (blk->exit.kind == Exit_Switch)
+			decopy(ir, &blk->exit.switch_.value);
+	}
 // 	for (u32 i = 0; i < blocks.len; i++)
 // 		cleanUpCopyReplacements(ir, blocks.ptr[i]);
 }
@@ -354,21 +465,8 @@ void resolveCopies (IrList ir) {
 typedef u32 PropId;
 
 
-bool mayAlias(IrList ir, IrRef possible, IrRef target) {
-	(void) ir;
-	(void) possible;
-	(void) target;
-	return true;
-}
 
-bool doesAlias(IrList ir, IrRef possible, IrRef target) {
-	(void) ir;
-	(void) possible;
-	(void) target;
-	return false;
-}
-
-void innerBlockPropagate (IrList ir, Blocks blocks) {
+void storeLoadPropagate (IrList ir, Blocks blocks) {
 	Inst *insts = ir.ptr;
 
 	for (u32 b = 0; b < blocks.len; b++) {
@@ -382,6 +480,92 @@ void innerBlockPropagate (IrList ir, Blocks blocks) {
 				Inst store = insts[inst.mem.ordered_after];
 				if (store.kind == Ir_Store && store.mem.address == inst.mem.address)
 					replaceWithCopy(ir, ref, store.mem.source, store.mem.ordered_after);
+			}
+		}
+		cleanUpCopyReplacements(ir, blocks.ptr[b]);
+	}
+}
+
+typedef enum {
+	Alias_Never,
+	Alias_Maybe,
+	Alias_Always,
+} Alias;
+
+Alias canAlias(IrList ir, Inst inst, IrRef address1) {
+	switch (inst.kind) {
+	case Ir_Call:
+		return Alias_Maybe;
+	case Ir_Load:
+	case Ir_LoadVolatile:
+	case Ir_Store:
+	case Ir_StoreVolatile: {
+		IrRef address2 = inst.mem.address;
+		if (address1 == address2)
+			return Alias_Always;
+		Inst address_inst1 = ir.ptr[address1];
+		Inst address_inst2 = ir.ptr[address2];
+		if (address_inst1.kind == Ir_StackAlloc) {
+			if (address_inst2.kind == Ir_StackAlloc)
+				return Alias_Never;
+			Inst tmp = address_inst2;
+			address_inst2 = address_inst1;
+			address_inst1 = tmp;
+		}
+		if (address_inst2.kind == Ir_StackAlloc && (address_inst1.kind == Ir_Reloc || address_inst1.kind == Ir_Parameter))
+			return Alias_Never;
+		if (address_inst1.kind == Ir_Reloc && address_inst2.kind == Ir_Reloc) {
+			if (address_inst1.reloc.id != address_inst2.reloc.id)
+				return Alias_Never;
+			if (address_inst1.reloc.offset == address_inst2.reloc.offset)
+				return Alias_Always;
+			// TODO Calculate overlap
+		}
+
+		// TODO A StackAlloc can also never alias a parameter or a global
+		return Alias_Maybe;
+	}
+	case Ir_Copy:
+		return Alias_Never;
+	default:
+		unreachable;
+	}
+}
+
+void innerBlockPropagate (IrList ir, Blocks blocks) {
+	Inst *insts = ir.ptr;
+
+	for (u32 b = 0; b < blocks.len; b++) {
+		IrRefList mem = blocks.ptr[b]->mem_instructions;
+
+		for (u32 i = 0; i < mem.len; i++) {
+			IrRef ref = mem.ptr[i];
+			Inst inst = insts[ref];
+
+			if (inst.kind == Ir_Load || inst.kind == Ir_Store) {
+				while (inst.mem.ordered_after != IR_REF_NONE) {
+					Inst prev = insts[inst.mem.ordered_after];
+					Alias a = canAlias(ir, prev, inst.mem.address);
+					if (a == Alias_Never) {
+						inst.mem.ordered_after = prev.mem.ordered_after;
+					} else if (a == Alias_Always) {
+						if (prev.kind == Ir_Store || prev.kind == Ir_StoreVolatile) {
+							if (inst.kind == Ir_Load)
+								replaceWithCopy(ir, ref, prev.mem.source, prev.mem.ordered_after);
+							else {
+								// TODO
+							}
+							break;
+						} else {
+							assert(prev.kind == Ir_Load || prev.kind == Ir_LoadVolatile);
+							if (inst.kind == Ir_Load)
+								replaceWithCopy(ir, ref, inst.mem.ordered_after, prev.mem.ordered_after);
+							break;
+						}
+					} else {
+						break;
+					}
+				}
 			}
 		}
 		cleanUpCopyReplacements(ir, blocks.ptr[b]);

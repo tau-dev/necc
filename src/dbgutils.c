@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include "util.h"
+
 #include "lex_preproc.h"
 
 /*
@@ -82,7 +83,7 @@ const char *lexz(Tokenization t, const Token *current, const Token *parse_pos, u
 	i32 begin = (current ? current - t.tokens : t.count) - ctx_len;
 	u32 end = begin + 2*ctx_len;
 	if (end > t.count) {
-		begin -= end - t.count;
+		begin -= (i32) (end - t.count);
 		end = t.count;
 	}
 	if (begin < 0) begin = 0;

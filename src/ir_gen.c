@@ -3,8 +3,7 @@
 /*
 
 Generates IR, while doing a first constant-folding pass, and prints it in a nicely formatted form.
-Some arithmetic simplifications require e.g. use-counts, and need to be
-performed in a separate step.
+Arithmetic simplifications which require e.g. use-counts happen in the analysis pass arithSimplify.
 
 */
 
@@ -18,8 +17,8 @@ IrRef append (IrBuild *build, Inst inst) {
 	return build->ir.len - 1;
 }
 
-IrRef genParameter (IrBuild *build, u16 size) {
-	return append(build, (Inst) {Ir_Parameter, size});
+IrRef genParameter (IrBuild *build, u32 param_id) {
+	return append(build, (Inst) {Ir_Parameter, build->ir.params.ptr[param_id].size, .unop = param_id});
 }
 
 IrRef genStackAllocFixed (IrBuild *build, u32 size) {
@@ -99,9 +98,18 @@ static IrRef genBinOp (IrBuild *build, InstKind op, IrRef a, IrRef b) {
 		case Ir_Mul:
 			i.constant = inst[a].constant * inst[b].constant; break;
 		case Ir_Div:
+			if (inst[b].constant == 0) {
+				i.kind = Ir_Div;
+				break;
+			}
 			i.constant = inst[a].constant / inst[b].constant; break;
 		case Ir_Mod:
-			i.constant = inst[a].constant % inst[b].constant; break;
+			if (inst[b].constant == 0) {
+				i.kind = Ir_Div;
+				break;
+			}
+			i.constant = inst[a].constant % inst[b].constant;
+			break;
 		case Ir_BitAnd:
 			i.constant = inst[a].constant & inst[b].constant; break;
 		case Ir_BitOr:
@@ -122,9 +130,37 @@ static IrRef genBinOp (IrBuild *build, InstKind op, IrRef a, IrRef b) {
 			unreachable;
 		}
 		return append(build, i);
-	} else if (commutative && inst[a].kind == Ir_Constant) {
-		i.binop.lhs = b;
-		i.binop.rhs = a;
+	} else {
+		if (commutative && inst[a].kind == Ir_Constant) {
+			i.binop.lhs = b;
+			i.binop.rhs = a;
+		}
+		if (inst[i.binop.rhs].kind == Ir_Constant) {
+			u64 constant = inst[i.binop.rhs].constant;
+			switch (op) {
+			case Ir_Add:
+			case Ir_Sub:
+				if (constant == 0)
+					return i.binop.lhs;
+				break;
+			case Ir_Mul:
+				if (constant == 0)
+					return i.binop.rhs;
+				if (constant == 1)
+					return i.binop.lhs;
+				break;
+			case Ir_Div:
+				if (constant == 0)
+					return IR_REF_NONE; // ???
+				if (constant == 1)
+					return i.binop.lhs;
+				break;
+			case Ir_Mod:
+				// TODO mod 1
+				break;
+			default: break;
+			}
+		}
 	}
 
 	if ((op == Ir_Add || op == Ir_Sub) &&
@@ -339,8 +375,10 @@ IrRef genGlobal (IrBuild *build, u32 id) {
 	return append(build, (Inst) {Ir_Reloc, PTR_SIZE, .binop = {id}});
 }
 
-IrRef genLoad (IrBuild *build, IrRef ref, u16 size) {
-	IrRef load = append(build, (Inst) {Ir_Load, size,
+IrRef genLoad (IrBuild *build, IrRef ref, u16 size, bool is_volatile) {
+	IrRef load = append(build, (Inst) {
+		is_volatile ? Ir_LoadVolatile : Ir_Load,
+		size,
 		.mem = { .address = ref, .ordered_after = build->prev_store_op }
 	});
 	build->prev_mem_op = load;
@@ -348,10 +386,12 @@ IrRef genLoad (IrBuild *build, IrRef ref, u16 size) {
 	return load;
 }
 
-IrRef genStore (IrBuild *build, IrRef dest, IrRef value) {
+IrRef genStore (IrBuild *build, IrRef dest, IrRef value, bool is_volatile) {
 	Inst val = build->ir.ptr[value];
 	// TODO Assert dest->size == target pointer size
-	IrRef store = append(build, (Inst) {Ir_Store, val.size,
+	IrRef store = append(build, (Inst) {
+		is_volatile ? Ir_StoreVolatile : Ir_Store,
+		val.size,
 		.mem = { .address = dest, .source = value, .ordered_after = build->prev_mem_op }
 	});
 	build->prev_mem_op = store;
@@ -360,6 +400,10 @@ IrRef genStore (IrBuild *build, IrRef dest, IrRef value) {
 	PUSH_A(build->block_arena, build->insertion_block->mem_instructions, store);
 	PUSH_A(build->block_arena, build->insertion_block->ordered_instructions, store);
 	return store;
+}
+
+IrRef genAccess (IrBuild *build, IrRef value, IrRef offset, IrRef size) {
+	return append(build, (Inst) {Ir_Access, size, .unop_const = {value, offset}});
 }
 
 IrRef genPhiIn (IrBuild *build, u16 size) {
@@ -379,6 +423,23 @@ void setPhiOut (IrBuild *build, IrRef phi, IrRef dest_true, IrRef dest_false) {
 	inst->phi_out.on_true = dest_true;
 	inst->phi_out.on_false = dest_false;
 }
+
+IrRef genVaArg (IrBuild *build, IrRef va_list_addr, IrRef size) {
+	IrRef store = append(build, (Inst) {Ir_VaArg, size, .unop = va_list_addr});
+
+	// TODO This should be a mem instruction too.
+	PUSH_A(build->block_arena, build->insertion_block->ordered_instructions, store);
+	return store;
+}
+
+IrRef genVaStart (IrBuild *build, IrRef va_list_addr, IrRef param) {
+	IrRef store = append(build, (Inst) {Ir_VaStart, 0, .unop_const = {va_list_addr, param}});
+
+	// TODO This should be a mem instruction too.
+	PUSH_A(build->block_arena, build->insertion_block->ordered_instructions, store);
+	return store;
+}
+
 
 void replaceWithCopy (IrList ir, IrRef original, IrRef replacement, IrRef ordered_after) {
 	ir.ptr[original].kind = Ir_Copy;
@@ -449,8 +510,14 @@ void printBlock (FILE *dest, Block *blk, IrList ir) {
 		case Ir_Load:
 			fprintf(dest, "load i%lu, [%lu]\n", (ulong) inst.size * 8, (ulong) inst.mem.address);
 			continue;
+		case Ir_LoadVolatile:
+			fprintf(dest, "load volatile i%lu, [%lu]\n", (ulong) inst.size * 8, (ulong) inst.mem.address);
+			continue;
 		case Ir_Store:
 			fprintf(dest, "store [%lu] %lu\n", (ulong) inst.mem.address, (ulong) inst.mem.source);
+			continue;
+		case Ir_StoreVolatile:
+			fprintf(dest, "store volatile [%lu] %lu\n", (ulong) inst.mem.address, (ulong) inst.mem.source);
 			continue;
 		case Ir_BitNot:
 			fprintf(dest, "not %lu\n", (ulong) inst.unop);
@@ -465,13 +532,19 @@ void printBlock (FILE *dest, Block *blk, IrList ir) {
 			fprintf(dest, "zeroex i%lu, %lu\n", (ulong) inst.size * 8, (ulong) inst.unop);
 			continue;
 		case Ir_Access:
-			fprintf(dest, "access i%lu, %lu @ %lu\n", (ulong) inst.size * 8, (ulong) inst.binop.lhs, (ulong) inst.binop.rhs);
+			fprintf(dest, "access i%lu, %lu @ %lu\n", (ulong) inst.size * 8, (ulong) inst.unop_const.val, (ulong) inst.unop_const.offset);
 			continue;
 		case Ir_IntToFloat:
 			fprintf(dest, "int->float %lu\n", (ulong) inst.unop);
 			continue;
 		case Ir_FloatToInt:
 			fprintf(dest, "float->int %lu\n", (ulong) inst.unop);
+			continue;
+		case Ir_VaArg:
+			fprintf(dest, "va_arg i%lu, %lu\n", (ulong) inst.size * 8, (ulong) inst.unop);
+			continue;
+		case Ir_VaStart:
+			fprintf(dest, "va_start %lu, param %lu\n", (ulong) inst.unop_const.val, (ulong) inst.unop_const.offset);
 			continue;
 		case Ir_Add: fprintf(dest, "add"); break;
 		case Ir_Sub: fprintf(dest, "sub"); break;
@@ -486,7 +559,7 @@ void printBlock (FILE *dest, Block *blk, IrList ir) {
 		case Ir_Equals: fprintf(dest, "cmp=="); break;
 		case Ir_ShiftLeft: fprintf(dest, "shift<<"); break;
 		case Ir_ShiftRight: fprintf(dest, "shift>>"); break;
-		default: unreachable;
+// 		default: unreachable;
 		}
 		fprintf(dest, " %lu %lu\n", (ulong) inst.binop.lhs, (ulong) inst.binop.rhs);
 	}
@@ -511,7 +584,18 @@ void printBlock (FILE *dest, Block *blk, IrList ir) {
 		else
 			fprintf(dest, "       ret %lu\n", (ulong) exit.ret);
 		break;
-	default: {}
+	case Exit_Switch: {
+		fprintf(dest, "       switch %lu: ", (ulong) exit.switch_.value);
+		Cases cases = exit.switch_.cases;
+		for (u32 i = 0; i < cases.len; i++) {
+			Block *target = cases.ptr[i].dest;
+			fprintf(dest, "%llu => %.*s%lu, ", (unsigned long long) cases.ptr[i].value,
+					STRING_PRINTAGE(target->label), (ulong) target->id);
+		}
+		Block *def = exit.switch_.default_case;
+		fprintf(dest, "default => %.*s%lu\n", STRING_PRINTAGE(def->label), (ulong) def->id);
+	} break;
+	default: unreachable;
 	}
 }
 

@@ -67,13 +67,13 @@ String zstr (const char *s) {
 }
 
 static void printError (SourceFile source, u32 offset, const char *msg, ...) {
-    printErr(source, offset);
-    va_list args;
-    va_start(args, msg);
-    vfprintf(stderr, msg, args);
-    va_end(args);
-    fprintf(stderr, ".\n");
-    exit(1);
+	printErr(source, offset);
+	va_list args;
+	va_start(args, msg);
+	vfprintf(stderr, msg, args);
+	va_end(args);
+	fprintf(stderr, ".\n");
+	exit(1);
 }
 
 SourceFile *readAllAlloc (String path, String filename) {
@@ -192,10 +192,11 @@ void printInfo (SourceFile source, u32 offset) {
 void generalFatal(const char *msg, ...) {
 	fprintf(stderr, "%s%serror:   %s", BOLD, RED, RESET);
 	va_list args;
-    va_start(args, msg);
-    vfprintf(stderr, msg, args);
-    va_end(args);
-    exit(1);
+	va_start(args, msg);
+	vfprintf(stderr, msg, args);
+	va_end(args);
+	fprintf(stderr, ".\n");
+	exit(1);
 }
 
 
@@ -203,14 +204,14 @@ void printto (char **insert, const char *end, const char *fmt, ...) {
 	if (*insert >= end)
 		return;
 	va_list args;
-    va_start(args, fmt);
-    int count = vsnprintf(*insert, end-*insert, fmt, args);
-    va_end(args);
-    if (count < 0) {
-    	perror(NULL);
-    	exit(1);
-    }
-    *insert += count;
+	va_start(args, fmt);
+	int count = vsnprintf(*insert, end-*insert, fmt, args);
+	va_end(args);
+	if (count < 0) {
+		perror(NULL);
+		exit(1);
+	}
+	*insert += count;
 }
 
 

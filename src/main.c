@@ -37,6 +37,9 @@ typedef enum {
 
 	F_OptSimple,
 	F_OptStoreLoad,
+	F_OptArith,
+	F_OptMemreduce,
+	F_OptMemreduceStrong,
 	F_Werror,
 } Flag;
 
@@ -69,6 +72,9 @@ static Name flags[] = {
 
 	{"O", F_OptSimple},
 	{"Ostore-load", F_OptStoreLoad},
+	{"Oarith", F_OptArith},
+	{"Omem1", F_OptMemreduce},
+	{"Omem2", F_OptMemreduceStrong},
 	{"Werr", F_Werror},
 	{"Werror", F_Werror},
 	{0}
@@ -108,8 +114,11 @@ const char *help_string = "Usage:\n"
 	"                   and <def-kind> is either ‘decl’, ‘def’, ‘type’ or ‘macro’.\n"
 	"\n"
 	"Optimizations:\n"
-	" -O              Perform optimizations: -Ostore-load.\n"
+	" -O              Perform optimizations: -Omem1, -Oarith.\n"
+	" -Oarith         Apply some arithmetic simplifications.\n"
 	" -Ostore-load    Fold simple store-load sequences.\n"
+	" -Omem1          Perform block-local memory elisions.\n"
+	" -Omem2          Perform whole-function memory elisions.\n"
 	"\n"
 	"Options to assist in fixing compiler errors:\n"
 	" -ir             (Output option) Print the intermediate representation.\n"
@@ -145,12 +154,12 @@ bool had_output = false;
 static const char *stdout_marker = "<stdout>";
 
 static void setOut(const char **dest, char *f) {
-	static bool had_stdout;
+	static bool had_stdout = false; // TODO Inits!
 	if (f) {
 		*dest = f;
 	} else {
 		if (had_stdout)
-			generalFatal("Only one output option can write to stdout; specify a destination file by appending ‘=<FILENAME>’.\n");
+			generalFatal("Only one output option can write to stdout; specify a destination file by appending ‘=<FILENAME>’");
 
 		*dest = stdout_marker;
 		had_stdout = true;
@@ -162,7 +171,7 @@ static FILE *openOut(const char *name) {
 		return stdout;
 	FILE *f = fopen(name, "w");
 	if (f == NULL)
-		generalFatal("Could not open output file %s\n", name);
+		generalFatal("Could not open output file %s", name);
 	return f;
 }
 
@@ -182,6 +191,7 @@ Target target_x64_linux_gcc = {
 	},
 	.ptr_size = I64,
 	.int_size = I32,
+	.valist_size = I32 + I32 + I64 + I64,
 	.version = Version_GNU,
 };
 
@@ -194,9 +204,9 @@ int main (int argc, char **args) {
 	String input = {0};
 	Arena arena = create_arena(256 * 1024);
 
-	Options opt = {
+	Options options = {
 		.target = target_x64_linux_gcc,
-		.warn_on_wrapping = true,
+// 		.warn_on_wrapping = true,
 		.warn_char_subscript = true,
 		.warn_compare = true,
 	};
@@ -210,6 +220,8 @@ int main (int argc, char **args) {
 
 	bool stdinc = true;
 	bool opt_store_load = false;
+	bool opt_memreduce = false;
+	bool opt_arith = false;
 
 	LexParams paths = {0};
 
@@ -231,8 +243,8 @@ int main (int argc, char **args) {
 			case F_Version:
 				fprintf(stderr, "%s NECC Version 0.0%s\n", BOLD, RESET);
 				return 0;
-			case F_Crashing: opt.crash_on_error = true; break;
-			case F_Debug: opt.gen_debug = true; break;
+			case F_Crashing: options.crash_on_error = true; break;
+			case F_Debug: options.gen_debug = true; break;
 			case F_EmitIr: setOut(&ir_out, direct_arg); break;
 			case F_EmitAssembly: setOut(&assembly_out, direct_arg); break;
 			case F_EmitObj: setOut(&obj_out, direct_arg); break;
@@ -245,7 +257,7 @@ int main (int argc, char **args) {
 				if (v == -1)
 					fprintf(stderr, "%swarning: %sIgnoring unknown version name %s\n", YELLOW, RESET, args[i]);
 				else
-					opt.target.version = v;
+					options.target.version = v;
 			} break;
 			case F_Include: {
 				const char *arg = direct_arg ? direct_arg : args[++i];
@@ -260,11 +272,16 @@ int main (int argc, char **args) {
 				PUSH(paths.sys_include_dirs, checkIncludePath(&arena, arg));
 			} break;
 			case F_NoStdInc: stdinc = false; break;
+			case F_Werror: options.error_on_warnings = true; break;
 			case F_OptSimple:
-				opt_store_load = true;
+				opt_memreduce = true;
+				opt_arith = true;
 				break;
 			case F_OptStoreLoad: opt_store_load = true; break;
-			case F_Werror: opt.error_on_warnings = true; break;
+			case F_OptArith: opt_arith = true; break;
+			case F_OptMemreduce: opt_memreduce = true; break;
+
+			case F_OptMemreduceStrong:
 			case F_Unknown:
 				fprintf(stderr, "%swarning: %sIgnoring unknown flag %s\n", YELLOW, RESET, args[i]);
 			}
@@ -274,31 +291,43 @@ int main (int argc, char **args) {
 	}
 
 	if (!input.len)
-		generalFatal("Please supply a file name. (Use \"-h\" to show usage information.)\n");
+		generalFatal("Please supply a file name. (Use \"-h\" to show usage information.)");
 
 	if (!had_output)
 		exe_out = "a.out";
 
-// 	char tmp_obj[L_tmpnam] = {0};
-// 	char tmp_asm[L_tmpnam] = {0};
-
-	if (exe_out && !obj_out) {
-// 		tmpnam(tmp_obj);
-// 		obj_out = tmp_obj;
-		obj_out = "/tmp/a.obj";
-	}
-	if (obj_out && !assembly_out) {
-// 		tmpnam(tmp_asm);
-// 		assembly_out = tmp_asm;
-		assembly_out = "/tmp/a.s";
-	}
 
 	i32 i;
 	for (i = input.len - 1; i >= 0; i--) {
 		if (input.ptr[i] == '/')
 			break;
 	}
-	String input_directory = {i+1, input.ptr};
+	i++;
+	String input_directory = {i, input.ptr};
+	String input_name = {input.len - i, input.ptr + i};
+
+	const char *obj_name = obj_out;
+	char obj_name_buf[1024];
+	if (!obj_name) {
+		obj_name = obj_name_buf;
+		u32 len = input_name.len;
+		if (input_name.ptr[len-2] == '.' && input_name.ptr[len-1] == 'c')
+			len -= 2;
+		memcpy(obj_name_buf, input_name.ptr, len);
+		memcpy(obj_name_buf + len, ".o", 3);
+	}
+
+	char tmp_obj[L_tmpnam] = {0};
+	char tmp_asm[L_tmpnam] = {0};
+	if (exe_out && !obj_out) {
+		tmpnam(tmp_obj);
+		obj_out = tmp_obj;
+	}
+
+	if (obj_out && !assembly_out) {
+		tmpnam(tmp_asm);
+		assembly_out = tmp_asm;
+	}
 
 	if (stdinc) {
 		PUSH(paths.sys_include_dirs, zstr(MUSL_DIR "/arch/generic/"));
@@ -313,27 +342,27 @@ int main (int argc, char **args) {
 	// TODO
 // 	predefine(arena, macros, "__DATE__", 1);
 // 	predefine(arena, macros, "__TIME__", 1);
-	if (opt.target.version & Features_C23) {
+	if (options.target.version & Features_C23) {
 		PUSH(paths.system_macros, zstr("__STDC_VERSION__=202301L"));
-	} else if (opt.target.version & Features_C11) {
+	} else if (options.target.version & Features_C11) {
 		PUSH(paths.system_macros, zstr("__STDC_VERSION__=201710L"));
-	} else if (opt.target.version & Features_C99) {
+	} else if (options.target.version & Features_C99) {
 		PUSH(paths.system_macros, zstr("__STDC_VERSION__=199901L"));
 	}
 
 
-	if (opt.target.version & Features_C99) {
+	if (options.target.version & Features_C99) {
 		PUSH(paths.system_macros, zstr("__STDC_HOSTED__"));
 	}
 
-	if (opt.target.version & Features_C11) {
+	if (options.target.version & Features_C11) {
 		PUSH(paths.system_macros, zstr("__STDC_ANALYZABLE__"));
 		PUSH(paths.system_macros, zstr("__STDC_NO_ATOMICS__"));
 		PUSH(paths.system_macros, zstr("__STDC_NO_COMPLEX__"));
 		PUSH(paths.system_macros, zstr("__STDC_NO_THREADS__"));
 	}
 
-	if (opt.target.version &Features_GNU_Extensions) {
+	if (options.target.version & Features_GNU_Extensions) {
 		PUSH(paths.system_macros, zstr("unix"));
 		PUSH(paths.system_macros, zstr("__unix__"));
 		PUSH(paths.system_macros, zstr("__LITTLE_ENDIAN__"));
@@ -344,8 +373,7 @@ int main (int argc, char **args) {
 	// The Real Work happens now.
 	Tokenization tokens = lex(&arena, input, paths);
 
-	const char *out_name = exe_out ? exe_out :
-		obj_out ? obj_out : "a.out";
+	const char *out_name = exe_out ? exe_out : obj_name;
 	if (deps_out)
 		emitDeps(deps_out, out_name, tokens.files, true);
 	if (localdeps_out)
@@ -354,9 +382,9 @@ int main (int argc, char **args) {
 	if (!ir_out && !assembly_out && !obj_out && !exe_out)
 		return 0;
 
-	parse(&arena, tokens, &opt, &module);
+	parse(&arena, tokens, &options, &module);
 
-	if (opt.emitted_warnings && opt.error_on_warnings)
+	if (options.emitted_warnings && options.error_on_warnings)
 		generalFatal("generated warnings");
 
 	// Analyses and transformations
@@ -364,10 +392,26 @@ int main (int argc, char **args) {
 		StaticValue *val = &module.ptr[i];
 		if (val->def_state == Def_Defined && val->def_kind == Static_Function) {
 			Blocks linearized = {0};
-			scheduleBlocksStraight(&arena, val->function_entry, &linearized);
-			if (opt_store_load)
+			scheduleBlocksStraight(&arena, val->function_ir.entry, &linearized);
+
+			if (opt_store_load) {
+				storeLoadPropagate(val->function_ir, linearized);
+			}
+			if (opt_memreduce) {
 				innerBlockPropagate(val->function_ir, linearized);
-			resolveCopies(val->function_ir);
+			}
+			if (opt_arith) {
+				resolveCopies(val->function_ir, linearized);
+// 				decimateIr(&val->function_ir, linearized);
+				u16 *uses = malloc(val->function_ir.len * 2);
+				calcUsage(val->function_ir, uses);
+				arithSimplify(val->function_ir, uses);
+				free(uses);
+			}
+			if (opt_store_load || opt_memreduce || opt_arith)
+				resolveCopies(val->function_ir, linearized);
+
+			// The output passes currently require decimated IR.
 			decimateIr(&val->function_ir, linearized);
 			free(linearized.ptr);
 		}
@@ -385,7 +429,7 @@ int main (int argc, char **args) {
 	}
 	if (obj_out) {
 		assert(assembly_out);
-		const char *cmd = concat(&arena, "fasm -m500000 \"", assembly_out, "\" \"", obj_out, "\"", 0);
+		const char *cmd = concat(&arena, "fasm -m700000 \"", assembly_out, "\" \"", obj_out, "\"", 0);
 		system(cmd);
 	}
 	if (exe_out) {
@@ -422,7 +466,7 @@ int main (int argc, char **args) {
 
 static String checkIncludePath (Arena *arena, const char *path) {
 	if (!isDirectory(path))
-		generalFatal("could not open include path %s.\n", path);
+		generalFatal("could not open include path %s", path);
 	u32 len = strlen(path);
 	if (path[len-1] == '/')
 		return (String) {len, path};
@@ -445,7 +489,7 @@ static void emitIr (Arena *arena, const char *ir_out, Module module) {
 			fprintf(dest, "extern %.*s\n", STRING_PRINTAGE(val.name));
 		} else if (val.def_kind == Static_Function) {
 			fprintf(dest, "%s:\n", printDeclarator(arena, val.type, val.name));
-			printBlock(dest, val.function_entry, val.function_ir);
+			printBlock(dest, val.function_ir.entry, val.function_ir);
 		} else {
 			if (val.type.qualifiers & Static_Variable)
 				fprintf(dest, "variable ");

@@ -9,19 +9,21 @@ C_DBG_FLAGS := -g -O0 -fsanitize=address -fsanitize=undefined
 C_REL_FLAGS := -fstrict-aliasing -g -w -fno-omit-frame-pointer -O1
 
 OBJS := $(patsubst src/%.c,bin/%.o,$(C_SRCS))
+SELFHOST_OBJS := $(patsubst src/%.c,selfhost/%.o,$(C_SRCS))
 
-REQUIRED_DIRS := bin tests/bin
+REQUIRED_DIRS := bin tests/bin selfhost
 
 debug: bin/necc-dbg
 
 release: bin/necc
+
+self: selfhost/necc
 
 run: debug
 	@./bin/necc-dbg test.c
 
 test: tests/bin/main
 	@./tests/bin/main && echo "Tests passed." || echo "Tests failed."
-
 
 
 tests/bin/main: $(C_TESTS) $(filter-out bin/main.c.o, $(OBJS))
@@ -37,12 +39,20 @@ bin/necc: $(C_SRCS) $(C_HDRS)
 	$(CC) $(C_SRCS) $(C_FLAGS) $(C_REL_FLAGS) -o $@
 
 
+selfhost/necc: $(SELFHOST_OBJS)
+	musl-gcc -static $^ -lm -o $@
+
+selfhost/%.o: src/%.c $(C_HDRS) bin/necc-dbg
+	./bin/necc-dbg $< -c=$@ -std gnu -Werror -def MUSL_DIR=\"/home/tau/foreign/lang/musl-1.2.3\"
+
+
 
 .PHONY: debug release re clean printvars \
-		run run-rel gdb lldb
+		self run run-rel gdb lldb
 
 clean:
 	@rm -f -r bin/*
+	@rm -f -r selfhost/*
 	@rm -f -r tests/bin/*
 	@mkdir -p $(REQUIRED_DIRS)
 

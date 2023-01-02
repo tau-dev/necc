@@ -100,7 +100,6 @@ typedef struct {
 	References value_references;
 
 	IrList function_ir;
-	Block *function_entry;
 } StaticValue;
 
 typedef LIST(StaticValue) Module;
