@@ -46,8 +46,9 @@ typedef enum {
 	Ir_Parameter,
 	Ir_PhiOut, // Not referred to
 	Ir_PhiIn,
-	Ir_StackAlloc,
-	Ir_StackDealloc, // Not referred to
+	Ir_StackAllocFixed,
+	Ir_StackAllocVLA,
+	Ir_StackDeallocVLA, // Not referred to
 	Ir_Copy,
 	Ir_Load,
 	Ir_LoadVolatile,
@@ -64,8 +65,11 @@ typedef enum {
 	Ir_Add,
 	Ir_Sub,
 	Ir_Mul,
+	Ir_SMul,
 	Ir_Div,
+	Ir_SDiv,
 	Ir_Mod,
+	Ir_SMod,
 	Ir_BitAnd,
 	Ir_BitOr,
 	Ir_BitNot,
@@ -106,7 +110,7 @@ typedef struct Inst {
 			u32 offset;
 		} unop_const;
 		struct {
-			IrRef size;
+			u32 size; // IrRef for Ir_StackAllocVLA
 			u32 known_offset; // STYLE Without this, instructions could be immutable
 		} alloc;
 		struct {
@@ -139,8 +143,11 @@ typedef struct Inst {
 	case Ir_Add: \
 	case Ir_Sub: \
 	case Ir_Mul: \
+	case Ir_SMul: \
 	case Ir_Div: \
+	case Ir_SDiv: \
 	case Ir_Mod: \
+	case Ir_SMod: \
 	case Ir_BitOr: \
 	case Ir_BitXor: \
 	case Ir_BitAnd: \
@@ -158,7 +165,7 @@ typedef struct Inst {
 	case Ir_ZeroExtend: \
 	case Ir_FloatToInt: \
 	case Ir_IntToFloat: \
-	case Ir_StackDealloc: \
+	case Ir_StackDeallocVLA: \
 	case Ir_VaArg
 
 #define UNOP_CONST_CASES \
@@ -169,6 +176,7 @@ typedef struct Inst {
 	case Ir_Reloc: \
 	case Ir_Constant: \
 	case Ir_Parameter: \
+	case Ir_StackAllocFixed: \
 	case Ir_PhiIn
 
 typedef struct {

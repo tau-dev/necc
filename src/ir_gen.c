@@ -1,4 +1,5 @@
 #include "ir_gen.h"
+#include "checked_arith.h"
 
 /*
 
@@ -22,11 +23,10 @@ IrRef genParameter (IrBuild *build, u32 param_id) {
 }
 
 IrRef genStackAllocFixed (IrBuild *build, u32 size) {
-	IrRef r = genImmediateInt(build, size, I32);
-	return genStackAlloc(build, r);
+	return append(build, (Inst) {Ir_StackAllocFixed, PTR_SIZE, .alloc = {size}});
 }
-IrRef genStackAlloc (IrBuild *build, IrRef size) {
-	return append(build, (Inst) {Ir_StackAlloc, PTR_SIZE, .alloc = {size}});
+IrRef genStackAllocVLA (IrBuild *build, IrRef size) {
+	return append(build, (Inst) {Ir_StackAllocVLA, PTR_SIZE, .alloc = {size}});
 }
 
 void genReturnVal (IrBuild *build, IrRef val) {
@@ -80,52 +80,79 @@ Block *startNewBlock (IrBuild *build, String label) {
 	return blk;
 }
 
+// Unsigned->signed conversion: unlike signed->unsigned casts that are
+// wrapping, unsigned->signed casts out of range would be undefined
+// behavior.
+// Correction: in C17, at least, the result is actually an
+// implementation-defined value or a signal. Hm.
+static inline i64 toSigned(u64 i) {
+	return i <= INT64_MAX ? (i64) i : i == UINT64_MAX ? (i64) -1 : -(i64) (i - INT64_MAX);
+}
 
-static IrRef genBinOp (IrBuild *build, InstKind op, IrRef a, IrRef b) {
+static IrRef genBinOp (IrBuild *build, InstKind op, IrRef a, IrRef b, bool *did_overflow) {
 	Inst *inst = build->ir.ptr;
-	// a apparently has to be the bigger operand:
+	assert(inst[a].size == inst[b].size);
 	Inst i = {op, inst[a].size, .binop = {a, b}};
 
 	bool commutative = op == Ir_Add || op == Ir_Mul || op == Ir_BitAnd || op == Ir_BitOr || op == Ir_BitXor || op == Ir_Equals;
 	if (inst[a].kind == Ir_Constant && inst[b].kind == Ir_Constant) {
 		i.kind = Ir_Constant;
-		// TODO Check overflow.
+		u64 lhs = inst[a].constant;
+		u64 rhs = inst[b].constant;
 		switch (op) {
 		case Ir_Add:
-			i.constant = inst[a].constant + inst[b].constant; break;
+			i.constant = lhs + rhs; break;
 		case Ir_Sub:
-			i.constant = inst[a].constant - inst[b].constant; break;
+			i.constant = lhs - rhs; break;
 		case Ir_Mul:
-			i.constant = inst[a].constant * inst[b].constant; break;
+			i.constant = lhs * rhs; break;
+		case Ir_SMul:
+			if (mulSignedOverflow(toSigned(lhs), toSigned(rhs), i.size)) {
+				i.kind = Ir_SMul;
+				*did_overflow = true;
+				break;
+			}
+			i.constant = toSigned(lhs) * toSigned(rhs);
+			break;
 		case Ir_Div:
-			if (inst[b].constant == 0) {
+			if (rhs == 0) {
 				i.kind = Ir_Div;
+				*did_overflow = true;
 				break;
 			}
-			i.constant = inst[a].constant / inst[b].constant; break;
+			i.constant = lhs / rhs;
+			break;
+		case Ir_SDiv:
+			if (rhs == 0 || (toSigned(lhs) == INT64_MIN &&  toSigned(rhs) == -1)) {
+				i.kind = Ir_SDiv;
+				*did_overflow = true;
+				break;
+			}
+			i.constant = toSigned(lhs) / toSigned(rhs);
+			break;
 		case Ir_Mod:
-			if (inst[b].constant == 0) {
-				i.kind = Ir_Div;
+			if (rhs == 0) {
+				i.kind = Ir_Mod;
 				break;
 			}
-			i.constant = inst[a].constant % inst[b].constant;
+			i.constant = lhs % rhs;
 			break;
 		case Ir_BitAnd:
-			i.constant = inst[a].constant & inst[b].constant; break;
+			i.constant = lhs & rhs; break;
 		case Ir_BitOr:
-			i.constant = inst[a].constant | inst[b].constant; break;
+			i.constant = lhs | rhs; break;
 		case Ir_BitXor:
-			i.constant = inst[a].constant ^ inst[b].constant; break;
+			i.constant = lhs ^ rhs; break;
 		case Ir_Equals:
-			i.constant = inst[a].constant == inst[b].constant; break;
+			i.constant = lhs == rhs; break;
 		case Ir_LessThan:
-			i.constant = inst[a].constant < inst[b].constant; break;
+			i.constant = lhs < rhs; break;
 		case Ir_LessThanOrEquals:
-			i.constant = inst[a].constant <= inst[b].constant; break;
+			i.constant = lhs <= rhs; break;
 		case Ir_ShiftLeft:
-			i.constant = inst[a].constant << inst[b].constant; break;
+			i.constant = lhs << rhs; break;
 		case Ir_ShiftRight:
-			i.constant = inst[a].constant >> inst[b].constant; break;
+			i.constant = lhs >> rhs; break;
 		default:
 			unreachable;
 		}
@@ -179,52 +206,61 @@ static IrRef genBinOp (IrBuild *build, InstKind op, IrRef a, IrRef b) {
 IrRef genAdd (IrBuild *build, IrRef a, IrRef b) {
 	Inst *inst = build->ir.ptr;
 	assert(inst[a].size == inst[b].size);
-	return genBinOp(build, Ir_Add, a, b);
+	return genBinOp(build, Ir_Add, a, b, NULL);
 }
 
 IrRef genSub (IrBuild *build, IrRef a, IrRef b) {
 	Inst *inst = build->ir.ptr;
 	assert(inst[a].size == inst[b].size);
-	return genBinOp(build, Ir_Sub, a, b);
+	return genBinOp(build, Ir_Sub, a, b, NULL);
 }
 
 
-IrRef genMul (IrBuild *build, IrRef a, IrRef b) {
-	return genBinOp(build, Ir_Mul, a, b);
+IrRef genMulUnsigned (IrBuild *build, IrRef a, IrRef b) {
+	return genBinOp(build, Ir_Mul, a, b, NULL);
+}
+IrRef genMulSigned (IrBuild *build, IrRef a, IrRef b, bool *overflow) {
+	return genBinOp(build, Ir_SMul, a, b, overflow);
 }
 
-IrRef genDiv (IrBuild *build, IrRef a, IrRef b) {
-	return genBinOp(build, Ir_Div, a, b);
+IrRef genDivUnsigned (IrBuild *build, IrRef a, IrRef b, bool *overflow_or_div0) {
+	return genBinOp(build, Ir_Div, a, b, overflow_or_div0);
+}
+IrRef genDivSigned (IrBuild *build, IrRef a, IrRef b, bool *overflow_or_div0) {
+	return genBinOp(build, Ir_SDiv, a, b, overflow_or_div0);
 }
 
-IrRef genMod (IrBuild *build, IrRef a, IrRef b) {
-	return genBinOp(build, Ir_Mod, a, b);
+IrRef genModUnsigned (IrBuild *build, IrRef a, IrRef b, bool *overflow_or_div0) {
+	return genBinOp(build, Ir_Mod, a, b, overflow_or_div0);
+}
+IrRef genModSigned (IrBuild *build, IrRef a, IrRef b, bool *overflow_or_div0) {
+	return genBinOp(build, Ir_SMod, a, b, overflow_or_div0);
 }
 
 IrRef genOr (IrBuild *build, IrRef a, IrRef b) {
 	Inst *inst = build->ir.ptr;
 	assert(inst[a].size == inst[b].size);
-	return genBinOp(build, Ir_BitOr, a, b);
+	return genBinOp(build, Ir_BitOr, a, b, NULL);
 }
 
 IrRef genXor (IrBuild *build, IrRef a, IrRef b) {
 	Inst *inst = build->ir.ptr;
 	assert(inst[a].size == inst[b].size);
-	return genBinOp(build, Ir_BitXor, a, b);
+	return genBinOp(build, Ir_BitXor, a, b, NULL);
 }
 
 IrRef genAnd (IrBuild *build, IrRef a, IrRef b) {
 	Inst *inst = build->ir.ptr;
 	assert(inst[a].size == inst[b].size);
-	return genBinOp(build, Ir_BitAnd, a, b);
+	return genBinOp(build, Ir_BitAnd, a, b, NULL);
 }
 
 IrRef genShiftLeft (IrBuild *build, IrRef a, IrRef b) {
-	return genBinOp(build, Ir_ShiftLeft, a, b);
+	return genBinOp(build, Ir_ShiftLeft, a, b, NULL);
 }
 
 IrRef genShiftRight (IrBuild *build, IrRef a, IrRef b) {
-	return genBinOp(build, Ir_ShiftRight, a, b);
+	return genBinOp(build, Ir_ShiftRight, a, b, NULL);
 }
 
 
@@ -498,13 +534,16 @@ void printBlock (FILE *dest, Block *blk, IrList ir) {
 		case Ir_Parameter:
 			fprintf(dest, "param %lu\n", (ulong) inst.size);
 			continue;
-		case Ir_StackAlloc:
+		case Ir_StackAllocFixed:
 			fprintf(dest, "stack %lu\n", (ulong) inst.alloc.size);
+			break;
+		case Ir_StackAllocVLA:
+			fprintf(dest, "stack_vla %lu\n", (ulong) inst.alloc.size);
 			continue;
 		case Ir_Copy:
 			fprintf(dest, "copy %lu\n", (ulong) inst.unop);
 			continue;
-		case Ir_StackDealloc:
+		case Ir_StackDeallocVLA:
 			fprintf(dest, "discard %lu\n", (ulong) inst.unop);
 			continue;
 		case Ir_Load:
@@ -549,8 +588,11 @@ void printBlock (FILE *dest, Block *blk, IrList ir) {
 		case Ir_Add: fprintf(dest, "add"); break;
 		case Ir_Sub: fprintf(dest, "sub"); break;
 		case Ir_Mul: fprintf(dest, "mul"); break;
+		case Ir_SMul: fprintf(dest, "smul"); break;
 		case Ir_Div: fprintf(dest, "div"); break;
+		case Ir_SDiv: fprintf(dest, "sdiv"); break;
 		case Ir_Mod: fprintf(dest, "mod"); break;
+		case Ir_SMod: fprintf(dest, "smod"); break;
 		case Ir_BitAnd: fprintf(dest, "and"); break;
 		case Ir_BitOr: fprintf(dest, "or"); break;
 		case Ir_BitXor: fprintf(dest, "xor"); break;

@@ -66,10 +66,7 @@ typedef enum {
 	Tok_Identifier,
 	Tok_String,
 	Tok_Real,
-	Tok_Int,
-	Tok_UInt,
-	Tok_Long,
-	Tok_ULong,
+	Tok_Integer,
 
 	Tok_OpenParen,
 	Tok_CloseParen,
@@ -147,6 +144,7 @@ const char *tokenNameHighlighted(TokenKind k);
 typedef struct Token {
 	TokenKind kind;
 	u8 preceded_by_space;
+	u8 literal_type;
 
 	union {
 		i64 integer_s;

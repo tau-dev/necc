@@ -1,6 +1,6 @@
 
 // Returns the supplied formatting code if stderr is a terminal
-// supporting ANSII escapes, the empty string otherwise.
+// supporting ANSI escapes, the empty string otherwise.
 const char *ifTerminal(const char*);
 
 #define BLACK ifTerminal("\x1b[30m")

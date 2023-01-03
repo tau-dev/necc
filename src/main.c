@@ -5,7 +5,7 @@
 #include "parse.h"
 #include "arena.h"
 #include "ir_gen.h"
-#include "ansii.h"
+#include "ansi.h"
 #include "analysis.h"
 
 
@@ -34,6 +34,7 @@ typedef enum {
 	F_EmitObj,
 	F_EmitDeps,
 	F_EmitLocalDeps,
+	F_Run,
 
 	F_OptSimple,
 	F_OptStoreLoad,
@@ -59,6 +60,7 @@ static Name flags[] = {
 	{"stdinc", F_StdInc},
 	{"nostdinc", F_NoStdInc},
 
+	{"run", F_Run},
 	{"ir", F_EmitIr},
 	{"as", F_EmitAssembly},
 	{"o", F_EmitExe},
@@ -222,6 +224,7 @@ int main (int argc, char **args) {
 	bool opt_store_load = false;
 	bool opt_memreduce = false;
 	bool opt_arith = false;
+	bool runit = false;
 
 	LexParams paths = {0};
 
@@ -251,6 +254,7 @@ int main (int argc, char **args) {
 			case F_EmitExe: setOut(&exe_out, direct_arg); break;
 			case F_EmitDeps: setOut(&deps_out, direct_arg); break;
 			case F_EmitLocalDeps: setOut(&localdeps_out, direct_arg); break;
+			case F_Run: runit = true; break;
 			case F_Standard: {
 				const char *arg = direct_arg ? direct_arg : args[++i];
 				i32 v = find(arg, versions);
@@ -294,7 +298,7 @@ int main (int argc, char **args) {
 		generalFatal("Please supply a file name. (Use \"-h\" to show usage information.)");
 
 	if (!had_output)
-		exe_out = "a.out";
+		exe_out = "./a.out";
 
 
 	i32 i;
@@ -317,8 +321,15 @@ int main (int argc, char **args) {
 		memcpy(obj_name_buf + len, ".o", 3);
 	}
 
+	char tmp_exe[L_tmpnam] = {0};
 	char tmp_obj[L_tmpnam] = {0};
 	char tmp_asm[L_tmpnam] = {0};
+
+	if (runit && !exe_out) {
+		tmpnam(tmp_exe);
+		exe_out = tmp_exe;
+	}
+
 	if (exe_out && !obj_out) {
 		tmpnam(tmp_obj);
 		obj_out = tmp_obj;
@@ -429,15 +440,22 @@ int main (int argc, char **args) {
 	}
 	if (obj_out) {
 		assert(assembly_out);
-		const char *cmd = concat(&arena, "fasm -m700000 \"", assembly_out, "\" \"", obj_out, "\"", 0);
-		system(cmd);
+		const char *cmd = concat(&arena, "fasm -m700000 \"", assembly_out, "\" \"", obj_out, "\" > /dev/null", NULL);
+		if (system(cmd))
+			generalFatal("failed to assemble");
 	}
 	if (exe_out) {
 		assert(obj_out);
-		const char *cmd = concat(&arena, "musl-gcc -static \"", obj_out, "\" -o", exe_out, 0);
-		system(cmd);
+		const char *cmd = concat(&arena, "musl-gcc -static -lm \"", obj_out, "\" -o", exe_out, NULL);
+		if (system(cmd))
+			generalFatal("failed to link object files");
 	}
 
+	if (runit) {
+		int res = system(exe_out);
+		if (res)
+			return res;
+	}
 #ifndef NDEBUG
 	free_arena(&arena, "code");
 	for (u32 i = 0; i < tokens.files.len; i++)

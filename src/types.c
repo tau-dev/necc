@@ -1,5 +1,5 @@
 #include "types.h"
-#include "ansii.h"
+#include "ansi.h"
 #include "util.h"
 #include "parse.h"
 // #include <stdarg.h>
@@ -25,13 +25,6 @@ const char *versionName(Version v) {
 	default:                 return "???";
 	}
 }
-
-
-// Size typeSize (Type t, const Target *target) {
-// 	switch (t.kind) {
-// 	default: unreachable;
-// 	}
-// }
 
 
 Type resolveType (Type t) {

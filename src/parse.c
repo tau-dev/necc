@@ -8,7 +8,7 @@
 #include <signal.h>
 
 #include "ir_gen.h"
-#include "ansii.h"
+#include "ansi.h"
 #include "dbgutils.h"
 
 
@@ -110,6 +110,8 @@ static void parsemsg (Log level, const Parse *p, const Token *main, const char *
     	p->opt->emitted_warnings = true;
 }
 
+
+
 static void redefinition (const Parse *p, const Token *main, const Token *previous, Symbol *name) {
     parsemsg(Log_Err, p, main, "redefinition of %.*s", name->name);
     parsemsg(Log_Info | Log_Fatal, p, previous, "previous definition was here");
@@ -158,6 +160,7 @@ static bool tryIntConstant (Parse *, Value, u64 *result);
 static bool tryEatStaticAssert(Parse *);
 static Value arithAdd(Parse *parse, const Token *primary, Value lhs, Value rhs);
 static Value arithSub(Parse *parse, const Token *primary, Value lhs, Value rhs);
+static Value arithMultiplicativeOp(Parse *parse, const Token *primary, Value lhs, Value rhs);
 static Type arithmeticConversions (Parse *parse, const Token *primary, Value *lhs, Value *rhs);
 static Type parseValueType (Parse *, Value (*operator)(Parse *));
 static Type parseTypeBase(Parse *, u8 *storage);
@@ -211,7 +214,7 @@ void parse (Arena *code_arena, Tokenization tokens, Options *opt, Module *module
 			continue;
 		}
 
-		if (storage == Storage_Auto)
+		if (storage == Storage_Auto || storage == Storage_Register)
 			parseerror(&parse, type_token, "top-level symbol can not have automatic (stack-allocated) storage duration");
 
 		if (allowedNoDeclarator(&parse, base_type))
@@ -830,14 +833,7 @@ static Value parseExprAssignment (Parse *parse) {
 		case Tok_AsteriskEquals:
 		case Tok_PercentEquals:
 		case Tok_SlashEquals: {
-			Type common = arithmeticConversions(parse, primary, &loaded, &assigned);
-
-			if (primary->kind == Tok_Asterisk)
-				assigned = (Value) {common, genMul(&parse->build, loaded.inst, assigned.inst)};
-			else if (primary->kind == Tok_Percent)
-				assigned = (Value) {common, genMod(&parse->build, loaded.inst, assigned.inst)};
-			else
-				assigned = (Value) {common, genDiv(&parse->build, loaded.inst, assigned.inst)};
+			assigned = arithMultiplicativeOp(parse, primary, loaded, assigned);
 		} break;
 		case Tok_AmpersandEquals: {
 			Type common = arithmeticConversions(parse, primary, &loaded, &assigned);
@@ -1184,14 +1180,7 @@ static Value parseExprMultiplication (Parse *parse) {
 		parse->pos++;
 		lhs = rvalue(lhs, parse);
 		Value rhs = rvalue(parseExprLeftUnary(parse), parse);
-
-		Type common = arithmeticConversions(parse, primary, &lhs, &rhs);
-		if (primary->kind == Tok_Asterisk)
-			lhs = (Value) {common, genMul(&parse->build, lhs.inst, rhs.inst)};
-		else if (primary->kind == Tok_Percent)
-			lhs = (Value) {common, genMod(&parse->build, lhs.inst, rhs.inst)};
-		else
-			lhs = (Value) {common, genDiv(&parse->build, lhs.inst, rhs.inst)};
+		lhs = arithMultiplicativeOp(parse, primary, lhs, rhs);
 	}
 }
 
@@ -1496,8 +1485,8 @@ static Value parseExprBase (Parse *parse) {
 		expect(parse, Tok_CloseParen);
 		return v;
 	}
-	case Tok_Int:
-		return immediateIntVal(parse, (Type) {Kind_Basic, .basic = Int_int}, t.val.integer_s);
+	case Tok_Integer:
+		return immediateIntVal(parse, (Type) {Kind_Basic, .basic = t.literal_type}, t.val.integer_u);
 // 	case Tok_Real:
 // 		return (Value) {{Kind_Basic, {Basic_double}}, genImmediateReal(t.val.real)};
 	case Tok_String: {
@@ -1914,7 +1903,7 @@ static void parseBracedInitializer (Parse *parse, InitializationDest dest) {
 		return;
 	}
 
-	if (parse->pos[0].kind == Tok_Int && parse->pos[0].val.integer_s == 0
+	if (parse->pos[0].kind == Tok_Integer && parse->pos[0].val.integer_u == 0
 		&& parse->pos[1].kind == Tok_CloseBrace)
 	{
 		parse->pos += 2;
@@ -2903,6 +2892,7 @@ static OrdinaryIdentifier *define (
 	if (existing && existing->scope_depth == parse->scope_depth) {
 		Type existing_type;
 		StaticValue *staticval = NULL;
+		String name = decl.name->name;
 
 		if (existing->kind == Sym_Value_Auto) {
 			existing_type = existing->value.typ;
@@ -2910,14 +2900,19 @@ static OrdinaryIdentifier *define (
 			staticval = &parse->module->ptr[existing->static_id];
 			existing_type = staticval->type;
 		} else {
-			// Actually: Redeclaration as different kind of symbol.
-			redefinition(parse, decl_token, existing->def_location, decl.name);
+			parsemsg(Log_Err, parse, decl_token, "redeclaration of %.*s as a different kind of symbol", STRING_PRINTAGE(name));
+    		parsemsg(Log_Info | Log_Fatal, parse, existing->decl_location, "previous declaration was here");
 		}
 
-		if (existing_link != link || !typeCompatible(decl.type, existing_type))
-			// Actually: Redeclaration with incompatible linkage/type.
-			redefinition(parse, decl_token, existing->def_location, decl.name);
+		if (existing_link != link) {
+			parsemsg(Log_Err, parse, decl_token, "redeclaration of %.*s with incompatible linkage", STRING_PRINTAGE(name));
+    		parsemsg(Log_Info | Log_Fatal, parse, existing->decl_location, "previous declaration was here");
+		}
 
+		if (!typeCompatible(decl.type, existing_type)) {
+			parsemsg(Log_Err, parse, defining_token, "redeclaration of %.*s with incompatible type %s", STRING_PRINTAGE(name), printTypeHighlighted(&parse->arena, decl.type));
+    		parsemsg(Log_Info | Log_Fatal, parse, existing->decl_location, "previous declaration had type %s", printTypeHighlighted(&parse->arena, existing_type));
+		}
 
 		if (defining_token) {
 			if (!staticval || staticval->def_state == Def_Defined)
@@ -3008,14 +3003,15 @@ static Value arithSub (Parse *parse, const Token *primary, Value lhs, Value rhs)
 	assert(!isLvalue(rhs));
 	IrBuild *build = &parse->build;
 	if (lhs.typ.kind == Kind_Pointer) {
-		IrRef stride = genImmediateInt(build,
-				typeSize(*lhs.typ.pointer, &parse->target), parse->target.ptr_size);
+		u32 stride_const = typeSize(*lhs.typ.pointer, &parse->target);
+		assert(stride_const != 0);
+		IrRef stride = genImmediateInt(build, stride_const, parse->target.ptr_size);
 
 		if (rhs.typ.kind == Kind_Pointer) {
 			IrRef diff = genSub(build, lhs.inst, rhs.inst);
-			return (Value) {parse->target.ptrdiff, genDiv(build, diff, stride)};
+			return (Value) {parse->target.ptrdiff, genDivUnsigned(build, diff, stride, NULL)};
 		} else {
-			IrRef idx = genMul(build, coercerval(rhs, parse->target.ptrdiff, parse, primary, false), stride);
+			IrRef idx = genMulUnsigned(build, coercerval(rhs, parse->target.ptrdiff, parse, primary, false), stride);
 			return (Value) {lhs.typ, genSub(build, lhs.inst, idx)};
 		}
 	} else {
@@ -3026,6 +3022,29 @@ static Value arithSub (Parse *parse, const Token *primary, Value lhs, Value rhs)
 	}
 }
 
+static Value arithMultiplicativeOp (Parse *parse, const Token *primary, Value lhs, Value rhs) {
+	Type common = arithmeticConversions(parse, primary, &lhs, &rhs);
+	IrRef inst;
+	bool overflow_or_div0;
+	if (common.basic & Int_unsigned) {
+		if (primary->kind == Tok_Asterisk)
+			inst = genMulUnsigned(&parse->build, lhs.inst, rhs.inst);
+		else if (primary->kind == Tok_Percent)
+			inst = genModUnsigned(&parse->build, lhs.inst, rhs.inst, &overflow_or_div0);
+		else
+			inst = genDivUnsigned(&parse->build, lhs.inst, rhs.inst, &overflow_or_div0);
+	} else {
+		if (primary->kind == Tok_Asterisk)
+			inst = genMulSigned(&parse->build, lhs.inst, rhs.inst, &overflow_or_div0);
+		else if (primary->kind == Tok_Percent)
+			inst = genModSigned(&parse->build, lhs.inst, rhs.inst, &overflow_or_div0);
+		else
+			inst = genDivSigned(&parse->build, lhs.inst, rhs.inst, &overflow_or_div0);
+	}
+	if (overflow_or_div0)
+		parseerror(parse, primary, "signed integer overflow or divide by zero");
+	return (Value) {common, inst};
+}
 
 static Type arithmeticConversions (Parse *parse, const Token *primary, Value *a, Value *b) {
 	*a = intPromote(*a, parse, primary);
@@ -3115,9 +3134,10 @@ static Value pointerAdd (IrBuild *ir, Value lhs, Value rhs, Parse *op_parse, con
 		integer = coercerval(lhs, op_parse->target.ptrdiff, op_parse, token, false);
 		ptr = rhs;
 	}
-	IrRef stride = genImmediateInt(ir,
-			typeSize(*ptr.typ.pointer, &op_parse->target), op_parse->target.ptr_size);
-	IrRef diff = genMul(ir, stride, integer);
+	u32 stride_const = typeSize(*ptr.typ.pointer, &op_parse->target);
+	assert(stride_const != 0);
+	IrRef stride = genImmediateInt(ir, stride_const, op_parse->target.ptr_size);
+	IrRef diff = genMulUnsigned(ir, stride, integer);
 	return (Value) {ptr.typ, genAdd(ir, ptr.inst, diff)};
 }
 

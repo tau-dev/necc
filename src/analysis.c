@@ -53,7 +53,7 @@ static IrRef copyUsed (IrList source, IrRef i, IrList *dest, IrRef *relocs) {
 			copyUsed(source, inst.mem.ordered_after, dest, relocs);
 		copyUsed(source, inst.mem.address, dest, relocs);
 		break;
-	case Ir_StackAlloc:
+	case Ir_StackAllocVLA:
 		copyUsed(source, inst.alloc.size, dest, relocs);
 		break;
 	case Ir_PhiOut:
@@ -102,7 +102,7 @@ static void applyRelocs (IrList ir, IrRef i, IrRef *relocs) {
 		if (inst->mem.ordered_after != IR_REF_NONE)
 			inst->mem.ordered_after = relocs[inst->mem.ordered_after];
 		break;
-	case Ir_StackAlloc:
+	case Ir_StackAllocVLA:
 		inst->alloc.size = relocs[inst->alloc.size];
 		break;
 	case Ir_PhiOut:
@@ -194,7 +194,7 @@ void calcLifetimes (IrList ir, ValuesSpan lastuses) {
 			if (inst.mem.ordered_after != IR_REF_NONE)
 				uses[inst.mem.ordered_after] = i;
 			break;
-		case Ir_StackAlloc:
+		case Ir_StackAllocVLA:
 			uses[inst.alloc.size] = i;
 			break;
 		case Ir_PhiOut:
@@ -280,7 +280,7 @@ void calcUsage (IrList ir, u16 *usage) {
 			if (inst.mem.ordered_after != IR_REF_NONE)
 				usage[inst.mem.ordered_after]++;
 			break;
-		case Ir_StackAlloc:
+		case Ir_StackAllocVLA:
 			usage[inst.alloc.size]++;
 			break;
 		case Ir_PhiOut:
@@ -431,7 +431,7 @@ void resolveCopies (IrList ir, Blocks blocks) {
 			decopy(ir, &inst->mem.address);
 			decopyOrder(ir, &inst->mem.ordered_after);
 			break;
-		case Ir_StackAlloc:
+		case Ir_StackAllocVLA:
 			decopy(ir, &inst->alloc.size);
 			break;
 		case Ir_PhiOut:
@@ -505,14 +505,16 @@ Alias canAlias(IrList ir, Inst inst, IrRef address1) {
 			return Alias_Always;
 		Inst address_inst1 = ir.ptr[address1];
 		Inst address_inst2 = ir.ptr[address2];
-		if (address_inst1.kind == Ir_StackAlloc) {
-			if (address_inst2.kind == Ir_StackAlloc)
+
+		// TODO Ir_StackAllocVLA cannot alias either
+		if (address_inst1.kind == Ir_StackAllocFixed) {
+			if (address_inst2.kind == Ir_StackAllocFixed)
 				return Alias_Never;
 			Inst tmp = address_inst2;
 			address_inst2 = address_inst1;
 			address_inst1 = tmp;
 		}
-		if (address_inst2.kind == Ir_StackAlloc && (address_inst1.kind == Ir_Reloc || address_inst1.kind == Ir_Parameter))
+		if (address_inst2.kind == Ir_StackAllocFixed && (address_inst1.kind == Ir_Reloc || address_inst1.kind == Ir_Parameter))
 			return Alias_Never;
 		if (address_inst1.kind == Ir_Reloc && address_inst2.kind == Ir_Reloc) {
 			if (address_inst1.reloc.id != address_inst2.reloc.id)

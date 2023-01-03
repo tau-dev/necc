@@ -4,7 +4,7 @@
 
 #include "lex_preproc.h"
 #include "arena.h"
-#include "ansii.h"
+#include "ansi.h"
 #include "common.h"
 
 /*
@@ -13,6 +13,9 @@ Combined lexer and preprocessor.
 
 */
 
+#if !MAX_INCLUDES
+#define MAX_INCLUDES 4096
+#endif
 #define ARRSIZE(x) sizeof(x)/sizeof(x[0])
 
 static inline bool isSpace(char);
@@ -391,7 +394,7 @@ static Token getToken (Arena *str_arena, SourceFile src, SymbolList *syms, const
 	char_literal:
 		pos++;
 		// TODO Get unicode vals.
-		tok = (Token) {Tok_Int, .val.integer_s = pos[0]};
+		tok = (Token) {Tok_Integer, .literal_type = Int_int, .val.integer_s = pos[0]};
 		if (pos[0] == '\\') {
 			pos++;
 			if (pos[0] == 'x') {
@@ -425,7 +428,9 @@ static Token getToken (Arena *str_arena, SourceFile src, SymbolList *syms, const
 				tok.kind = Tok_String;
 				tok.val.symbol_idx = getSymbolId(syms, src.name);
 			} else if (tok.kind == Tok_Key_Line) {
-				tok.kind = Tok_Int;
+				tok.kind = Tok_Integer;
+				tok.literal_type = Int_int;
+
 				// TOOD Find line position. Re-searching for it every
 				// time would be quadratic complexity. Bad, but maybe
 				// does not occur very often...? Actually, assert-heavy
@@ -465,24 +470,25 @@ static Token getToken (Arena *str_arena, SourceFile src, SymbolList *syms, const
 
 				tok = (Token) {Tok_Real, .val.real = strtod(start, NULL)};
 			} else {
-				tok = (Token) {Tok_Int, .val.integer_s = strtoll(start, NULL, 0)};
+				tok = (Token) {Tok_Integer,
+					.literal_type = Int_int,
+					.val.integer_s = strtoll(start, NULL, 0)
+				};
 
 				bool is_unsigned = pos[0] == 'u' || pos[0] == 'U';
 				if (is_unsigned)
 					pos++;
-				BasicType literal_type = Int_int;
 				if (pos[0] == 'l' || pos[0] == 'L') {
 					pos++;
-					literal_type = Int_long;
+					tok.literal_type = Int_long;
 					if (pos[0] == 'l' || pos[0] == 'L') {
 						pos++;
-						literal_type = Int_longlong;
+						tok.literal_type = Int_longlong;
 					}
 				}
+
 				if (is_unsigned)
-					literal_type |= Int_unsigned;
-				// TODO
-// 				tok.val.literal.int_type = literal_type;
+					tok.literal_type |= Int_unsigned;
 			}
 
 			pos--;
@@ -708,6 +714,8 @@ Tokenization lex (Arena *generated_strings, String filename, LexParams paths) {
 					*already_loaded = new_source;
 				}
 				pos++;
+				if (includes_stack.len >= MAX_INCLUDES)
+					lexerror(source, begin, "exceeded maximum #include depth of %d", MAX_INCLUDES);
 				PUSH(includes_stack, ((Inclusion) {source.idx, pos}));
 
 				source = *new_source;
@@ -1303,7 +1311,8 @@ static IfClass skipToElseIfOrEnd (SourceFile source, const char **p) {
 			else
 				linebegin = false;
 		}
-		pos++;
+		if (*pos)
+			pos++;
 		if (*pos == 0)
 			lexerror(source, *p, "%s#if%s or %s#ifdef%s needs to be closed by an %s#endif%s", BOLD, RESET, BOLD, RESET, BOLD, RESET);
 	}
@@ -1343,16 +1352,16 @@ typedef struct {
 	const Token *pos;
 } ConstParse;
 
-static int parseOr(ConstParse *parse);
-static int parseAnd(ConstParse *parse);
-static int parseEq(ConstParse *parse);
-static int parseCmp(ConstParse *parse);
-static int parseAdd(ConstParse *parse);
-static int parseUnop(ConstParse *parse);
-static int parseCore(ConstParse *parse);
+static u64 parseOr(ConstParse *parse);
+static u64 parseAnd(ConstParse *parse);
+static u64 parseEq(ConstParse *parse);
+static u64 parseCmp(ConstParse *parse);
+static u64 parseAdd(ConstParse *parse);
+static u64 parseUnop(ConstParse *parse);
+static u64 parseCore(ConstParse *parse);
 
-static int parseOr(ConstParse *parse) {
-	int x = parseAnd(parse);
+static u64 parseOr(ConstParse *parse) {
+	u64 x = parseAnd(parse);
 	while (parse->pos->kind == Tok_DoublePipe) {
 		parse->pos++;
 		x = parseAnd(parse) || x;
@@ -1360,8 +1369,8 @@ static int parseOr(ConstParse *parse) {
 	return x;
 }
 
-static int parseAnd(ConstParse *parse) {
-	int x = parseEq(parse);
+static u64 parseAnd(ConstParse *parse) {
+	u64 x = parseEq(parse);
 	while (parse->pos->kind == Tok_DoubleAmpersand) {
 		parse->pos++;
 		x = parseEq(parse) && x;
@@ -1369,8 +1378,8 @@ static int parseAnd(ConstParse *parse) {
 	return x;
 }
 
-static int parseEq(ConstParse *parse) {
-	int x = parseCmp(parse);
+static u64 parseEq(ConstParse *parse) {
+	u64 x = parseCmp(parse);
 	while (true) {
 		if (parse->pos->kind == (Tok_Equals | Tok_EQUALED)) {
 			parse->pos++;
@@ -1385,8 +1394,8 @@ static int parseEq(ConstParse *parse) {
 	return x;
 }
 
-static int parseCmp(ConstParse *parse) {
-	int x = parseAdd(parse);
+static u64 parseCmp(ConstParse *parse) {
+	u64 x = parseAdd(parse);
 
 	while (true) {
 		if (parse->pos->kind == Tok_Less) {
@@ -1408,8 +1417,8 @@ static int parseCmp(ConstParse *parse) {
 	return x;
 }
 
-static int parseAdd(ConstParse *parse) {
-	int x = parseUnop(parse);
+static u64 parseAdd(ConstParse *parse) {
+	u64 x = parseUnop(parse);
 
 	while (true) {
 		if (parse->pos->kind == Tok_Plus) {
@@ -1425,7 +1434,7 @@ static int parseAdd(ConstParse *parse) {
 	return x;
 }
 
-static int parseUnop(ConstParse *parse) {
+static u64 parseUnop(ConstParse *parse) {
 	switch (parse->pos->kind) {
 	case Tok_Minus:
 		parse->pos++;
@@ -1441,14 +1450,14 @@ static int parseUnop(ConstParse *parse) {
 	}
 }
 
-static int parseCore(ConstParse *parse) {
-	if (parse->pos->kind == Tok_Int) {
-		int x = parse->pos->val.integer_s;
+static u64 parseCore(ConstParse *parse) {
+	if (parse->pos->kind == Tok_Integer) {
+		u64 x = parse->pos->val.integer_u;
 		parse->pos++;
 		return x;
 	} else if (parse->pos->kind == Tok_OpenParen) {
 		parse->pos++;
-		int x = parseOr(parse);
+		u64 x = parseOr(parse);
 		const char *pos = parse->source.content.ptr + parse->tok->positions[parse->pos - parse->tok->tokens].source_file_offset;
 		if (parse->pos->kind != Tok_CloseParen)
 			lexerror(parse->source, pos, "exepected closing parenthesis");
@@ -1485,7 +1494,7 @@ static bool evalPreprocExpression(ExpansionParams params, Tokenization *buf) {
 					lexerror(params.source, pos, "the operator %sdefined%s expects an identifier as an argument", BOLD, RESET);
 
 				bool found = params.symbols->ptr[tok.val.symbol_idx].macro;
-				tok = (Token) {Tok_Int, .val.integer_s = found};
+				tok = (Token) {Tok_Integer, .literal_type = Int_int, .val.integer_s = found};
 
 				if (parenthesized) {
 					gobbleSpaceToNewline(&pos);
@@ -1507,9 +1516,8 @@ static bool evalPreprocExpression(ExpansionParams params, Tokenization *buf) {
 	*params.src = pos;
 	appendOneToken(buf, (Token) {Tok_EOF}, (TokenPosition) {pos - params.source.content.ptr, params.source.idx});
 
-// 				tok = (Token) {Tok_Integer, {.integer = 0, .int_type = Int_int}};
 	ConstParse parse = {params.source, buf, buf->tokens};
-	int res = parseOr(&parse);
+	u64 res = parseOr(&parse);
 	return res;
 }
 
@@ -1520,10 +1528,7 @@ static bool evalPreprocExpression(ExpansionParams params, Tokenization *buf) {
 // TODO Come up with a better system for nice highlighting.
 const char *token_names[] = {
 	[Tok_Identifier] = "identifier",
-	[Tok_Int] = "int-literal",
-	[Tok_UInt] = "uint-literal",
-	[Tok_Long] = "long-literal",
-	[Tok_ULong] = "ulong-literal",
+	[Tok_Integer] = "int-literal",
 	[Tok_Real] = "floating-point-literal",
 	[Tok_String] = "string-literal",
 	[Tok_PreprocDirective] = "preprocessor-directive",
@@ -1587,10 +1592,7 @@ static const char *const name_end = name + 256;
 const char *tokenNameHighlighted (TokenKind kind) {
 	switch (kind) {
 	case Tok_Identifier: return "identifier";
-	case Tok_Int:
-	case Tok_UInt:
-	case Tok_Long:
-	case Tok_ULong: return "integer-literal";
+	case Tok_Integer: return "integer-literal";
 	case Tok_Real: return "floating-point-literal";
 	case Tok_String: return "string-literal";
 	case Tok_PreprocDirective: return "preprocessor-directive";
@@ -1621,7 +1623,7 @@ u32 strPrintTokenLen (Token t, Symbol *syms) {
 	case Tok_Identifier: return syms[t.val.symbol_idx].name.len;
 	case Tok_PreprocDirective: return syms[t.val.symbol_idx].name.len + 1;
 	case Tok_String: return syms[t.val.symbol_idx].name.len * 2 + 2;
-	case Tok_Int: return 25;
+	case Tok_Integer: return 30;
 	default:
 		assert(tokenName(t.kind));
 		return strlen(tokenName(t.kind));
@@ -1639,7 +1641,7 @@ void strPrintToken (char **dest, const char *end, Symbol *symbols, Token t) {
 	case Tok_String:
 		printto(dest, end, "\"%.*s\"", STRING_PRINTAGE(symbols[t.val.symbol_idx].name));
 		return;
-	case Tok_Int:
+	case Tok_Integer:
 		printto(dest, end, "%lld", t.val.integer_s);
 		return;
 	default:

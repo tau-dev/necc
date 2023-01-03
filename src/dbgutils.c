@@ -45,17 +45,8 @@ void tokz(Token t) {
 		append(t.val.symbol->name);
 		appendz("\"");
 		break;
-	case Tok_Int:
-		appendz("[int]");
-		break;
-	case Tok_UInt:
-		appendz("[uint]");
-		break;
-	case Tok_Long:
-		appendz("[long]");
-		break;
-	case Tok_ULong:
-		appendz("[ulong]");
+	case Tok_Integer:
+		appendz("[integer]");
 		break;
 	default: {
 		const char *c = tokenName(t.kind);

@@ -253,7 +253,8 @@ void emitX64AsmSimple(FILE *out, Arena *arena, Module module, const Target *targ
 	}
 
 	emit(&globals, "\n\n"
-	     "section '.rodata'");
+	     "section '.rodata'\n"
+	     "db 0"); // Ugly hack, the linker complains about “section `.rodata' type changed to PROGBITS” otherwise
 	for (u32 i = 0; i < module.len; i++) {
 		StaticValue reloc = module.ptr[i];
 		if (reloc.def_kind == Static_Variable
@@ -366,11 +367,9 @@ static void emitFunctionForward (Arena *arena, FILE *out, Module module, StaticV
 	for (u32 i = 0; i < ir.len; i++) {
 		Inst inst = ir.ptr[i];
 
-		if (inst.kind == Ir_StackAlloc) {
+		if (inst.kind == Ir_StackAllocFixed) {
 			ir.ptr[i].alloc.known_offset = c.stack_allocated;
-			Inst sz = ir.ptr[inst.alloc.size];
-			assert(sz.kind == Ir_Constant);
-			c.stack_allocated += roundUp(sz.constant);
+			c.stack_allocated += roundUp(inst.alloc.size);
 		}
 		if (inst.kind == Ir_Parameter)
 			continue;
@@ -545,19 +544,27 @@ static void emitInstForward(Codegen *c, IrRef i) {
 	switch ((InstKind) inst.kind) {
 	case Ir_Add: triple(c, "add", inst.binop.lhs, inst.binop.rhs, i); break;
 	case Ir_Sub: triple(c, "sub", inst.binop.lhs, inst.binop.rhs, i); break;
-	case Ir_Mul: triple(c, "imul", inst.binop.lhs, inst.binop.rhs, i); break;
+	case Ir_SMul: triple(c, "imul", inst.binop.lhs, inst.binop.rhs, i); break;
+	case Ir_Mul:
 	case Ir_Div:
+	case Ir_SDiv: {
 		emit(c, " xor rdx, rdx");
 		loadTo(c, RAX, inst.binop.lhs);
-		emit(c, " idiv Z #", sizeOp(inst.size), inst.binop.rhs);
+
+		const char *op = inst.kind == Ir_Mul ? "mul" :
+				inst.kind == Ir_Div ? "div" : "idiv";
+		emit(c, " S Z #", op, sizeOp(inst.size), inst.binop.rhs);
 		emit(c, " mov #, R", i, registerSized(RAX, inst.size));
-		break;
+	} break;
 	case Ir_Mod:
+	case Ir_SMod: {
 		emit(c, " xor rdx, rdx");
 		loadTo(c, RAX, inst.binop.lhs);
-		emit(c, " idiv Z #", sizeOp(inst.size), inst.binop.rhs);
+
+		const char *op = inst.kind == Ir_Mod ? "div" : "idiv";
+		emit(c, " S Z #", op, sizeOp(inst.size), inst.binop.rhs);
 		emit(c, " mov #, R", i, registerSized(RDX, inst.size));
-		break;
+	} break;
 	case Ir_BitOr: triple(c, "or", inst.binop.lhs, inst.binop.rhs, i); break;
 	case Ir_BitXor: triple(c, "xor", inst.binop.lhs, inst.binop.rhs, i); break;
 	case Ir_BitAnd: triple(c, "and", inst.binop.lhs, inst.binop.rhs, i); break;
@@ -634,16 +641,20 @@ static void emitInstForward(Codegen *c, IrRef i) {
 	case Ir_Constant:
 		assert(inst.size <= 8);
 		if (inst.size > 4 && inst.constant > INT32_MAX) {
-			emit(c, " mov Z #, I", sizeOp(4), i, (i32) inst.constant);
-			emit(c, " mov Z [rsp+I], I", sizeOp(4), c->storage[i] + 4, (u32) (inst.constant >> 32));
+			// Wrapping unsigned to signed is undefined, but whatever.
+			emit(c, " mov Z #, ~I", sizeOp(4), i, (i32) inst.constant);
+			emit(c, " mov Z [rsp+I], ~I", sizeOp(4), c->storage[i] + 4, (i32) (inst.constant >> 32));
+// 		} else if (inst.size == 4) {
 		} else {
-			emit(c, " mov Z #, I", sizeOp(inst.size), i, (i32) inst.constant);
+			emit(c, " mov Z #, ~I", sizeOp(inst.size), i, (i32) inst.constant);
 		}
 		break;
-	case Ir_StackAlloc:
+	case Ir_StackAllocFixed:
 		emit(c, " lea rax, [rsp+I]	; alloc", inst.alloc.known_offset);
 		emit(c, " mov #, rax", i);
 		break;
+	case Ir_StackAllocVLA:
+		unreachable;
 	case Ir_Reloc:
 		assert(inst.size == 8);
 		String name = c->module.ptr[inst.reloc.id].name;
@@ -661,7 +672,7 @@ static void emitInstForward(Codegen *c, IrRef i) {
 	} break;
 	case Ir_Copy: break;
 	case Ir_PhiIn: break;
-	case Ir_StackDealloc: break;
+	case Ir_StackDeallocVLA: break;
 	case Ir_IntToFloat:
 	case Ir_FloatToInt: {
 		assert(!"TODO codegen float stuff");
@@ -938,9 +949,8 @@ static void emit (Codegen *c, const char *fmt, ...) {
 					*insert++ = '+';
 					emitInt(val);
 				} else {
-					// TODO Will break for I32_MIN, which can not be inverted.
 					*insert++ = '-';
-					emitInt(-val);
+					emitInt(-(i64)val);
 				}
 			} else {
 				assert(*p == 'L');
@@ -949,7 +959,7 @@ static void emit (Codegen *c, const char *fmt, ...) {
 					*insert++ = '+';
 					emitInt(val);
 				} else {
-					// TODO Will break for I32_MIN, which can not be inverted.
+					// TODO Will break for I64_MIN, which can not be inverted.
 					*insert++ = '-';
 					emitInt(-val);
 				}

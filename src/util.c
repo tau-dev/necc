@@ -1,7 +1,7 @@
 #include "util.h"
 #include "wyhash.h"
 #include "stdio.h"
-#include "ansii.h"
+#include "ansi.h"
 #ifdef __unix__
 #include <sys/types.h>
 #include <sys/stat.h>
