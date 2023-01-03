@@ -1,4 +1,6 @@
 *.htm
 bin
 selfhost
+a.out
+tests/runner
 

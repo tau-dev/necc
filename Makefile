@@ -1,8 +1,8 @@
-C_TESTS := $(wildcard tests/*.c)
 C_SRCS := $(wildcard src/*.c)
 C_HDRS := $(wildcard src/*.h)
 
-C_FLAGS := -lm -std=c11 -Werror -Wall -Wextra -Wno-unused-command-line-argument -pedantic -Wpedantic -Wno-missing-field-initializers
+C_FLAGS := -lm -std=c11 -Werror -Wall -Wextra -Wno-unused-command-line-argument -pedantic -Wpedantic -Wno-missing-field-initializers \
+	-DMUSL_DIR=\"/home/tau/foreign/lang/musl-1.2.3\"
 # C_DBG_FLAGS := -g -O0
 C_DBG_FLAGS := -g -O0 -fsanitize=address -fsanitize=undefined
 # C_REL_FLAGS := -fstrict-aliasing -g -w -fno-omit-frame-pointer -O3 -flto=auto -DNDEBUG
@@ -19,15 +19,12 @@ release: bin/necc
 
 self: selfhost/necc
 
-run: debug
-	@./bin/necc-dbg test.c
-
-test: tests/bin/main
-	@./tests/bin/main && echo "Tests passed." || echo "Tests failed."
+test: bin/necc-dbg bin/necc tests/runner
+	@./tests/runner -q
 
 
-tests/bin/main: $(C_TESTS) $(filter-out bin/main.c.o, $(OBJS))
-	$(CC) $^ $(C_FLAGS) $(C_DBG_FLAGS) -o $@
+tests/runner: tests/runner.c tests/util.c
+	$(CC) $< $(C_FLAGS) $(C_DBG_FLAGS) -std=gnu17 -o $@
 
 bin/necc-dbg: $(OBJS)
 	$(CC) $^ $(C_FLAGS) $(C_DBG_FLAGS) -o $@
@@ -70,4 +67,3 @@ gdb: bin/necc-dbg
 	@gdb --args $^ test.c
 
 $(shell mkdir -p $(REQUIRED_DIRS))
-

@@ -1,4 +1,5 @@
-#include "test.h"
+//!necc-dbg -run @
+// #include "test.h"
 
 //#define A(X,Y) X##Y
 
