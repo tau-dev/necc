@@ -160,7 +160,7 @@ static bool tryIntConstant (Parse *, Value, u64 *result);
 static bool tryEatStaticAssert(Parse *);
 static Value arithAdd(Parse *parse, const Token *primary, Value lhs, Value rhs);
 static Value arithSub(Parse *parse, const Token *primary, Value lhs, Value rhs);
-static Value arithMultiplicativeOp(Parse *parse, const Token *primary, Value lhs, Value rhs);
+static Value arithMultiplicativeOp(Parse *parse, const Token *primary, TokenKind op, Value lhs, Value rhs);
 static Type arithmeticConversions (Parse *parse, const Token *primary, Value *lhs, Value *rhs);
 static Type parseValueType (Parse *, Value (*operator)(Parse *));
 static Type parseTypeBase(Parse *, u8 *storage);
@@ -692,6 +692,7 @@ static void parseStatement (Parse *parse, bool *had_non_declaration) {
 		parse->switch_block = build->insertion_block;
 		parse->current_loop_switch_exit = newBlock(build, zstr("switch_join"));
 
+		startNewBlock(build, zstr("switch_ignored"));
 		parseStatement(parse, had_non_declaration);
 		genJump(build, parse->current_loop_switch_exit);
 
@@ -835,7 +836,7 @@ static Value parseExprAssignment (Parse *parse) {
 		case Tok_AsteriskEquals:
 		case Tok_PercentEquals:
 		case Tok_SlashEquals: {
-			assigned = arithMultiplicativeOp(parse, primary, loaded, assigned);
+			assigned = arithMultiplicativeOp(parse, primary, primary->kind - Tok_EQUALED, loaded, assigned);
 		} break;
 		case Tok_AmpersandEquals: {
 			Type common = arithmeticConversions(parse, primary, &loaded, &assigned);
@@ -1182,7 +1183,7 @@ static Value parseExprMultiplication (Parse *parse) {
 		parse->pos++;
 		lhs = rvalue(lhs, parse);
 		Value rhs = rvalue(parseExprLeftUnary(parse), parse);
-		lhs = arithMultiplicativeOp(parse, primary, lhs, rhs);
+		lhs = arithMultiplicativeOp(parse, primary, primary->kind, lhs, rhs);
 	}
 }
 
@@ -1202,7 +1203,7 @@ static Value parseExprLeftUnary (Parse *parse) {
 		bool is_volatile = v.typ.qualifiers & Qualifier_Volatile;
 		Value rval = (Value) {v.typ, genLoad(build, v.inst, typeSize(v.typ, &parse->target), is_volatile)};
 
-		const int delta = parse->pos->kind == Tok_DoublePlus ? 1 : -1;
+		const int delta = primary->kind == Tok_DoublePlus ? 1 : -1;
 
 		Value one = immediateIntVal(parse, v.typ, delta);
 
@@ -3043,21 +3044,22 @@ static Value arithSub (Parse *parse, const Token *primary, Value lhs, Value rhs)
 	}
 }
 
-static Value arithMultiplicativeOp (Parse *parse, const Token *primary, Value lhs, Value rhs) {
+static Value arithMultiplicativeOp (Parse *parse, const Token *primary, TokenKind op, Value lhs, Value rhs) {
 	Type common = arithmeticConversions(parse, primary, &lhs, &rhs);
 	IrRef inst;
 	bool overflow_or_div0 = false;
+	assert(op == Tok_Asterisk || op == Tok_Percent || op == Tok_Slash);
 	if (common.basic & Int_unsigned) {
-		if (primary->kind == Tok_Asterisk)
+		if (op == Tok_Asterisk)
 			inst = genMulUnsigned(&parse->build, lhs.inst, rhs.inst);
-		else if (primary->kind == Tok_Percent)
+		else if (op == Tok_Percent)
 			inst = genModUnsigned(&parse->build, lhs.inst, rhs.inst, &overflow_or_div0);
 		else
 			inst = genDivUnsigned(&parse->build, lhs.inst, rhs.inst, &overflow_or_div0);
 	} else {
-		if (primary->kind == Tok_Asterisk)
+		if (op == Tok_Asterisk)
 			inst = genMulSigned(&parse->build, lhs.inst, rhs.inst, &overflow_or_div0);
-		else if (primary->kind == Tok_Percent)
+		else if (op == Tok_Percent)
 			inst = genModSigned(&parse->build, lhs.inst, rhs.inst, &overflow_or_div0);
 		else
 			inst = genDivSigned(&parse->build, lhs.inst, rhs.inst, &overflow_or_div0);

@@ -490,7 +490,7 @@ static void emitBlockForward (Codegen *c, Block *block) {
 		emitBlockForward(c, exit.unconditional);
 		break;
 	case Exit_Branch: {
-		emit(c, " test dword #, -1", exit.branch.condition);
+		emit(c, " test #, -1", exit.branch.condition);
 		emitJump(c, "jnz", exit.branch.on_true);
 
 
@@ -514,8 +514,11 @@ static void emitBlockForward (Codegen *c, Block *block) {
 			emit(c, " cmp #, L", exit.switch_.value, cases.ptr[i].value);
 			emitJump(c, "je", cases.ptr[i].dest);
 		}
-
 		emitJump(c, "jnz", exit.switch_.default_case);
+		for (u32 i = 0; i < cases.len; i++) {
+			emitBlockForward(c, cases.ptr[i].dest);
+		}
+		emitBlockForward(c, exit.switch_.default_case);
 	} break;
 	case Exit_Return:
 		if (exit.ret != IR_REF_NONE) {
@@ -553,7 +556,7 @@ static void emitInstForward(Codegen *c, IrRef i) {
 
 		const char *op = inst.kind == Ir_Mul ? "mul" :
 				inst.kind == Ir_Div ? "div" : "idiv";
-		emit(c, " Z Z #", op, sizeOp(inst.size), inst.binop.rhs);
+		emit(c, " Z #", op, inst.binop.rhs);
 		emit(c, " mov #, R", i, registerSized(RAX, inst.size));
 	} break;
 	case Ir_Mod:
@@ -562,7 +565,7 @@ static void emitInstForward(Codegen *c, IrRef i) {
 		loadTo(c, RAX, inst.binop.lhs);
 
 		const char *op = inst.kind == Ir_Mod ? "div" : "idiv";
-		emit(c, " Z Z #", op, sizeOp(inst.size), inst.binop.rhs);
+		emit(c, " Z #", op, inst.binop.rhs);
 		emit(c, " mov #, R", i, registerSized(RDX, inst.size));
 	} break;
 	case Ir_BitOr: triple(c, "or", inst.binop.lhs, inst.binop.rhs, i); break;
@@ -608,13 +611,13 @@ static void emitInstForward(Codegen *c, IrRef i) {
 	} break;
 	case Ir_Truncate: {
 		Register reg = registerSized(RAX, c->ir.ptr[i].size);
-		emit(c, " mov R, #", reg, inst.unop);
-		emit(c, " mov Z #, R", sizeOp(c->ir.ptr[i].size), i, reg);
+		emit(c, " mov R, [rsp+I]", reg, c->storage[inst.unop]);
+		emit(c, " mov #, R", i, reg);
 	} break;
 	case Ir_SignExtend: {
 		Register reg = registerSized(RSI, inst.size);
-		emit(c, " movsxZ R, Z #",
-			(valueSize(c, inst.unop) > 2 ? "d" : ""), reg, sizeOp(valueSize(c, inst.unop)), inst.unop);
+		emit(c, " movsxZ R, #",
+			(valueSize(c, inst.unop) > 2 ? "d" : ""), reg, inst.unop);
 		emit(c, " mov #, R", i, reg);
 	} break;
 	case Ir_ZeroExtend: {
@@ -642,11 +645,11 @@ static void emitInstForward(Codegen *c, IrRef i) {
 		assert(inst.size <= 8);
 		if (inst.size > 4 && inst.constant > INT32_MAX) {
 			// Wrapping unsigned to signed is undefined, but whatever.
-			emit(c, " mov Z #, ~I", sizeOp(4), i, (i32) inst.constant);
+			emit(c, " mov Z [rsp+I], ~I", sizeOp(4), c->storage[i], (i32) inst.constant);
 			emit(c, " mov Z [rsp+I], ~I", sizeOp(4), c->storage[i] + 4, (i32) (inst.constant >> 32));
 // 		} else if (inst.size == 4) {
 		} else {
-			emit(c, " mov Z #, ~I", sizeOp(inst.size), i, (i32) inst.constant);
+			emit(c, " mov #, ~I", i, (i32) inst.constant);
 		}
 		break;
 	case Ir_StackAllocFixed:
@@ -659,9 +662,9 @@ static void emitInstForward(Codegen *c, IrRef i) {
 		assert(inst.size == 8);
 		String name = c->module.ptr[inst.reloc.id].name;
 		if (name.len)
-			emit(c, " mov qword #, _S~L", i, name, inst.reloc.offset);
+			emit(c, " mov #, _S~L", i, name, inst.reloc.offset);
 		else
-			emit(c, " mov qword #, __I~L", i, inst.reloc.id, inst.reloc.offset);
+			emit(c, " mov #, __I~L", i, inst.reloc.id, inst.reloc.offset);
 		break;
 	case Ir_PhiOut: {
 		if (inst.phi_out.on_true != IR_REF_NONE) {
@@ -929,9 +932,14 @@ static void emit (Codegen *c, const char *fmt, ...) {
 			insert += len;
 		} break;
 		case '#': {
-			memcpy(insert, "[rsp+", 5);
-			insert += 5;
-			emitInt(c->storage[va_arg(args, IrRef)]);
+			IrRef ref = va_arg(args, IrRef);
+			const char *size = sizeOp(c->ir.ptr[ref].size);
+			u32 len = strlen(size);
+			memcpy(insert, size, len);
+			insert += len;
+			memcpy(insert, " [rsp+", 6);
+			insert += 6;
+			emitInt(c->storage[ref]);
 			memcpy(insert, "]", 1);
 			insert += 1;
 		} break;

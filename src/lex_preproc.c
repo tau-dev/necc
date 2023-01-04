@@ -1293,7 +1293,7 @@ static IfClass skipToElseIfOrEnd (SourceFile source, const char **p) {
 			String directive = {pos - begin, begin};
 			if (eql("if", directive) || eql("ifdef", directive)) {
 				skipToEndIf(source, &pos);
-			} else if (eql("elseif", directive)) {
+			} else if (eql("elif", directive)) {
 				*p = pos;
 				return If_ElseIf;
 			} else if (eql("else", directive)) {

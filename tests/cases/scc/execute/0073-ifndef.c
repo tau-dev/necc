@@ -1,3 +1,4 @@
+//!necc-dbg @ -run
 #ifndef DEF
 int x = 0;
 #endif

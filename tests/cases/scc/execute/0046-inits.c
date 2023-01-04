@@ -1,3 +1,4 @@
+//!necc-dbg @ -run
 int x = 5;
 long y = 6;
 int *p = &x;
@@ -5,7 +6,7 @@ int *p = &x;
 int
 main()
 {
-	if (x != 5) 
+	if (x != 5)
 		return 1;
 	if (y != 6)
 		return 2;

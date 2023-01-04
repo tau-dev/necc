@@ -1,3 +1,4 @@
+//!necc-dbg @ -run
 #define FOO 0
 
 int main()

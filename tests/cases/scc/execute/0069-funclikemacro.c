@@ -1,3 +1,4 @@
+//!necc-dbg @ -run
 #define A 3
 #define FOO(X,Y,Z) X + Y + Z
 #define SEMI ;

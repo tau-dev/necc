@@ -1,6 +1,8 @@
+//!necc-dbg @ -run
 struct S {int a; int b;};
 struct S s = { .b = 2, .a = 1};
 
+//!necc-dbg @ -run
 int
 main()
 {

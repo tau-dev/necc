@@ -1,3 +1,4 @@
+//!necc-dbg @ -run
 #define X 1
 #undef X
 

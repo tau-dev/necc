@@ -1,3 +1,4 @@
+//!necc-dbg @ -run
 #if defined X
 X
 #endif

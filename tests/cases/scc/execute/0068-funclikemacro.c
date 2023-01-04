@@ -1,3 +1,4 @@
+//!necc-dbg @ -run
 #define ADD(X, Y) (X + Y)
 
 

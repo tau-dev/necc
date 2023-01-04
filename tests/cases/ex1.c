@@ -26,4 +26,5 @@ int main() {
 	printf("%d\n", fib(20));
 	int w = foo(17, 0);
 	printf("%d %d\n", w, count);
+	return 0;
 }

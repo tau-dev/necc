@@ -1,3 +1,4 @@
+//!necc-dbg @ -run
 #if 1
 int x = 0;
 #endif

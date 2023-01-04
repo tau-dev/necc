@@ -1,3 +1,4 @@
+//!necc-dbg @ -run
 #define X 6 / 2
 
 int

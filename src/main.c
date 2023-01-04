@@ -2,6 +2,10 @@
 #include <stdbool.h>
 #include <limits.h>
 
+// TODO The compiler itself should be completely platform-independent.
+// Enable -run platform-dependently.
+#include <unistd.h>
+
 #include "parse.h"
 #include "arena.h"
 #include "ir_gen.h"
@@ -452,9 +456,11 @@ int main (int argc, char **args) {
 	}
 
 	if (runit) {
-		int res = system(exe_out);
-		if (res)
-			return res;
+		u32 len = strlen(exe_out)+1;
+		char *c = malloc(len);
+		memcpy(c, exe_out, len);
+		char *new_argv[2] = {c, NULL};
+		execve(exe_out, new_argv, NULL);
 	}
 #ifndef NDEBUG
 	free_arena(&arena, "code");

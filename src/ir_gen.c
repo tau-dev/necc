@@ -643,7 +643,6 @@ void printBlock (FILE *dest, Block *blk, IrList ir) {
 	switch (exit.kind) {
 	case Exit_Unconditional:
 		fprintf(dest, "       jmp %.*s%lu\n", STRING_PRINTAGE(exit.unconditional->label), (ulong) exit.unconditional->id);
-		printBlock(dest, exit.unconditional, ir);
 		break;
 	case Exit_Branch:
 		fprintf(dest, "       branch %lu ? %.*s%lu : %.*s%lu\n",
@@ -669,6 +668,10 @@ void printBlock (FILE *dest, Block *blk, IrList ir) {
 		}
 		Block *def = exit.switch_.default_case;
 		fprintf(dest, "default => %.*s%lu\n", STRING_PRINTAGE(def->label), (ulong) def->id);
+		for (u32 i = 0; i < cases.len; i++) {
+			printBlock(dest, cases.ptr[i].dest, ir);
+		}
+		printBlock(dest, exit.switch_.default_case, ir);
 	} break;
 	default: unreachable;
 	}

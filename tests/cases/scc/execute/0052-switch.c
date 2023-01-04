@@ -1,3 +1,4 @@
+//!necc-dbg @ -run
 int x = 0;
 
 int
@@ -14,25 +15,26 @@ main()
 				default:
 					return 1;
 			}
-	return 1;
+	return 2;
 	next:
 	switch(x)
 		case 1:
-			return 1;
+			return 3;
 	switch(x) {
 		{
 			x = 1 + 1;
 			foo:
 			case 1:
-				return 1;
+				return 4;
 		}
 	}
 	switch(x) {
 		case 0:
 			return x;
 		case 1:
-			return 1;
+			return 5;
 		default:
-			return 1;
+			return 6;
 	}
+	return 7;
 }

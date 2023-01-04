@@ -1,3 +1,4 @@
+//!necc-dbg @ -run
 int main()
 {
 	int  count, n;

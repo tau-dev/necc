@@ -1,3 +1,4 @@
+//!necc-dbg @ -run
 // line comment
 
 int

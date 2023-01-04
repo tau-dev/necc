@@ -1,3 +1,4 @@
+//!necc-dbg @ -run
 #define BAR 0
 #ifdef BAR
 	#ifdef FOO

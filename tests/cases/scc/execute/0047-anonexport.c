@@ -1,3 +1,4 @@
+//!necc-dbg @ -run
 typedef struct {
 	int a;
 	union {
@@ -15,12 +16,12 @@ int
 main()
 {
 	s v;
-	
+
 	v.a = 1;
 	v.b1 = 2;
 	v.c = 3;
 	v.d = 4;
-	
+
 	if (v.a != 1)
 		return 1;
 	if (v.b1 != 2 && v.b2 != 2)
@@ -29,6 +30,6 @@ main()
 		return 3;
 	if (v.d != 4)
 		return 4;
-	
+
 	return 0;
 }

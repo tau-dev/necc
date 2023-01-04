@@ -1,2 +1,2 @@
 Hello World!
-exit code 0
+exit code 4
