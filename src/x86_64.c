@@ -553,7 +553,7 @@ static void emitInstForward(Codegen *c, IrRef i) {
 
 		const char *op = inst.kind == Ir_Mul ? "mul" :
 				inst.kind == Ir_Div ? "div" : "idiv";
-		emit(c, " S Z #", op, sizeOp(inst.size), inst.binop.rhs);
+		emit(c, " Z Z #", op, sizeOp(inst.size), inst.binop.rhs);
 		emit(c, " mov #, R", i, registerSized(RAX, inst.size));
 	} break;
 	case Ir_Mod:
@@ -562,7 +562,7 @@ static void emitInstForward(Codegen *c, IrRef i) {
 		loadTo(c, RAX, inst.binop.lhs);
 
 		const char *op = inst.kind == Ir_Mod ? "div" : "idiv";
-		emit(c, " S Z #", op, sizeOp(inst.size), inst.binop.rhs);
+		emit(c, " Z Z #", op, sizeOp(inst.size), inst.binop.rhs);
 		emit(c, " mov #, R", i, registerSized(RDX, inst.size));
 	} break;
 	case Ir_BitOr: triple(c, "or", inst.binop.lhs, inst.binop.rhs, i); break;

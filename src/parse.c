@@ -620,8 +620,10 @@ static void parseStatement (Parse *parse, bool *had_non_declaration) {
 
 			genBranch(build, cond);
 			build->insertion_block->exit.branch.on_false = parse->current_loop_switch_exit;
-			build->insertion_block->exit.branch.on_true = startNewBlock(build, zstr("for_join"));
+			build->insertion_block->exit.branch.on_true = newBlock(build, zstr("for_body"));
+			startBlock(build, build->insertion_block->exit.branch.on_true);
 		}
+
 		if (!tryEat(parse, Tok_CloseParen)) {
 			Block *current = build->insertion_block;
 			to_tail = startNewBlock(build, zstr("for_tail"));
@@ -629,7 +631,7 @@ static void parseStatement (Parse *parse, bool *had_non_declaration) {
 			expect(parse, Tok_CloseParen);
 
 			// TODO This is just one example of how the basic block
-			// construction interfacees are badly structured.
+			// construction interfaces are badly structured.
 			// It takes a lot of code to achieve something simple, and
 			// in the end, blocks are not even activated in the right
 			// order, setting wrong first_instruction values. (Those are
@@ -2994,7 +2996,16 @@ static Value arithAdd (Parse *parse, const Token *primary, Value lhs, Value rhs)
 		return pointerAdd(&parse->build, lhs, rhs, parse, primary);
 	} else {
 		Type common = arithmeticConversions(parse, primary, &lhs, &rhs);
-		return (Value) {common, genAdd(&parse->build, lhs.inst, rhs.inst)};
+		IrRef inst;
+		if (common.basic & Int_unsigned) {
+			inst = genAdd(&parse->build, lhs.inst, rhs.inst);
+		} else {
+			bool overflow = false;
+			inst = genAddSigned(&parse->build, lhs.inst, rhs.inst, &overflow);
+			if (overflow)
+				parsemsg(Log_Warn, parse, primary, "signed integer overflow");
+		}
+		return (Value) {common, inst};
 	}
 }
 
@@ -3018,14 +3029,24 @@ static Value arithSub (Parse *parse, const Token *primary, Value lhs, Value rhs)
 		if (rhs.typ.kind == Kind_Pointer)
 			parseerror(parse, primary, "cannot subtract pointer from %s", printType(&parse->arena, rhs.typ));
 		Type common = arithmeticConversions(parse, primary, &lhs, &rhs);
-		return (Value) {common, genSub(build, lhs.inst, rhs.inst)};
+
+		IrRef inst;
+		if (common.basic & Int_unsigned) {
+			inst = genSub(&parse->build, lhs.inst, rhs.inst);
+		} else {
+			bool overflow = false;
+			inst = genSubSigned(&parse->build, lhs.inst, rhs.inst, &overflow);
+			if (overflow)
+				parsemsg(Log_Warn, parse, primary, "signed integer overflow");
+		}
+		return (Value) {common, inst};
 	}
 }
 
 static Value arithMultiplicativeOp (Parse *parse, const Token *primary, Value lhs, Value rhs) {
 	Type common = arithmeticConversions(parse, primary, &lhs, &rhs);
 	IrRef inst;
-	bool overflow_or_div0;
+	bool overflow_or_div0 = false;
 	if (common.basic & Int_unsigned) {
 		if (primary->kind == Tok_Asterisk)
 			inst = genMulUnsigned(&parse->build, lhs.inst, rhs.inst);

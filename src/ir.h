@@ -224,6 +224,7 @@ typedef struct Block {
 	IrRef inst_end; // Used for unoptimized output, irrelevant when scheduler applies
 	IrRefList mem_instructions; // Loads and stores
 	IrRefList ordered_instructions; // Calls, stores, phi_outs
+	IrRef last_store_op; // Used for construction of meemory instructions.
 	Exit exit;
 
 	u32 id;
@@ -239,7 +240,5 @@ typedef struct IrBuild {
 
 	u32 block_count;
 	Block *insertion_block;
-	IrRef prev_mem_op;
-	IrRef prev_store_op;
 } IrBuild;
 

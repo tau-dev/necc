@@ -1,11 +1,11 @@
 void foo():
- entry0:
+ entry0: { }
        ret
 constant 1 ([anon]):
 "foo"
 public extern bar
 public int main():
- entry0:
+ entry0: { mem: 2, 5, ordered: 2, 5, }
    0 = global 0 +0
    1 = const 0x0 (0)
    2 = call 0 (1)

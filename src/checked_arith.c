@@ -26,8 +26,8 @@ bool subSignedOverflow(i64 a, i64 b, PrimitiveSize size) {
 
 	u64 sign_bits = ~(((u64) 1 << size*8) - 1);
 	// Unused bits should have the correct sign.
-	assert(!((u64) a ^ sign_bits*sign(a, size)));
-	assert(!((u64) b ^ sign_bits*sign(b, size)));
+	assert(((u64) a & sign_bits) == sign_bits * sign(a, size));
+	assert(((u64) b & sign_bits) == sign_bits * sign(b, size));
 
 	if (sign(a, size) == sign(b, size)) return false;
 

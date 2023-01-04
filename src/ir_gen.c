@@ -13,9 +13,16 @@ Arithmetic simplifications which require e.g. use-counts happen in the analysis 
 #define PTR_SIZE I64
 
 
-IrRef append (IrBuild *build, Inst inst) {
+static IrRef append (IrBuild *build, Inst inst) {
 	PUSH(build->ir, inst);
 	return build->ir.len - 1;
+}
+
+static IrRef getPrevMemOp (IrBuild *build) {
+	IrRefList mems = build->insertion_block->mem_instructions;
+	if (mems.len == 0)
+		return IR_REF_NONE;
+	return mems.ptr[mems.len-1];
 }
 
 IrRef genParameter (IrBuild *build, u32 param_id) {
@@ -63,15 +70,17 @@ void genSwitch (IrBuild *build, IrRef val) {
 
 Block *newBlock (IrBuild *build, String label) {
 	Block *new_block = ALLOC(build->block_arena, Block);
-	*new_block = (Block) { .label = label, .id = build->block_count++ };
+	*new_block = (Block) {
+		.label = label,
+		.id = build->block_count++,
+		.last_store_op = IR_REF_NONE,
+	};
 	return new_block;
 }
 
 void startBlock (IrBuild *build, Block *block) {
 	block->first_inst = build->ir.len;
 	build->insertion_block = block;
-	build->prev_mem_op = IR_REF_NONE;
-	build->prev_store_op = IR_REF_NONE;
 }
 
 Block *startNewBlock (IrBuild *build, String label) {
@@ -89,7 +98,7 @@ static inline i64 toSigned(u64 i) {
 	return i <= INT64_MAX ? (i64) i : i == UINT64_MAX ? (i64) -1 : -(i64) (i - INT64_MAX);
 }
 
-static IrRef genBinOp (IrBuild *build, InstKind op, IrRef a, IrRef b, bool *did_overflow) {
+static IrRef genBinOp (IrBuild *build, InstKind op, IrRef a, IrRef b, bool *overflow) {
 	Inst *inst = build->ir.ptr;
 	assert(inst[a].size == inst[b].size);
 	Inst i = {op, inst[a].size, .binop = {a, b}};
@@ -101,15 +110,20 @@ static IrRef genBinOp (IrBuild *build, InstKind op, IrRef a, IrRef b, bool *did_
 		u64 rhs = inst[b].constant;
 		switch (op) {
 		case Ir_Add:
-			i.constant = lhs + rhs; break;
+			if (overflow && addSignedOverflow(toSigned(lhs), toSigned(rhs), i.size))
+				*overflow = true;
+			i.constant = lhs + rhs;
+			break;
 		case Ir_Sub:
+			if (overflow && subSignedOverflow(toSigned(lhs), toSigned(rhs), i.size))
+				*overflow = true;
 			i.constant = lhs - rhs; break;
 		case Ir_Mul:
 			i.constant = lhs * rhs; break;
 		case Ir_SMul:
 			if (mulSignedOverflow(toSigned(lhs), toSigned(rhs), i.size)) {
 				i.kind = Ir_SMul;
-				*did_overflow = true;
+				*overflow = true;
 				break;
 			}
 			i.constant = toSigned(lhs) * toSigned(rhs);
@@ -117,7 +131,7 @@ static IrRef genBinOp (IrBuild *build, InstKind op, IrRef a, IrRef b, bool *did_
 		case Ir_Div:
 			if (rhs == 0) {
 				i.kind = Ir_Div;
-				*did_overflow = true;
+				*overflow = true;
 				break;
 			}
 			i.constant = lhs / rhs;
@@ -125,7 +139,7 @@ static IrRef genBinOp (IrBuild *build, InstKind op, IrRef a, IrRef b, bool *did_
 		case Ir_SDiv:
 			if (rhs == 0 || (toSigned(lhs) == INT64_MIN &&  toSigned(rhs) == -1)) {
 				i.kind = Ir_SDiv;
-				*did_overflow = true;
+				*overflow = true;
 				break;
 			}
 			i.constant = toSigned(lhs) / toSigned(rhs);
@@ -208,11 +222,22 @@ IrRef genAdd (IrBuild *build, IrRef a, IrRef b) {
 	assert(inst[a].size == inst[b].size);
 	return genBinOp(build, Ir_Add, a, b, NULL);
 }
+IrRef genAddSigned (IrBuild *build, IrRef a, IrRef b, bool *overflow) {
+	Inst *inst = build->ir.ptr;
+	assert(inst[a].size == inst[b].size);
+	return genBinOp(build, Ir_Add, a, b, overflow);
+}
 
 IrRef genSub (IrBuild *build, IrRef a, IrRef b) {
 	Inst *inst = build->ir.ptr;
 	assert(inst[a].size == inst[b].size);
 	return genBinOp(build, Ir_Sub, a, b, NULL);
+}
+
+IrRef genSubSigned (IrBuild *build, IrRef a, IrRef b, bool *overflow) {
+	Inst *inst = build->ir.ptr;
+	assert(inst[a].size == inst[b].size);
+	return genBinOp(build, Ir_Sub, a, b, overflow);
 }
 
 
@@ -398,9 +423,8 @@ IrRef genZeroExt (IrBuild *build, IrRef source, u16 target) {
 }
 
 IrRef genCall (IrBuild *build, IrRef func, ValuesSpan args, u16 size, bool is_vararg) {
-	IrRef call = append(build, (Inst) {Ir_Call, size, .call = {func, args, build->prev_mem_op, is_vararg}});
-	build->prev_mem_op = call;
-	build->prev_store_op = call;
+	IrRef call = append(build, (Inst) {Ir_Call, size, .call = {func, args, getPrevMemOp(build), is_vararg}});
+	build->insertion_block->last_store_op = call;
 
 	PUSH_A(build->block_arena, build->insertion_block->mem_instructions, call);
 	PUSH_A(build->block_arena, build->insertion_block->ordered_instructions, call);
@@ -415,9 +439,8 @@ IrRef genLoad (IrBuild *build, IrRef ref, u16 size, bool is_volatile) {
 	IrRef load = append(build, (Inst) {
 		is_volatile ? Ir_LoadVolatile : Ir_Load,
 		size,
-		.mem = { .address = ref, .ordered_after = build->prev_store_op }
+		.mem = { .address = ref, .ordered_after = build->insertion_block->last_store_op }
 	});
-	build->prev_mem_op = load;
 	PUSH_A(build->block_arena, build->insertion_block->mem_instructions, load);
 	return load;
 }
@@ -428,10 +451,9 @@ IrRef genStore (IrBuild *build, IrRef dest, IrRef value, bool is_volatile) {
 	IrRef store = append(build, (Inst) {
 		is_volatile ? Ir_StoreVolatile : Ir_Store,
 		val.size,
-		.mem = { .address = dest, .source = value, .ordered_after = build->prev_mem_op }
+		.mem = { .address = dest, .source = value, .ordered_after = getPrevMemOp(build) }
 	});
-	build->prev_mem_op = store;
-	build->prev_store_op = store;
+	build->insertion_block->last_store_op = store;
 
 	PUSH_A(build->block_arena, build->insertion_block->mem_instructions, store);
 	PUSH_A(build->block_arena, build->insertion_block->ordered_instructions, store);
@@ -497,7 +519,18 @@ void printBlock (FILE *dest, Block *blk, IrList ir) {
 		return;
 	blk->visited = 31;
 
-	fprintf(dest, " %.*s%lu:\n", STRING_PRINTAGE(blk->label), (ulong) blk->id);
+	fprintf(dest, " %.*s%lu: { ", STRING_PRINTAGE(blk->label), (ulong) blk->id);
+	if (blk->mem_instructions.len) {
+		fprintf(dest, "mem: ");
+		for (u32 i = 0; i < blk->mem_instructions.len; i++)
+			fprintf(dest, "%lu, ", (ulong) blk->mem_instructions.ptr[i]);
+	}
+	if (blk->ordered_instructions.len) {
+		fprintf(dest, "ordered: ");
+		for (u32 i = 0; i < blk->ordered_instructions.len; i++)
+			fprintf(dest, "%lu, ", (ulong) blk->ordered_instructions.ptr[i]);
+	}
+	fprintf(dest, "}\n");
 
 	for (size_t i = blk->first_inst; i < blk->inst_end; i++) {
 		fprintf(dest, " %3lu = ", (ulong) i);
@@ -536,7 +569,7 @@ void printBlock (FILE *dest, Block *blk, IrList ir) {
 			continue;
 		case Ir_StackAllocFixed:
 			fprintf(dest, "stack %lu\n", (ulong) inst.alloc.size);
-			break;
+			continue;
 		case Ir_StackAllocVLA:
 			fprintf(dest, "stack_vla %lu\n", (ulong) inst.alloc.size);
 			continue;

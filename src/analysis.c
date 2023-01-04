@@ -151,11 +151,21 @@ void decimateIr (IrList *ir, Blocks blocks) {
 		}
 		blk->mem_instructions.len = dest_idx;
 
-		if (blk->exit.kind == Exit_Branch)
+		switch (blk->exit.kind) {
+		case Exit_Branch:
 			blk->exit.branch.condition = copyUsed(*ir, blk->exit.branch.condition, &out, relocs);
-		if (blk->exit.kind == Exit_Return && blk->exit.ret != IR_REF_NONE)
-			blk->exit.ret = copyUsed(*ir, blk->exit.ret, &out, relocs);
-
+			break;
+		case Exit_Return:
+			if (blk->exit.ret != IR_REF_NONE)
+				blk->exit.ret = copyUsed(*ir, blk->exit.ret, &out, relocs);
+			break;
+		case Exit_Switch:
+			blk->exit.switch_.value = copyUsed(*ir, blk->exit.switch_.value, &out, relocs);
+			break;
+		case Exit_Unconditional: break;
+		case Exit_None:
+			unreachable;
+		}
 		blk->inst_end = out.len;
 	}
 

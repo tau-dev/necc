@@ -1,3 +1,4 @@
+//!necc-dbg @ -run
 int g;
 
 int
@@ -11,7 +12,7 @@ int
 main()
 {
     int x;
-    
+
     g = 0;
     x = 0;
     if(x && effect())
@@ -39,7 +40,7 @@ main()
     		return 7;
     } else {
     	return 8;
-    } 
+    }
     return 0;
 }
 

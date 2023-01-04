@@ -1,8 +1,9 @@
+//!necc-dbg @ -run
 int
 main()
 {
 	int x;
-	
+
 	x = 0;
 	while(1)
 		break;
