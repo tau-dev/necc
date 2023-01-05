@@ -634,7 +634,7 @@ Tokenization lex (Arena *generated_strings, String filename, LexParams paths) {
 		if (tok.kind == Tok_PreprocDirective) {
 			if (!line_begin)
 				lexerror(source, begin, "a preprocessor directive must be the first token of a line");
-			while (pos[0] == ' ' || pos[0] == '\t') pos++;
+			gobbleSpaceToNewline(&pos);
 
 			enum Directive dir = t.symbols.ptr[tok.val.symbol_idx].directive;
 			switch (dir) {
@@ -964,16 +964,25 @@ static bool expandInto (const ExpansionParams ex, Tokenization *dest, bool is_ar
 // enough if Replacements store offset and length.
 static Tokenization *takeArguments(const ExpansionParams ex, Macro *mac) {
 	assert(mac->is_function_like);
+	if (mac->parameters.len == 0) {
+		u32 dummy_mark = 0;
+		collapseMacroStack(ex.stack, &dummy_mark);
+		MacroToken t = takeToken(ex, &dummy_mark);
+		if (t.tok.kind != Tok_CloseParen) {
+			lexerror(ex.source, ex.source.content.ptr + ex.source_file_offset,
+					"too many arguments provided"); // TODO Better location
+		}
+
+		return NULL;
+	}
 	Tokenization *argument_bufs = calloc(mac->parameters.len, sizeof(Tokenization));
 	u32 param_idx = 0;
 
+	u32 expected_count = mac->parameters.len;
 	while (true) {
 		bool arg_list_closed = expandInto(ex, &argument_bufs[param_idx], true);
 		if (arg_list_closed) {
-			u32 expected_count = mac->parameters.len;
-			if (param_idx + 1 == expected_count ||
-				(param_idx + 2 == expected_count && mac->is_vararg))
-			{
+			if (param_idx + 1 == expected_count || (mac->is_vararg && param_idx + 2 >= expected_count)) {
 				break;
 			} else {
 				lexerror(ex.source, ex.source.content.ptr + ex.source_file_offset,
@@ -981,12 +990,15 @@ static Tokenization *takeArguments(const ExpansionParams ex, Macro *mac) {
 			}
 		} else {
 			param_idx++;
-			if (param_idx == mac->parameters.len) {
-				if (mac->is_vararg)
+			if (param_idx == expected_count) {
+				if (mac->is_vararg) {
 					param_idx--;
-				else
+					// TODO Fill out preceded_by_space etc.
+					appendOneToken(&argument_bufs[param_idx], (Token) {.kind = Tok_Comma, }, (TokenPosition) {0});
+				} else {
 					lexerror(ex.source, ex.source.content.ptr + ex.source_file_offset,
 							"too many arguments provided"); // TODO Better location
+				}
 			}
 		}
 	}
@@ -1157,14 +1169,14 @@ static void collapseMacroStack (MacroStack *stack, u32 *marker) {
 				}
 				free(repl->toks);
 			}
-			if (*marker == stack->len)
+			if (*marker >= stack->len)
 				(*marker)--;
 			stack->len--;
 		} else {
 			if (repl->pos < repl->toks->count)
 				return;
 
-			if (*marker == stack->len)
+			if (*marker >= stack->len)
 				(*marker)--;
 			stack->len--;
 		}
@@ -1713,18 +1725,23 @@ static const char *defineMacro (
 	if (pos[0] == '(') {
 		pos++;
 		const char *p = pos;
-		while (true) {
-			Token t = getTokenSpaced(generated_strings, source, symbols, &p);
-			if (t.kind != Tok_Identifier && t.kind != Tok_TripleDot)
-				lexerror(source, pos, "the parameters of function-like macros must be valid identifiers");
-			param_count++;
-			t = getTokenSpaced(generated_strings, source, symbols, &p);
-			if (t.kind == Tok_CloseParen)
-				break;
-			else if (t.kind == Tok_EOF)
-				lexerror(source, pos, "incomplete parameter list");
-			else if (t.kind != Tok_Comma)
-				lexerror(source, pos, "the parameters of function-like macros must be valid identifiers");
+		Token t = getTokenSpaced(generated_strings, source, symbols, &p);
+		if (t.kind == Tok_CloseParen) {
+			pos = p;
+		} else {
+			while (true) {
+				if (t.kind != Tok_Identifier && t.kind != Tok_TripleDot)
+					lexerror(source, pos, "the parameters of function-like macros must be valid identifiers");
+				param_count++;
+				t = getTokenSpaced(generated_strings, source, symbols, &p);
+				if (t.kind == Tok_CloseParen)
+					break;
+				else if (t.kind == Tok_EOF)
+					lexerror(source, pos, "incomplete parameter list");
+				else if (t.kind != Tok_Comma)
+					lexerror(source, pos, "the parameters of function-like macros must be valid identifiers");
+				t = getTokenSpaced(generated_strings, source, symbols, &p);
+			}
 		}
 		mac->parameters.ptr = aalloc(arena, sizeof(Parameter) * param_count);
 		mac->parameters.len = param_count;
@@ -1740,6 +1757,7 @@ static const char *defineMacro (
 					lexerror(source, pos, "an ellipsis may only appear as the last parameter to a variadic macro");
 				// TODO Version check for C99
 				name = zstr("__VA_ARGS__");
+				mac->is_vararg = true;
 			}
 
 			mac->parameters.ptr[i].name = name;

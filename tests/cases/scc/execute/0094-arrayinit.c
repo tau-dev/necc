@@ -1,3 +1,4 @@
+//!necc-dbg @ -run
 typedef struct {
 	int v;
 	int sub[2];
@@ -14,6 +15,6 @@ main()
 		return 2;
 	if (a[0].sub[1] != 3)
 		return 3;
-	
+
 	return 0;
 }

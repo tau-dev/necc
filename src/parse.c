@@ -38,6 +38,7 @@ typedef struct {
 	// At the top level, these may be null.
 	Scope current_scope;
 
+	u32 current_func_id;
 	FunctionType current_func_type;
 	IrBuild build;
 	Scope func_goto_labels;
@@ -178,7 +179,7 @@ static Attributes parseAttributes(Parse *);
 static void popScope(Parse *, Scope);
 static nodiscard Scope pushScope(Parse *);
 static void requires(Parse *, const char *desc, Features);
-static OrdinaryIdentifier *define(Parse *, Declaration, u8 storage, const Token *type_token, const Token *decl_token, const Token *def_token, bool file_scope);
+static OrdinaryIdentifier *define(Parse *, Declaration, u8 storage, const Token *type_token, const Token *decl_token, const Token *def_token, u32 parent_decl_id);
 
 // Parses all top level declarations into a Module.
 void parse (Arena *code_arena, Tokenization tokens, Options *opt, Module *module) {
@@ -215,7 +216,7 @@ void parse (Arena *code_arena, Tokenization tokens, Options *opt, Module *module
 		}
 
 		if (storage == Storage_Auto || storage == Storage_Register)
-			parseerror(&parse, type_token, "top-level symbol can not have automatic (stack-allocated) storage duration");
+			parseerror(&parse, type_token, "identifier at file scope can not have automatic (stack-allocated) storage duration");
 
 		if (allowedNoDeclarator(&parse, base_type))
 			continue;
@@ -231,7 +232,7 @@ void parse (Arena *code_arena, Tokenization tokens, Options *opt, Module *module
 			bool object_def = decl.type.kind != Kind_Function && parse.pos->kind == Tok_Equals;
 
 			OrdinaryIdentifier *ord = define(&parse, decl, storage, type_token, primary,
-					function_def || object_def ? parse.pos : NULL, /* file_scope */ true);
+					function_def || object_def ? parse.pos : NULL, IR_REF_NONE);
 
 
 			if (function_def) {
@@ -243,6 +244,7 @@ void parse (Arena *code_arena, Tokenization tokens, Options *opt, Module *module
 				parse.scope_depth = 0;
 
 				StaticValue *val = &parse.module->ptr[ord->static_id];
+				val->def_state = Def_Defined;
 				val->function_ir = parse.build.ir;
 
 				parse.build = global_ir;
@@ -380,12 +382,14 @@ void parseFunction (Parse *parse, Symbol *symbol, Symbol *func_sym) {
 	PUSH(*parse->module, ((StaticValue) {
 		.type = {
 			.kind = Kind_Array,
+			.qualifiers = Qualifier_Const,
 			.array = { .inner = &const_chartype, .count = name.len + 1 },
 		},
 		.decl_location = parse->pos,
 		.def_kind = Static_Variable,
 		.def_state = Def_Defined,
 		.value_data = {name.len+1, terminated},
+		.parent_decl = IR_REF_NONE,
 	}));
 
 	bool is_new;
@@ -639,6 +643,7 @@ static void parseStatement (Parse *parse, bool *had_non_declaration) {
 			// to do those for lightspeed codegen).
 			genJump(build, parse->current_loop_head);
 			build->insertion_block = current;
+			parse->current_loop_head = to_tail;
 		}
 
 		parseStatement(parse, had_non_declaration);
@@ -765,7 +770,7 @@ static void parseStatement (Parse *parse, bool *had_non_declaration) {
 			if (parse->pos->kind == Tok_Equals)
 				definer = parse->pos++;
 			OrdinaryIdentifier *ord = define(parse, decl, storage, primary, decl_token,
-					definer, /* file_scope */ false);
+					definer, parse->current_func_id);
 
 			if (ord->kind == Sym_Value_Auto) {
 				ord->value = (Value) {decl.type, genStackAllocFixed(build, typeSize(decl.type, &parse->target)), Ref_LValue};
@@ -1236,7 +1241,7 @@ static Value parseExprLeftUnary (Parse *parse) {
 	}
 	case Tok_Tilde: {
 		Value v = intPromote(parseExprLeftUnary(parse), parse, primary);
-		return (Value) {v.typ, genNot(build, v.inst)};
+		return (Value) {v.typ, genBitNot(build, v.inst)};
 	}
 	case Tok_Ampersand: {
 		Value v = parseExprLeftUnary(parse);
@@ -1247,7 +1252,10 @@ static Value parseExprLeftUnary (Parse *parse) {
 			v.typ.kind = Kind_FunctionPtr;
 		} else {
 			Type *pointee = ALLOC(parse->code_arena, Type);
-			*pointee = v.typ;
+			if (v.typ.kind == Kind_Array || v.typ.kind == Kind_VLArray)
+				*pointee = *v.typ.array.inner;
+			else
+				*pointee = v.typ;
 			if (v.category == Ref_LValue_Register)
 				parseerror(parse, primary, "cannot take the address of a value declared %sregister%s", BOLD, RESET);
 			if (v.category != Ref_LValue)
@@ -1603,6 +1611,7 @@ static u32 parseStringLiteral(Parse *parse) {
 	*insert = 0;
 	Type strtype = {
 		.kind = Kind_Array,
+		.qualifiers = Qualifier_Const,
 		.array = {.inner = &chartype, .count = len + 1},
 	};
 
@@ -1695,6 +1704,7 @@ static void initializeAutoDefinition (Parse *parse, OrdinaryIdentifier *ord, Typ
 static void initializeStaticDefinition (Parse *parse, OrdinaryIdentifier *ord, Type type, const Token *init_token) {
 	assert(ord->kind == Sym_Value_Static);
 	StaticValue *static_val = &parse->module->ptr[ord->static_id];
+	static_val->def_state = Def_Defined;
 	RefsList refs = { 0 };
 	InitializationDest dest = { .type = type, .reloc_references = &refs };
 
@@ -1737,8 +1747,12 @@ static void initializeStaticDefinition (Parse *parse, OrdinaryIdentifier *ord, T
 				}
 
 				if ((pos + 1) * member_size > dest.reloc_data.len) {
-					dest.reloc_data = (MutableString) ALLOCN(parse->code_arena, char,
+					MutableString new = ALLOCN(parse->code_arena, char,
 							dest.reloc_data.len + (pos + 1) * member_size);
+					if (dest.reloc_data.len)
+						memcpy(new.ptr, dest.reloc_data.ptr, dest.reloc_data.len);
+					memset(new.ptr + dest.reloc_data.len, 0, new.len - dest.reloc_data.len);
+					dest.reloc_data = new;
 				}
 
 				dest.offset = pos * member_size;
@@ -2803,17 +2817,62 @@ static void parseTypedefDecls(Parse *parse, Type base_type) {
 
 
 /*
-The semantics of declarations and linkages in C are the most
-aesthetically offensive piece of logic I have ever read. And this does
-not even cover the bizarre MSVC modifications to scope, like function
-declarations always being at file scope.
 
-This code tries to express some finnicky bits in the standard's wording
-of linkage, resulting in some abstractness and redundant representations
-of data. I usually like to compress that kind of stuff down, but here it
-looks like explaining the correctness of the result would be more effort
-than it's worth.
+The semantics of declarations and linkages in C are the most
+aesthetically offensive piece of logic I have ever read.
+I'm no beginner at C, and yet it took me three damn tries to get this to
+its current state. Hopefully it's finally approaching correctness.
+
 */
+
+
+typedef enum {
+	Link_None,
+	Link_External,
+	Link_Internal,
+} Linkage;
+
+static Linkage linkage(Parse *parse, OrdinaryIdentifier *id) {
+	if (id->kind != Sym_Value_Static)
+		return Link_None;
+	StaticValue *val = &parse->module->ptr[id->static_id];
+	if (val->parent_decl != IR_REF_NONE)
+		return Link_None;
+	return val->is_public ? Link_External : Link_Internal;
+}
+
+static void defGlobal (
+	Parse *parse,
+	Declaration decl,
+	const Token *decl_token,
+	bool tentative,
+	bool is_public)
+{
+	if (decl.name->has_global) {
+		StaticValue *existing_val = &parse->module->ptr[decl.name->global_val_id];
+		Type existing_type = existing_val->type;
+
+		if (!typeCompatible(decl.type, existing_type)) {
+			parsemsg(Log_Err, parse, decl_token, "redeclaration of %.*s with incompatible type %s",
+					STRING_PRINTAGE(decl.name->name), printTypeHighlighted(&parse->arena, decl.type));
+    		parsemsg(Log_Info | Log_Fatal, parse, existing_val->decl_location, "previous declaration had type %s", printTypeHighlighted(&parse->arena, existing_type));
+		}
+		if (tentative && existing_val->def_state == Def_Undefined)
+			existing_val->def_state = Def_Tentative;
+	} else {
+		decl.name->has_global = true;
+		decl.name->global_val_id = parse->module->len;
+		PUSH(*parse->module, ((StaticValue) {
+			.name = decl.name->name,
+			.type = decl.type,
+			.is_public = is_public,
+			.decl_location = decl_token,
+			.def_kind = decl.type.kind == Kind_Function ? Static_Function : Static_Variable,
+			.def_state = tentative ? Def_Tentative : Def_Undefined,
+			.parent_decl = IR_REF_NONE,
+		}));
+	}
+}
 
 static OrdinaryIdentifier *define (
 	Parse *parse,
@@ -2822,132 +2881,101 @@ static OrdinaryIdentifier *define (
 	const Token *type_token,
 	const Token *decl_token,
 	const Token *defining_token,
-	bool file_scope)
+	u32 parent_decl)
 {
-	typedef enum {
-		Link_None,
-		Link_External,
-		Link_Internal,
-	} Linkage;
+	bool file_scope = parent_decl == IR_REF_NONE;
 	bool msvc = parse->target.version & Features_MSVC_Extensions;
 
 	OrdinaryIdentifier *existing = decl.name->ordinary;
-	Linkage existing_link = Link_None;
 	u32 scope_depth = parse->scope_depth;
+	assert(file_scope == (scope_depth == 0));
+	Linkage existing_linkage;
+	if (existing) existing_linkage = linkage(parse, existing);
 
 	if (msvc && decl.type.kind == Kind_Function)
 		scope_depth = 0;
 
-	if (existing && existing->kind == Sym_Value_Static) {
-		existing_link = parse->module->ptr[existing->static_id].is_public ?
-				Link_External : Link_Internal;
-	}
 
 	// If the declaration of an identifier for a function has no
 	// storage-class specifier, its linkage is determined exactly as if
 	// it were declared with the storage-class specifier extern.
-	if (decl.type.kind == Kind_Function && storage == Storage_Unspecified)
-		storage = Storage_Extern;
-
-
-	Linkage link = Link_None;
-	if (storage == Storage_Static || storage == Storage_Constexpr) {
-		link = Link_Internal;
-		if (msvc && existing && existing->kind == Sym_Value_Static) {
-			parse->module->ptr[existing->static_id].is_public = false;
-			existing_link = Link_Internal;
-		}
-	} else if (storage == Storage_Extern) {
-		if (defining_token) {
-			// GCC reports the initialization of a non-file-scope extern
-			// identifier as an error, which matches my intuition, but I
-			// have not yet found the relevant section in the standard.
-			if (!file_scope)
-				parseerror(parse, defining_token, "cannot initialize an %s%s%s declaration", BOLD, "extern", RESET);
-		}
-		// For an identifier declared with the storage-class specifier
-		// extern in a scope in which a prior dec- laration of that
-		// identifier is visible, if the prior declaration specifies
-		// internal or external linkage, the linkage of the identifier at
-		// the later declaration is the same as the linkage specified at the
-		// prior declaration. If no prior declaration is visible, or if the
-		// prior declaration specifies no linkage, then the identifier has
-		// external linkage.
-		if (existing && existing_link != Link_None)
-			link = existing_link; // TOOD The later declaration may hide the former declaration...
-		else
-			link = Link_External;
-	} else if (file_scope) {
-		// If the declaration of an identifier for an object has file
-		// scope and no storage-class specifier, its linkage is
-		// external.
-		link = Link_External;
+	if (decl.type.kind == Kind_Function) {
+		if (storage == Storage_Unspecified)
+			storage = Storage_Extern;
+		else if (!file_scope && storage != Storage_Extern)
+			parseerror(parse, type_token, "a function at block scope may only be specified extern");
 	}
 
-	if (decl.type.kind == Kind_Function && !file_scope && storage != Storage_Extern)
-		parseerror(parse, type_token, "a function at block scope may only be specified extern");
-
-	// (6.7.1.9)
-	bool tentative = file_scope && decl.type.kind != Kind_Function && !defining_token && (storage == Storage_Static || storage == Storage_Unspecified);
-	if (tentative && storage == Storage_Static && typeSize(decl.type, &parse->target) == 0)
-		parseerror(parse, decl_token, "tentative definition with internal linkage may not have incomplete type");
-
-	if (existing && existing->scope_depth == parse->scope_depth) {
-		Type existing_type;
-		StaticValue *staticval = NULL;
-		String name = decl.name->name;
-
-		if (existing->kind == Sym_Value_Auto) {
-			existing_type = existing->value.typ;
-		} else if (existing->kind == Sym_Value_Static) {
-			staticval = &parse->module->ptr[existing->static_id];
-			existing_type = staticval->type;
-		} else {
-			parsemsg(Log_Err, parse, decl_token, "redeclaration of %.*s as a different kind of symbol", STRING_PRINTAGE(name));
-    		parsemsg(Log_Info | Log_Fatal, parse, existing->decl_location, "previous declaration was here");
-		}
-
-		if (existing_link != link) {
-			parsemsg(Log_Err, parse, decl_token, "redeclaration of %.*s with incompatible linkage", STRING_PRINTAGE(name));
-    		parsemsg(Log_Info | Log_Fatal, parse, existing->decl_location, "previous declaration was here");
-		}
-
-		if (!typeCompatible(decl.type, existing_type)) {
-			parsemsg(Log_Err, parse, defining_token, "redeclaration of %.*s with incompatible type %s", STRING_PRINTAGE(name), printTypeHighlighted(&parse->arena, decl.type));
-    		parsemsg(Log_Info | Log_Fatal, parse, existing->decl_location, "previous declaration had type %s", printTypeHighlighted(&parse->arena, existing_type));
-		}
-
-		if (defining_token) {
-			if (!staticval || staticval->def_state == Def_Defined)
-				redefinition(parse, defining_token, existing->def_location, decl.name);
-			staticval->def_state = Def_Defined;
-		}
-		return existing;
-	}
-
-	decl.name->ordinary = ALLOC(&parse->arena, OrdinaryIdentifier);
-	*decl.name->ordinary = (OrdinaryIdentifier) {
-		.kind = link == Link_None ? Sym_Value_Auto : Sym_Value_Static,
+	OrdinaryIdentifier *new = ALLOC(&parse->arena, OrdinaryIdentifier);
+	*new = (OrdinaryIdentifier) {
 		.shadowed = existing,
 		.scope_depth = scope_depth,
 		.decl_location = decl_token,
 		.def_location = defining_token,
+		.kind = Sym_Value_Static,
 	};
 
-	if (link != Link_None) {
-		decl.name->ordinary->static_id = parse->module->len;
-		PUSH(*parse->module, ((StaticValue) {
-			.name = decl.name->name,
-			.type = decl.type,
-			.is_public = link == Link_External,
-			.decl_location = decl_token,
-			.def_kind = decl.type.kind == Kind_Function ? Static_Function : Static_Variable,
-			.def_state = defining_token ? Def_Defined :
-					tentative ? Def_Tentative : Def_Undefined,
-		}));
+	switch (storage) {
+	case Storage_Auto:
+	case Storage_Register:
+		assert(!file_scope);
+		new->kind = Sym_Value_Auto;
+		break;
+	case Storage_Unspecified:
+		if (file_scope)
+			goto static_storage;
+		new->kind = Sym_Value_Auto;
+		break;
+	case Storage_Static:
+	case Storage_Constexpr:
+	static_storage: {
+		if (file_scope) {
+			// (6.7.1.9)
+			bool tentative = decl.type.kind != Kind_Function && !defining_token;
+			if (tentative && storage == Storage_Static && typeSize(decl.type, &parse->target) == 0)
+				parseerror(parse, decl_token, "tentative definition with internal linkage may not have incomplete type");
+			defGlobal(parse, decl, decl_token, tentative, false);
+			new->static_id = decl.name->global_val_id;
+		} else {
+			new->static_id = parse->module->len;
+			PUSH(*parse->module, ((StaticValue) {
+				.name = decl.name->name,
+				.type = decl.type,
+				.is_public = false,
+				.decl_location = decl_token,
+				.def_kind = decl.type.kind == Kind_Function ? Static_Function : Static_Variable,
+				.def_state = Def_Undefined,
+				.parent_decl = parent_decl,
+			}));
+		}
+	} break;
+	case Storage_Extern:
+		if (defining_token && !file_scope)
+			parseerror(parse, decl_token, "extern declaration may only be initialized at file scope");
+		defGlobal(parse, decl, decl_token, false, true);
+		new->static_id = decl.name->global_val_id;
+		break;
+	case Storage_Extern_Threadlocal:
+	case Storage_Static_Threadlocal:
+		parseerror(parse, NULL, "TODO Thread locals");
+	default:
+		unreachable;
 	}
 
+	// If an identifier has no linkage, there shall be no more than one
+	// declaration of the identifier (in a declarator or type specifier)
+	// with the same scope and in the same name space.
+	if (existing && existing->scope_depth == scope_depth) {
+		if (existing_linkage == Link_None || linkage(parse, new) == Link_None)
+			redefinition(parse, decl_token, existing->decl_location, decl.name);
+		assert(existing->kind == Sym_Value_Static);
+		if (parse->module->ptr[existing->static_id].def_state == Def_Defined && defining_token)
+			redefinition(parse, defining_token, existing->def_location, decl.name);
+	}
+
+	decl.name->ordinary = new;
 	PUSH(parse->current_scope, decl.name);
+
 	return decl.name->ordinary;
 }
 
@@ -3251,7 +3279,7 @@ static IrRef toBoolean (Parse *p, const Token *primary, Value v) {
 	v = rvalue(v, p);
 	removeEnumness(&v.typ);
 
-	if (v.typ.kind != Kind_Basic && v.typ.kind != Kind_Pointer)
+	if (v.typ.kind != Kind_Basic && v.typ.kind != Kind_Pointer && v.typ.kind != Kind_FunctionPtr)
 		parseerror(p, primary, "(TODO Explain this better) expected an expression of scalar type");
 
 	u32 size = typeSize(v.typ, &p->target);
@@ -3296,16 +3324,18 @@ static IrRef coercerval (Value v, Type t, Parse *p, const Token *primary, bool a
 	}
 
 
-	if (allow_casts) {
+	u64 val;
+	bool is_null_pointer_constant = v.typ.kind == Kind_Basic && tryIntConstant(p, v, &val) && val == 0;
+	if (allow_casts || is_null_pointer_constant) {
 		// NOTE This relies on pointers being the largest types.
-		if (t.kind == Kind_Basic && v.typ.kind == Kind_Pointer)
+		if (t.kind == Kind_Basic && (v.typ.kind == Kind_Pointer || v.typ.kind == Kind_FunctionPtr))
 			return genTrunc(build, v.inst, p->target.typesizes[t.basic & ~Int_unsigned]);
-		if (t.kind == Kind_Pointer && v.typ.kind == Kind_Basic)
-			return genZeroExt(build, v.inst, p->target.ptr_size);
-		if ((t.kind == Kind_Pointer || t.kind == Kind_FunctionPtr)
-			&& (t.kind == Kind_Pointer || v.typ.kind == Kind_FunctionPtr))
-		{
-			return v.inst;
+
+		if (t.kind == Kind_Pointer || t.kind == Kind_FunctionPtr) {
+			if (v.typ.kind == Kind_Basic)
+				return genZeroExt(build, v.inst, p->target.ptr_size);
+			if (t.kind == Kind_Pointer || v.typ.kind == Kind_FunctionPtr)
+				return v.inst;
 		}
 	}
 

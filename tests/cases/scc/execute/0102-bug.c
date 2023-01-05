@@ -1,3 +1,4 @@
+//!necc-dbg @ -run
 // This wouldn't compile
 
 typedef struct  { } Vec;

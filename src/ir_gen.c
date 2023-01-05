@@ -506,7 +506,7 @@ void replaceWithCopy (IrList ir, IrRef original, IrRef replacement, IrRef ordere
 }
 
 
-void discardIrBuilder(IrBuild *builder) {
+void discardIrBuilder (IrBuild *builder) {
 	// TODO Free loose blocks
 	free(builder->ir.ptr);
 }
@@ -514,6 +514,11 @@ void discardIrBuilder(IrBuild *builder) {
 
 typedef unsigned long ulong;
 typedef unsigned int uint;
+static void printOrder (FILE *out, IrRef r) {
+	if (r != IR_REF_NONE)
+		fprintf(out, " after %lu", (ulong) r);
+	fprintf(out, "\n");
+}
 void printBlock (FILE *dest, Block *blk, IrList ir) {
 	if (blk->visited == 31)
 		return;
@@ -551,7 +556,8 @@ void printBlock (FILE *dest, Block *blk, IrList ir) {
 				if (i + 1 < params.len)
 					fprintf(dest, ", ");
 			}
-			fprintf(dest, ")\n");
+			fprintf(dest, ")");
+			printOrder(dest, inst.mem.ordered_after);
 		} continue;
 		case Ir_PhiOut:
 			fprintf(dest, "phi %lu", (ulong) inst.phi_out.source);
@@ -580,16 +586,20 @@ void printBlock (FILE *dest, Block *blk, IrList ir) {
 			fprintf(dest, "discard %lu\n", (ulong) inst.unop);
 			continue;
 		case Ir_Load:
-			fprintf(dest, "load i%lu, [%lu]\n", (ulong) inst.size * 8, (ulong) inst.mem.address);
+			fprintf(dest, "load i%lu, [%lu]", (ulong) inst.size * 8, (ulong) inst.mem.address);
+			printOrder(dest, inst.mem.ordered_after);
 			continue;
 		case Ir_LoadVolatile:
-			fprintf(dest, "load volatile i%lu, [%lu]\n", (ulong) inst.size * 8, (ulong) inst.mem.address);
+			fprintf(dest, "load volatile i%lu, [%lu]", (ulong) inst.size * 8, (ulong) inst.mem.address);
+			printOrder(dest, inst.mem.ordered_after);
 			continue;
 		case Ir_Store:
-			fprintf(dest, "store [%lu] %lu\n", (ulong) inst.mem.address, (ulong) inst.mem.source);
+			fprintf(dest, "store [%lu] %lu", (ulong) inst.mem.address, (ulong) inst.mem.source);
+			printOrder(dest, inst.mem.ordered_after);
 			continue;
 		case Ir_StoreVolatile:
-			fprintf(dest, "store volatile [%lu] %lu\n", (ulong) inst.mem.address, (ulong) inst.mem.source);
+			fprintf(dest, "store volatile [%lu] %lu", (ulong) inst.mem.address, (ulong) inst.mem.source);
+			printOrder(dest, inst.mem.ordered_after);
 			continue;
 		case Ir_BitNot:
 			fprintf(dest, "not %lu\n", (ulong) inst.unop);
@@ -643,6 +653,7 @@ void printBlock (FILE *dest, Block *blk, IrList ir) {
 	switch (exit.kind) {
 	case Exit_Unconditional:
 		fprintf(dest, "       jmp %.*s%lu\n", STRING_PRINTAGE(exit.unconditional->label), (ulong) exit.unconditional->id);
+		printBlock(dest, exit.unconditional, ir);
 		break;
 	case Exit_Branch:
 		fprintf(dest, "       branch %lu ? %.*s%lu : %.*s%lu\n",

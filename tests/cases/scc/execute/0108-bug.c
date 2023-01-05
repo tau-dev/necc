@@ -1,3 +1,4 @@
+//!necc-dbg @ -run
 int
 main()
 {
@@ -6,6 +7,6 @@ main()
 	for(i = 0; i < 10; i++)
 		if (!i)
 			continue;
-	
+
 	return 0;
 }

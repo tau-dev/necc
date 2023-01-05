@@ -20,7 +20,7 @@ release: bin/necc
 self: selfhost/necc
 
 test: bin/necc-dbg bin/necc tests/runner
-	@./tests/runner -q
+	@./tests/runner
 
 
 tests/runner: tests/runner.c tests/util.c

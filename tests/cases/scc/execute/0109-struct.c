@@ -1,3 +1,4 @@
+//!necc-dbg @ -run
 struct S1 { int x; };
 struct S2 { struct S1 s1; };
 

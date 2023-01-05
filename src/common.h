@@ -54,6 +54,10 @@ typedef struct Symbol {
 	OrdinaryIdentifier *ordinary;
 	NameTaggedType *nametagged;
 
+	// The "external" (file scope) symbol this refers to.
+	bool has_global;
+	u32 global_val_id;
+
 	struct {
 		Block *block;
 		const Token *def_location;

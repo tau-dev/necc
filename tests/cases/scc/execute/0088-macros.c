@@ -1,3 +1,4 @@
+//!necc-dbg @ -run
 #define ZERO_0() 0
 #define ZERO_1(A) 0
 #define ZERO_2(A, B) 0
@@ -25,6 +26,6 @@ main()
 		return 1;
 	if (ZERO_1_VAR(1, 2, 3))
 		return 1;
-		
+
 	return 0;
 }

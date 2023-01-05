@@ -20,7 +20,7 @@ IrRef genModSigned(IrBuild *, IrRef, IrRef, bool *overflow_or_div0);
 IrRef genOr(IrBuild *, IrRef, IrRef);
 IrRef genXor(IrBuild *, IrRef, IrRef);
 IrRef genAnd(IrBuild *, IrRef, IrRef);
-IrRef genBinNot(IrBuild *, IrRef);
+IrRef genBitNot(IrBuild *, IrRef);
 IrRef genNot(IrBuild *, IrRef);
 IrRef genLessThan(IrBuild *, IrRef, IrRef, u16 size);
 IrRef genLessThanOrEquals(IrBuild *, IrRef, IrRef, u16 size);

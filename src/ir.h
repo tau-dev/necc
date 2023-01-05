@@ -65,7 +65,7 @@ typedef enum {
 	Ir_Add,
 	Ir_Sub,
 	Ir_Mul,
-	Ir_SMul,
+	Ir_SMul, // TODO I'm stupid, signedness does not matter for the low bits.
 	Ir_Div,
 	Ir_SDiv,
 	Ir_Mod,

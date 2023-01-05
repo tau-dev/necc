@@ -25,6 +25,7 @@ typedef struct {
 	u8 no_discard;
 } Value;
 
+
 typedef enum {
 	Sym_Typedef,
 	Sym_EnumConstant,
@@ -75,6 +76,7 @@ typedef struct {
 
 typedef SPAN(Reference) References;
 
+
 typedef struct {
 	enum {
 		Static_Variable,
@@ -95,6 +97,7 @@ typedef struct {
 	Type type;
 
 	String name;
+	u32 parent_decl; // IR_REF_NONE if absent
 
 	String value_data;
 	References value_references;

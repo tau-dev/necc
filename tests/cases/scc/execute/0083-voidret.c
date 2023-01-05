@@ -1,3 +1,4 @@
+//!necc-dbg @ -run
 void
 voidfn()
 {

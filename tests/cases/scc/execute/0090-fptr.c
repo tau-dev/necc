@@ -1,3 +1,4 @@
+//!necc-dbg @ -run
 struct S
 {
 	int	(*fptr)();
@@ -13,7 +14,7 @@ int
 main()
 {
 	struct S v;
-	
+
 	v.fptr = foo;
 	return v.fptr();
 }

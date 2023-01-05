@@ -398,6 +398,15 @@ static void emitFunctionForward (Arena *arena, FILE *out, Module module, StaticV
 		}
 	}
 
+	for (u32 i = 0; i < ir.len; i++) {
+		Inst inst = ir.ptr[i];
+
+		if (inst.kind == Ir_StackAllocFixed) {
+			emit(&c, " lea rax, [rsp+I]	; alloc", inst.alloc.known_offset);
+			emit(&c, " mov #, rax", i);
+		}
+	}
+
 	if (is_vararg) {
 		c.vaarg_reg_saves = 0;
 		c.vaarg_gp_offset = normal_params_found * 8;
@@ -653,8 +662,6 @@ static void emitInstForward(Codegen *c, IrRef i) {
 		}
 		break;
 	case Ir_StackAllocFixed:
-		emit(c, " lea rax, [rsp+I]	; alloc", inst.alloc.known_offset);
-		emit(c, " mov #, rax", i);
 		break;
 	case Ir_StackAllocVLA:
 		unreachable;

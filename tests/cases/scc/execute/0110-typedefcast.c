@@ -1,3 +1,4 @@
+//!necc-dbg @ -run
 typedef int myint;
 myint x = (myint)1;
 

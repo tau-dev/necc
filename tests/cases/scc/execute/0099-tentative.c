@@ -1,3 +1,4 @@
+//!necc-dbg @ -run
 int x, x = 3, x;
 
 int

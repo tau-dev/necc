@@ -1,3 +1,4 @@
+//!necc-dbg @ -run
 int a[3] = {0, 1, 2};
 
 int
@@ -9,6 +10,6 @@ main()
 		return 2;
 	if (a[2] != 2)
 		return 3;
-	
+
 	return 0;
 }

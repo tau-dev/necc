@@ -1,3 +1,4 @@
+//!necc-dbg @ -run
 int foo(void);
 int foo(void);
 #define FOO 0
