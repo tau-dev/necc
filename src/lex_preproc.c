@@ -486,9 +486,16 @@ static Token getToken (Arena *str_arena, SourceFile src, SymbolList *syms, const
 						tok.literal_type = Int_longlong;
 					}
 				}
-
-				if (is_unsigned)
+				// FIXME Use platform-correct integer sizes.
+				if (is_unsigned) {
+					if (tok.literal_type == Int_int && tok.val.integer_s > UINT32_MAX)
+						tok.literal_type = Int_long;
 					tok.literal_type |= Int_unsigned;
+				} else {
+					// ???
+					if (tok.literal_type == Int_int && tok.val.integer_s > UINT32_MAX)
+						tok.literal_type = Int_long;
+				}
 			}
 
 			pos--;

@@ -100,7 +100,7 @@ static inline i64 toSigned(u64 i) {
 
 static IrRef genBinOp (IrBuild *build, InstKind op, IrRef a, IrRef b, bool *overflow) {
 	Inst *inst = build->ir.ptr;
-	assert(inst[a].size == inst[b].size);
+	assert(inst[a].size == inst[b].size || op == Ir_ShiftLeft || op == Ir_ShiftRight);
 	Inst i = {op, inst[a].size, .binop = {a, b}};
 
 	bool commutative = op == Ir_Add || op == Ir_Mul || op == Ir_BitAnd || op == Ir_BitOr || op == Ir_BitXor || op == Ir_Equals;
@@ -538,8 +538,8 @@ void printBlock (FILE *dest, Block *blk, IrList ir) {
 	fprintf(dest, "}\n");
 
 	for (size_t i = blk->first_inst; i < blk->inst_end; i++) {
-		fprintf(dest, " %3lu = ", (ulong) i);
 		Inst inst = ir.ptr[i];
+		fprintf(dest, " %3lu /%lu = ", (ulong) i, (ulong) inst.size);
 
 		switch ((InstKind) inst.kind) {
 		case Ir_Reloc:

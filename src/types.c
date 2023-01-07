@@ -223,6 +223,7 @@ void printTypeBase(Type t, char **pos, const char *end) {
 	case Kind_Pointer:
 		printTypeBase(*t.pointer, pos, end); break;
 	case Kind_Array:
+	case Kind_VLArray:
 		printTypeBase(*t.array.inner, pos, end); break;
 	case Kind_Function:
 	case Kind_FunctionPtr:
@@ -282,9 +283,13 @@ void printTypeHead (Type t, char **pos, const char *end) {
 	switch (t.kind) {
 	case Kind_Pointer:
 		printTypeHead(*t.pointer, pos, end);
-		if (t.pointer->kind == Kind_Array || t.pointer->kind == Kind_FunctionPtr
-				|| t.pointer->kind == Kind_Function) // TODO A Pointer should not actually ever point at a Function.
+
+		// TODO A Pointer should not actually ever point to a Function.
+		if (t.pointer->kind == Kind_Array || t.pointer->kind == Kind_VLArray ||
+			t.pointer->kind == Kind_FunctionPtr || t.pointer->kind == Kind_Function)
+		{
 			printto(pos, end, "(");
+		}
 		printto(pos, end, "*");
 		break;
 	case Kind_FunctionPtr:
@@ -297,6 +302,7 @@ void printTypeHead (Type t, char **pos, const char *end) {
 #endif
 		break;
 	case Kind_Array:
+	case Kind_VLArray:
 		printTypeHead(*t.array.inner, pos, end);
 		break;
 	case Kind_Function:
@@ -318,9 +324,11 @@ void printTypeHead (Type t, char **pos, const char *end) {
 void printTypeTail (Type t, char **pos, const char *end) {
 	switch (t.kind) {
 	case Kind_Pointer:
-		if (t.pointer->kind == Kind_Array || t.pointer->kind == Kind_FunctionPtr
-				|| t.pointer->kind == Kind_Function)
+		if (t.pointer->kind == Kind_Array || t.pointer->kind == Kind_VLArray ||
+			t.pointer->kind == Kind_FunctionPtr || t.pointer->kind == Kind_Function)
+		{
 			printto(pos, end, ")");
+		}
 		printTypeTail(*t.pointer, pos, end);
 		break;
 	case Kind_FunctionPtr:
@@ -330,6 +338,13 @@ void printTypeTail (Type t, char **pos, const char *end) {
 		break;
 	case Kind_Array:
 		printto(pos, end, "[%llu]", (unsigned long long) t.array.count);
+		printTypeTail(*t.array.inner, pos, end);
+		break;
+	case Kind_VLArray:
+		if (t.array.count == IR_REF_NONE)
+			printto(pos, end, "[]");
+		else
+			printto(pos, end, "[val_%llu]", (unsigned long long) t.array.count);
 		printTypeTail(*t.array.inner, pos, end);
 		break;
 	case Kind_Function:

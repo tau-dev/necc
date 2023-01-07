@@ -452,7 +452,7 @@ static bool loadMaybeBigTo (Codegen *c, Register reg1, Register reg2, IrRef i) {
 	bool bigg = size > 8;
 
 	u32 reduced_size = bigg ? 8 : size;
-	emit(c, " mov R, #", registerSized(reg1, reduced_size), i);
+	emit(c, " mov R, [rsp+I]", registerSized(reg1, reduced_size), c->storage[i]);
 
 	if (bigg)
 		emit(c, " mov R, [rsp+I]", registerSized(reg2, size - reduced_size), c->storage[i] + 8);
@@ -772,7 +772,7 @@ static void emitInstForward(Codegen *c, IrRef i) {
 
 		if (!memory_return) {
 			bool bigg = inst.size > 8;
-			emit(c, " mov #, R", i, registerSized(RAX, bigg ? 8 : inst.size));
+			emit(c, " mov [rsp+I], R", c->storage[i], registerSized(RAX, bigg ? 8 : inst.size));
 			if (bigg) {
 				emit(c, " mov [rsp+I], R", c->storage[i]+8, registerSized(RDX, inst.size - 8));
 			}

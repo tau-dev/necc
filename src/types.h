@@ -127,7 +127,7 @@ typedef enum {
 } Features;
 
 typedef enum {
-	Version_C89       = Features_OldStyleDefinitions,
+	Version_C89       = Features_OldStyleDefinitions | Features_DefaultInt,
 	Version_C99       = Features_C99 | Features_OldStyleDefinitions,
 	Version_C17       = Features_C99 | Features_C11 | Features_OldStyleDefinitions,
 	Version_C23       = Features_C99 | Features_C11 | Features_C23,

@@ -58,9 +58,6 @@ const char *plxz(const Parse *parse) {
 
 typedef LIST(Reference) RefsList;
 typedef struct {
-	Type type;
-	u32 offset;
-
 	IrRef address;
 
 	RefsList *reloc_references;
@@ -156,7 +153,7 @@ static nodiscard bool allowedNoDeclarator(Parse *, Type base_type);
 // static Declaration parseDeclarator (Parse* parse, const Token **tok, Type base_type);
 static void initializeStaticDefinition (Parse *, OrdinaryIdentifier *, Type, const Token *init_token);
 static void initializeAutoDefinition (Parse *, OrdinaryIdentifier *, Type, const Token *init_token);
-static void parseInitializer(Parse *, InitializationDest);
+static void parseMaybeBracedInitializer(Parse *, InitializationDest, u32 offset, Type type);
 static bool tryIntConstant (Parse *, Value, u64 *result);
 static bool tryEatStaticAssert(Parse *);
 static Value arithAdd(Parse *parse, const Token *primary, Value lhs, Value rhs);
@@ -172,7 +169,7 @@ static void parseFunction(Parse *, Symbol *name, Symbol *func_sym);
 static Value rvalue(Value v, Parse *);
 static Value dereference(Parse *, Value v);
 static Value pointerAdd(IrBuild *, Value lhs, Value rhs, Parse *op_parse, const Token *);
-static bool comparablePointers(Parse *, Type a, Type b);
+static bool comparablePointers(Parse *, Value a, Value b);
 static void parseTypedefDecls(Parse *, Type base_type);
 static u32 parseStringLiteral(Parse *);
 static Attributes parseAttributes(Parse *);
@@ -926,7 +923,7 @@ static Value parseExprElvis (Parse *parse) {
 		Type common;
 		if (typeCompatible(lhs.typ, rhs.typ))
 			common = lhs.typ;
-		else if (comparablePointers(parse, lhs.typ, rhs.typ))
+		else if (comparablePointers(parse, lhs, rhs))
 			// For function-null comparison
 			common = lhs.typ.kind == Kind_Pointer ? rhs.typ : lhs.typ;
 		else // This can only generate an extension instruction, which will be reordered into the right block.
@@ -1079,10 +1076,11 @@ static Value parseExprEquality (Parse *parse) {
 			parsemsg(Log_Warn, parse, primary, "comparison to self is always %s",
 					primary->kind == Tok_BangEquals ? "false" : "true");
 
-		if (comparablePointers(parse, lhs.typ, rhs.typ)) {
-			lhs = rvalue(lhs, parse);
-			rhs = rvalue(rhs, parse);
-		} else {
+		lhs = rvalue(lhs, parse);
+		rhs = rvalue(rhs, parse);
+
+		// FIXME The zero value may have non-intptr size. Is it important?
+		if (!comparablePointers(parse, lhs, rhs)) {
 			arithmeticConversions(parse, primary, &lhs, &rhs);
 		}
 
@@ -1224,7 +1222,7 @@ static Value parseExprLeftUnary (Parse *parse) {
 		return result;
 	}
 	case Tok_Asterisk: {
-		Value v = parseExprLeftUnary(parse);
+		Value v = rvalue(parseExprLeftUnary(parse), parse);
 		if (v.typ.kind == Kind_FunctionPtr) {
 			v.typ.kind = Kind_Function;
 			v.category = Ref_LValue;
@@ -1302,10 +1300,9 @@ static Value parseExprLeftUnary (Parse *parse) {
 				IrRef stack = genStackAllocFixed(build, typeSize(cast_target, &parse->target));
 				// TODO Generate Ir_StackDealloc at end of block!
 				InitializationDest dest = {
-					.type = cast_target,
 					.address = stack,
 				};
-				parseInitializer(parse, dest);
+				parseMaybeBracedInitializer(parse, dest, 0, cast_target);
 				return (Value) {cast_target, stack, Ref_LValue};
 			} else {
 				// Cast operator
@@ -1417,6 +1414,11 @@ static Value parseExprRightUnary (Parse *parse) {
 				v = dereference(parse, v);
 			}
 
+			if (typeSize(v.typ, &parse->target) == 0) {
+				parseerror(parse, NULL, "cannot access on a value of incomplete type %s",
+					printTypeHighlighted(&parse->arena, v.typ));
+			}
+
 			Symbol *member_name = expect(parse, Tok_Identifier).val.symbol;
 			Type resolved = resolveType(v.typ);
 
@@ -1437,7 +1439,7 @@ static Value parseExprRightUnary (Parse *parse) {
 					v.inst = genAdd(build, v.inst, offset);
 
 					if (is_flex) {
-						v.typ = (Type) {Kind_Pointer, .pointer = &resolved.members.ptr[i].type};
+						v.typ = (Type) {Kind_Pointer, .pointer = resolved.members.ptr[i].type.array.inner};
 						v.category = Ref_RValue;
 					}
 				} else {
@@ -1640,21 +1642,20 @@ static Attributes parseAttributes (Parse *parse) {
 
 static void initializeAutoDefinition (Parse *parse, OrdinaryIdentifier *ord, Type type, const Token *init_token) {
 	assert(ord->kind == Sym_Value_Auto);
-	InitializationDest dest = { .type = type, .address = ord->value.inst };
+	InitializationDest dest = { .address = ord->value.inst };
 
 	if (type.kind == Kind_VLArray) {
 		if (type.array.count == IR_REF_NONE) {
 			IrBuild *build = &parse->build;
-			Inst *size_inst = &build->ir.ptr[parse->build.ir.ptr[dest.address].alloc.size];
-			assert(size_inst->kind == Ir_Constant);
-			dest.type = *dest.type.array.inner;
+			u32 *size_constant = &build->ir.ptr[dest.address].alloc.size;
+			type = *type.array.inner;
 
-			if (parse->pos->kind == Tok_String && dest.type.kind == Kind_Basic && dest.type.basic == Int_char) {
+			if (parse->pos->kind == Tok_String && type.kind == Kind_Basic && type.basic == Int_char) {
 				// TODO Big constants
 				u32 id = parseStringLiteral(parse);
 				StaticValue *val = &parse->module->ptr[id];
 				u32 count = val->value_data.len;
-				size_inst->constant = count;
+				*size_constant = count;
 				ord->value.typ.kind = Kind_Array;
 				ord->value.typ.array.count = count;
 
@@ -1664,13 +1665,13 @@ static void initializeAutoDefinition (Parse *parse, OrdinaryIdentifier *ord, Typ
 			}
 			expect(parse, Tok_OpenBrace);
 
-			u32 member_size = typeSize(dest.type, &parse->target);
+			u32 member_size = typeSize(type, &parse->target);
 			u32 count = 0;
 			while (true) {
 				if (tryEat(parse, Tok_CloseBrace))
 					break;
 
-				parseInitializer(parse, dest);
+				parseMaybeBracedInitializer(parse, dest, 0, type);
 				count++;
 
 				if (!tryEat(parse, Tok_Comma)) {
@@ -1679,11 +1680,9 @@ static void initializeAutoDefinition (Parse *parse, OrdinaryIdentifier *ord, Typ
 				}
 			}
 
-			size_inst = &build->ir.ptr[parse->build.ir.ptr[dest.address].alloc.size];
-			size_inst->constant = count * member_size;
+			build->ir.ptr[dest.address].alloc.size = count * member_size;
 			ord->value.typ.kind = Kind_Array;
 			ord->value.typ.array.count = count;
-			return;
 		} else {
 			requires(parse, "initialization of variable-length arrays", Features_C23);
 
@@ -1691,14 +1690,14 @@ static void initializeAutoDefinition (Parse *parse, OrdinaryIdentifier *ord, Typ
 			expect(parse, Tok_CloseBrace);
 
 			parseerror(parse, NULL, "TODO Implement VLA initializers");
-			return;
 		}
+		return;
 	}
 
 	if (typeSize(type, &parse->target) == 0)
 		parseerror(parse, init_token, "cannot initialize incomplete type %s", printTypeHighlighted(&parse->arena, type));
 
-	parseInitializer(parse, dest);
+	parseMaybeBracedInitializer(parse, dest, 0, type);
 }
 
 static void initializeStaticDefinition (Parse *parse, OrdinaryIdentifier *ord, Type type, const Token *init_token) {
@@ -1706,7 +1705,7 @@ static void initializeStaticDefinition (Parse *parse, OrdinaryIdentifier *ord, T
 	StaticValue *static_val = &parse->module->ptr[ord->static_id];
 	static_val->def_state = Def_Defined;
 	RefsList refs = { 0 };
-	InitializationDest dest = { .type = type, .reloc_references = &refs };
+	InitializationDest dest = { .reloc_references = &refs };
 
 	if (type.kind == Kind_VLArray) {
 		if (type.array.count == IR_REF_NONE) {
@@ -1726,9 +1725,9 @@ static void initializeStaticDefinition (Parse *parse, OrdinaryIdentifier *ord, T
 				return;
 			}
 			expect(parse, Tok_OpenBrace);
-			dest.type = *dest.type.array.inner;
+			type = *type.array.inner;
 
-			u32 member_size = typeSize(dest.type, &parse->target);
+			u32 member_size = typeSize(type, &parse->target);
 			u32 count = 0;
 			u32 pos = 0;
 			while (true) {
@@ -1755,8 +1754,7 @@ static void initializeStaticDefinition (Parse *parse, OrdinaryIdentifier *ord, T
 					dest.reloc_data = new;
 				}
 
-				dest.offset = pos * member_size;
-				parseInitializer(parse, dest);
+				parseMaybeBracedInitializer(parse, dest, pos * member_size, type);
 
 				pos++;
 				if (pos > count) count = pos;
@@ -1772,10 +1770,10 @@ static void initializeStaticDefinition (Parse *parse, OrdinaryIdentifier *ord, T
 			static_val->type.array.count = count;
 			static_val->value_data = (String) {count * member_size, dest.reloc_data.ptr};
 			static_val->value_references = (References) {refs.len, refs.ptr};
-			return;
 		} else {
 			unreachable;
 		}
+		return;
 	}
 
 	if (typeSize(type, &parse->target) == 0)
@@ -1784,8 +1782,8 @@ static void initializeStaticDefinition (Parse *parse, OrdinaryIdentifier *ord, T
 	dest.reloc_data = (MutableString) ALLOCN(parse->code_arena, char,
 			typeSize(type, &parse->target));
 
-	memset(dest.reloc_data.ptr, 0, typeSize(dest.type, &parse->target));
-	parseInitializer(parse, dest);
+	memset(dest.reloc_data.ptr, 0, typeSize(type, &parse->target));
+	parseMaybeBracedInitializer(parse, dest, 0, type);
 
 	static_val = &parse->module->ptr[ord->static_id];
 	static_val->value_data = (String) {dest.reloc_data.len, dest.reloc_data.ptr};
@@ -1852,185 +1850,225 @@ static Value parseIntrinsic (Parse *parse, Intrinsic i) {
 }
 
 
-static void parseBracedInitializer(Parse *, InitializationDest);
+#define MEMBERS_FULL UINT64_MAX
+static Value no_value = { .inst = IR_REF_NONE };
+static u64 parseSubInitializer(Parse *parse, InitializationDest dest, u32 offset, Type type, Value current_value, bool designator_started, u64 member_idx);
 
-static void parseInitializer (Parse *parse, InitializationDest dest) {
-	// TODO Values must be constants when initializing static/_Thread_local values.
+static void parseMaybeBracedInitializer (Parse *parse, InitializationDest dest, u32 offset, Type type) {
 	if (tryEat(parse, Tok_OpenBrace)) {
-		switch (dest.type.kind) {
-		case Kind_Struct:
-		case Kind_Struct_Named:
-		case Kind_Union:
-		case Kind_Union_Named:
-		case Kind_Array:
-			parseBracedInitializer(parse, dest);
-			return;
-		default:
-			parseerror(parse, NULL, "initializer can only be used for structs, unions and arrays, not for %s", printTypeHighlighted(&parse->arena, dest.type));
+		u64 member_idx = 0;
+		// Recurse with the same type until hitting a close-brace.
+		if (parse->pos->kind == Tok_CloseBrace)
+			requires(parse, "empty initializers", Features_C23);
+// 		if (is_scalar)
+// 			parsemsg(Log_Warn, parse, NULL, "unnecessary braces around scalar initializer");
+
+		while (!tryEat(parse, Tok_CloseBrace)) {
+			bool designated = parse->pos->kind == Tok_Dot || parse->pos->kind == Tok_OpenBracket;
+			member_idx = parseSubInitializer(parse, dest, offset, type, no_value, designated, member_idx);
+			if (member_idx == MEMBERS_FULL && parse->pos->kind != Tok_CloseBrace)
+				parseerror(parse, NULL, "too much initialization");
 		}
 	} else {
-		const Token *begin = parse->pos;
-		IrRef got = coerce(parseExprAssignment(parse), dest.type, parse, begin);
-		Inst inst = parse->build.ir.ptr[got];
-		if (inst.kind != Ir_Constant && inst.kind != Ir_Reloc)
-			requires(parse, "non-constant initializers", Features_C99);
-
-		IrBuild *build = &parse->build;
-		if (dest.reloc_data.ptr) {
-			if (inst.kind == Ir_Constant) {
-				memcpy(
-					dest.reloc_data.ptr + dest.offset,
-					&inst.constant,
-					inst.size);
-			} else if (inst.kind == Ir_Reloc) {
-				Reference ref = {dest.offset, inst.reloc.id, inst.reloc.offset};
-				PUSH(*dest.reloc_references, ref);
-			} else if (inst.kind == Ir_Load && parse->build.ir.ptr[inst.mem.address].kind == Ir_Reloc) {
-				Inst loadfrom = parse->build.ir.ptr[inst.mem.address];
-				// Load value from a constant static.
-				// Ugly hack, need to represent a loaded Reloc in the IR.
-				StaticValue *val = &parse->module->ptr[loadfrom.reloc.id];
-				if (val->def_kind != Static_Variable || !(val->type.qualifiers & Qualifier_Const))
-					parseerror(parse, NULL, "TODO: ???");
-
-				// TODO This does not yet copy references from the static value.
-				memcpy(
-					dest.reloc_data.ptr + dest.offset,
-					val->value_data.ptr + loadfrom.reloc.offset,
-					inst.size
-				);
-			} else {
-				parseerror(parse, begin, "expected a static initializer (TODO print the non-static culprit)");
-			}
-		} else {
-			IrRef offset = genImmediateInt(build, dest.offset, parse->target.ptr_size);
-			IrRef dest_addr = genAdd(build, dest.address, offset);
-			genStore(build, dest_addr, got, false);
-		}
+		parseSubInitializer(parse, dest, offset, type, no_value, designated, 0);
 	}
 }
 
-// Clang and GCC allow unnamed members to be braced. By my reading, the
-// standard does not actually permit that, but it still needs to be
+u32 findDesignatedMemberIdx(Parse *parse, Type type);
+u64 findDesignatedArrayIdx(Parse *parse, Type type);
+static void initializeFromValue(Parse *parse, Value v, InitializationDest dest);
+
+static bool subInitializerEnded (Parse *parse) {
+	return parse->pos.kind == Tok_CloseBrace || parse->pos.kind == Tok_Dot || parse->pos.kind == Tok_OpenBracket;
+}
+
+// Another giant chunk of logic. STYLE Probably needs more comments.
+// Takes enough elements from the initializer list to initialize the
+// sub-type.
+//
+// If not following a designator path, the function may be called with a
+// current_value from the initializer list (and its following comma)
+// already parsed in; this is necessary because the recursion condition
+// is not grammatical, but based on the type of the current element.
+//
+// Returns the next member index to be initialized.
+
+// TODO Values must be constants when initializing static/_Thread_local values.
+// TODO Clang and GCC allow unnamed members to be braced. By my reading,
+// the standard does not actually permit that, but it still needs to be
 // supported here.
-static void tryParseDesignator(Parse *, InitializationDest, u32 *outermost_member_idx);
-static void parseBracedInitializer (Parse *parse, InitializationDest dest) {
-	if (tryEat(parse, Tok_CloseBrace)) {
-		requires(parse, "empty initializers", Features_C23);
-		return;
-	}
-
-	if (parse->pos[0].kind == Tok_Integer && parse->pos[0].val.integer_u == 0
-		&& parse->pos[1].kind == Tok_CloseBrace)
-	{
-		parse->pos += 2;
-		return;
-	}
-
-	u32 member_idx = 0;
-	while (true) {
-		tryParseDesignator(parse, dest, &member_idx);
-
-		member_idx++;
-
-		if (tryEat(parse, Tok_Comma)) {
-			if (tryEat(parse, Tok_CloseBrace))
-				break;
-		} else {
-			expect(parse, Tok_CloseBrace);
-			break;
-		}
-	}
-}
+static u64 parseSubInitializer (Parse *parse, InitializationDest dest, u32 offset, Type type, Value current_value, bool designator_started, u64 member_idx) {
+	Type resolved = resolveType(type);
+	bool is_aggregate = resolved.kind == Kind_Struct || resolved.kind == Kind_Union || resolved.kind == Kind_Array;
+	bool is_array = resolved.kind == Kind_Array;
+	bool is_scalar = !is_aggregate;
 
 
-// TODO This is wrong: nested aggregates do not need to be braced!
-static void tryParseDesignator (Parse *parse, InitializationDest dest, u32 *outermost_member_idx) {
-	Type current = dest.type;
-
-	u32 total_offset = 0;
-	bool have_outermost_member_idx = false;
-
-	while (true) {
-		const Token *designator = parse->pos;
+	if (designator_started) {
 		if (tryEat(parse, Tok_Dot)) {
-			requires(parse, "designated initializers", Features_C99);
-			Type resolved = resolveType(current);
-			if (resolved.kind != Kind_Struct && resolved.kind != Kind_Union) {
-				parseerror(parse, designator, "cannot use a member designator for initializing the type %s",
-						printTypeHighlighted(&parse->arena, current));
-			}
-			u32 len = resolved.members.len;
-			CompoundMember *members = resolved.members.ptr;
-
-			const Token *name = parse->pos;
-			Symbol *member = expect(parse, Tok_Identifier).val.symbol;
-
-			u32 member_idx = 0;
-			while (member_idx < len && members[member_idx].name != member)
-				member_idx++;
-
-			if (member_idx == len)
-				parseerror(parse, name, "%s does not have a member named %.*s", printTypeHighlighted(&parse->arena, dest.type), member->name.len, member->name.ptr);
-
-			if (!have_outermost_member_idx) {
-				*outermost_member_idx = member_idx;
-				have_outermost_member_idx = true;
-			}
-			total_offset += members[member_idx].offset;
-			current = members[member_idx].type;
-		} else if (tryEat(parse, Tok_OpenBracket)) {
-			requires(parse, "designated initializers", Features_C99);
-
-			if (current.kind != Kind_Array && current.kind != Kind_VLArray) {
-				parseerror(parse, designator, "cannot use an array designator for initializing %s",
-						printTypeHighlighted(&parse->arena, current));
-			}
-
-			u64 pos;
-			if (!tryIntConstant(parse, parseExpression(parse), &pos))
-				parseerror(parse, designator, "bracket designators must be constant integer expressions");
-			expect(parse, Tok_CloseBracket);
-
-			if (current.kind == Kind_Array && pos >= current.array.count)
-				parseerror(parse, designator, "index %lld is out of range of the array", (long long) pos);
-
-			if (!have_outermost_member_idx) {
-				*outermost_member_idx = pos;
-				have_outermost_member_idx = true;
-			}
-			current = *current.array.inner;
-			// PERFORMANCE Computing this size on every designator is slightly wasteful.
-			total_offset += pos * typeSize(current, &parse->target);
+			member_idx = findDesignatedMemberIdx(parse, resolved);
+			Member member = resolved.members.ptr[idx];
+			parseSubInitializer(parse, dest, offset + member.offset, member.type, no_value, true, 0);
+			if (parse->pos.kind == Tok_CloseBrace)
+				return;
+		} else if (tryEat(parse, Tok_OpenBracket) {
+			parseerror(parse, NULL, "TODO Array designators");
+			return;
 		} else {
-			break;
+			expect(parse, Tok_Equals);
 		}
 	}
 
-	if (have_outermost_member_idx) {
-		expect(parse, Tok_Equals);
+	if (is_scalar) {
+		if (current_value.inst == IR_REF_NONE) {
+			u32 braces = 0;
+			while (tryEat(parse, Tok_OpenBrace)) braces++;
+
+			current_value = parseExprAssignment(parse), parse);
+			while (braces > 0) {
+				expect(parse, Tok_CloseBrace);
+				braces--;
+			}
+		}
+		if (parse->pos->kind != Tok_CloseBrace)
+			expect(parse, Tok_Comma);
+		initializeFromValue(parse, dest, offset, coercerval(type, current_value, parse));
+		return MEMBERS_FULL;
+	}
+
+
+	if (current_value.inst == IR_REF_NONE && member_idx == 0 && parse->pos->kind != Tok_OpenBrace) {
+		current_value = rvalue(parseExprAssignment(parse), parse);
+		if (parse->pos->kind != Tok_CloseBrace)
+			expect(parse, Tok_Comma);
+		// TODO Disallow trailing comma for some versions
+	}
+
+	if (current_value.inst != IR_REF_NONE) {
+		if (typeCompatible(current_value.typ, type)) {
+			initializeFromValue(parse, dest, offset, current_value);
+			return MEMBERS_FULL;
+		} else {
+			if (is_array) {
+				parseSubInitializer(parse, dest, offset, *type.array.inner, current_value, false, 0);
+			} else {
+				CompoundMember member = resolved.members.ptr[0];
+				parseSubInitializer(parse, dest, offset + member.offset, member.type, current_value, false, 0);
+			}
+			member_idx++;
+		}
+	}
+
+
+	if (is_array) {
+		Type inner = *type.array.inner;
+		u32 stride = typeSize(inner, &parse->target);
+		while (true) {
+			if (member_idx >= type.array.count)
+				return MEMBERS_FULL;
+			if (subInitializerEnded(parse))
+				return member_idx;
+			parseMaybeBracedInitializer(parse, dest, offset + member_idx * stride, no_value, inner);
+			if (parse->pos->kind != Tok_CloseBrace)
+				expect(parse, Tok_Comma);
+			member_idx++;
+		}
 	} else {
-		if (current.kind == Kind_Array) {
-			if (*outermost_member_idx >= current.array.count)
-				parseerror(parse, NULL, "encountered more members than expected");
-			current = *current.array.inner;
-			total_offset = *outermost_member_idx * typeSize(current, &parse->target);
-		} else {
-			Type res = resolveType(dest.type);
-			if (*outermost_member_idx >= res.members.len)
-				parseerror(parse, NULL, "encountered more members than expected");
-			CompoundMember member = res.members.ptr[*outermost_member_idx];
-			current = member.type;
-			total_offset = member.offset;
+		Members members = resolved.members;
+		while (true) {
+			if (member_idx >= members.len)
+				return MEMBERS_FULL;
+			if (subInitializerEnded(parse))
+				return member_idx;
+			CompundMember m = members.ptr[member_idx];
+
+			parseMaybeBracedInitializer(parse, dest, offset + member_idx * stride, no_value, inner);
+			if (parse->pos->kind != Tok_CloseBrace)
+				expect(parse, Tok_Comma);
+			member_idx++;
 		}
 	}
-
-
-	InitializationDest sub_dest = dest;
-	sub_dest.offset += total_offset;
-	sub_dest.type = current;
-	parseInitializer(parse, sub_dest);
 }
+
+u32 findDesignatedMemberIdx (Parse *parse, Type type) {
+	const Token *id = parse->pos;
+	assert(id[-1].kind == Tok_Dot);
+	if (type.kind != Kind_Struct && type.kind != Kind_Union) {
+		parseerror(parse, id, "cannot use a member designator for initializing the type %s",
+				printTypeHighlighted(&parse->arena, type));
+	}
+	Members members = type.members;
+	Symbol *sym = expect(parse, Tok_Identifier).val.symbol
+	for (u32 idx = 0; idx < members.len; idx++) {
+		if (members.ptr[idx].name == sym)
+			return idx;
+	}
+	parseerror(parse, id_tok, "%s does not have a member named %.*s",
+			printTypeHighlighted(&parse->arena, type), sym->name.len, sym->name.ptr);
+}
+
+u64 findDesignatedArrayIdx (Parse *parse, Type type) {
+	const Token *id = parse->pos;
+	assert(id[-1].kind == Tok_Dot);
+	if (current.kind != Kind_Array && current.kind != Kind_VLArray) {
+		parseerror(parse, id, "cannot use an array designator for initializing the type %s",
+				printTypeHighlighted(&parse->arena, type));
+	}
+	u64 pos;
+	if (!tryIntConstant(parse, parseExpression(parse), &pos))
+		parseerror(parse, designator, "bracket designators must be constant integer expressions");
+	expect(parse, Tok_CloseBracket);
+
+	if (current.kind == Kind_Array && pos >= current.array.count)
+		parseerror(parse, designator, "index %lld is out of range of the array", (long long) pos);
+	return pos;
+}
+
+static void initializeFromValue(Parse *parse, InitializationDest dest, u32 offset, Value v) {
+	IrBuild *build = &parse->build;
+	Instruction inst = build->ir.ptr[v.inst];
+	if (inst.kind != Ir_Constant && inst.kind != Ir_Reloc)
+		requires(parse, "non-constant initializers", Features_C99);
+
+	if (dest.reloc_data.ptr) {
+		if (inst.kind == Ir_Constant) {
+			memcpy(
+				dest.reloc_data.ptr + dest.offset,
+				&inst.constant,
+				inst.size);
+		} else if (inst.kind == Ir_Reloc) {
+			Reference ref = {dest.offset, inst.reloc.id, inst.reloc.offset};
+			PUSH(*dest.reloc_references, ref);
+		} else if (inst.kind == Ir_Load && parse->build.ir.ptr[inst.mem.address].kind == Ir_Reloc) {
+			Inst loadfrom = parse->build.ir.ptr[inst.mem.address];
+			// Load value from a constant static.
+			// Ugly hack, need to represent a loaded Reloc in the IR.
+			StaticValue *val = &parse->module->ptr[loadfrom.reloc.id];
+			if (val->def_kind != Static_Variable || !(val->type.qualifiers & Qualifier_Const))
+				parseerror(parse, NULL, "TODO: ???");
+
+			// TODO This does not yet copy references from the static value.
+			memcpy(
+				dest.reloc_data.ptr + dest.offset,
+				val->value_data.ptr + loadfrom.reloc.offset,
+				inst.size
+			);
+		} else {
+			parseerror(parse, begin, "expected a static initializer (TODO print the non-static culprit)");
+		}
+	} else {
+		IrRef offset = genImmediateInt(build, dest.offset, parse->target.ptr_size);
+		IrRef dest_addr = genAdd(build, dest.address, offset);
+		genStore(build, dest_addr, got, false);
+	}
+}
+
+
+
+
+
+
+
 
 static Type parseValueType (Parse *parse, Value (*operator)(Parse *parse)) {
 	Block *current = parse->build.insertion_block;
@@ -2659,6 +2697,7 @@ static Declaration parseDeclarator (Parse *parse, Type base_type, Namedness name
 		decl = parseDeclarator(parse, BASIC_VOID, named);
 		expect(parse, Tok_CloseParen);
 
+		// Find the innermost type and insert the base type.
 		while (inner->kind != Kind_Void) {
 			switch (inner->kind) {
 			case Kind_Pointer:
@@ -2671,6 +2710,7 @@ static Declaration parseDeclarator (Parse *parse, Type base_type, Namedness name
 				inner = inner->array.inner;
 				break;
 			case Kind_Function:
+			case Kind_FunctionPtr:
 				enclosing = inner;
 				inner = inner->function.rettype;
 				break;
@@ -3044,7 +3084,11 @@ static Value arithSub (Parse *parse, const Token *primary, Value lhs, Value rhs)
 	IrBuild *build = &parse->build;
 	if (lhs.typ.kind == Kind_Pointer) {
 		u32 stride_const = typeSize(*lhs.typ.pointer, &parse->target);
-		assert(stride_const != 0);
+
+		if (stride_const == 0) {
+			parseerror(parse, primary, "cannot subtract from a pointer to incomplete type %s",
+				printTypeHighlighted(&parse->arena, *lhs.typ.pointer));
+		}
 		IrRef stride = genImmediateInt(build, stride_const, parse->target.ptr_size);
 
 		if (rhs.typ.kind == Kind_Pointer) {
@@ -3168,6 +3212,10 @@ static Type arithmeticConversions (Parse *parse, const Token *primary, Value *a,
 	return common;
 }
 
+static bool isZeroConstant (Parse *parse, Value v) {
+	u64 val;
+	return v.typ.kind == Kind_Basic && tryIntConstant(parse, v, &val) && val == 0;
+}
 
 static Value pointerAdd (IrBuild *ir, Value lhs, Value rhs, Parse *op_parse, const Token *token) {
 	assert(!isLvalue(lhs));
@@ -3186,24 +3234,31 @@ static Value pointerAdd (IrBuild *ir, Value lhs, Value rhs, Parse *op_parse, con
 		ptr = rhs;
 	}
 	u32 stride_const = typeSize(*ptr.typ.pointer, &op_parse->target);
-	assert(stride_const != 0);
+	if (stride_const == 0) {
+		parseerror(op_parse, token, "cannot add to a pointer to incomplete type %s",
+			printTypeHighlighted(&op_parse->arena, *ptr.typ.pointer));
+	}
 	IrRef stride = genImmediateInt(ir, stride_const, op_parse->target.ptr_size);
 	IrRef diff = genMulUnsigned(ir, stride, integer);
 	return (Value) {ptr.typ, genAdd(ir, ptr.inst, diff)};
 }
 
-static bool comparablePointers (Parse *parse, Type a, Type b) {
-	if (!((a.kind == Kind_Pointer || a.kind == Kind_FunctionPtr)
-		&& (b.kind == Kind_Pointer || b.kind == Kind_FunctionPtr)))
+static bool comparablePointers (Parse *parse, Value lhs, Value rhs) {
+	bool a_zero = isZeroConstant(parse, lhs);
+	bool b_zero = isZeroConstant(parse, rhs);
+	Type a = lhs.typ;
+	Type b = rhs.typ;
+	if (!((a.kind == Kind_Pointer || a.kind == Kind_FunctionPtr || a_zero)
+		&& (b.kind == Kind_Pointer || b.kind == Kind_FunctionPtr || b_zero)))
 			return false;
 
 	if (a.kind == Kind_Pointer) {
-		if (a.pointer->kind == Kind_Void)
+		if (a.pointer->kind == Kind_Void || a_zero)
 			return true;
 		a.pointer->qualifiers = 0;
 	}
 	if (b.kind == Kind_Pointer) {
-		if (b.pointer->kind == Kind_Void)
+		if (b.pointer->kind == Kind_Void || b_zero)
 			return true;
 		b.pointer->qualifiers = 0;
 	}
@@ -3324,23 +3379,23 @@ static IrRef coercerval (Value v, Type t, Parse *p, const Token *primary, bool a
 	}
 
 
-	u64 val;
-	bool is_null_pointer_constant = v.typ.kind == Kind_Basic && tryIntConstant(p, v, &val) && val == 0;
-	if (allow_casts || is_null_pointer_constant) {
-		// NOTE This relies on pointers being the largest types.
-		if (t.kind == Kind_Basic && (v.typ.kind == Kind_Pointer || v.typ.kind == Kind_FunctionPtr))
-			return genTrunc(build, v.inst, p->target.typesizes[t.basic & ~Int_unsigned]);
-
-		if (t.kind == Kind_Pointer || t.kind == Kind_FunctionPtr) {
-			if (v.typ.kind == Kind_Basic)
-				return genZeroExt(build, v.inst, p->target.ptr_size);
-			if (t.kind == Kind_Pointer || v.typ.kind == Kind_FunctionPtr)
-				return v.inst;
-		}
+	bool value_is_pointer = v.typ.kind == Kind_Pointer || v.typ.kind == Kind_FunctionPtr;
+	// NOTE This relies on pointers being the largest types.
+	if (allow_casts && t.kind == Kind_Basic && value_is_pointer)
+	{
+		return genTrunc(build, v.inst, p->target.typesizes[t.basic & ~Int_unsigned]);
 	}
 
-	if (comparablePointers(p, t, v.typ))
-		return v.inst;
+	if ((t.kind == Kind_Pointer || t.kind == Kind_FunctionPtr)
+		&& (allow_casts || isZeroConstant(p, v) || t.pointer->kind == Kind_Void
+			|| (value_is_pointer && v.typ.pointer->kind == Kind_Void)))
+	{
+		if (v.typ.kind == Kind_Basic)
+			return genZeroExt(build, v.inst, p->target.ptr_size);
+		if (value_is_pointer)
+			return v.inst;
+	}
+
 	parseerror(p, primary, "could not convert type %s to type %s",
 		printTypeHighlighted(&p->arena, v.typ), printTypeHighlighted(&p->arena, t));
 }
