@@ -1,3 +1,4 @@
+//!necc-dbg @ -run
 int main(void);
 int f();
 

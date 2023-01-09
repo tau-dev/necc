@@ -520,7 +520,7 @@ static void emitBlockForward (Codegen *c, Block *block) {
 		Cases cases = exit.switch_.cases;
 
 		for (u32 i = 0; i < cases.len; i++) {
-			emit(c, " cmp #, L", exit.switch_.value, cases.ptr[i].value);
+			emit(c, " cmp #, L", exit.switch_.value, cases.ptr[i].value & 0xffffffff);
 			emitJump(c, "je", cases.ptr[i].dest);
 		}
 		emitJump(c, "jnz", exit.switch_.default_case);
@@ -940,10 +940,13 @@ static void emit (Codegen *c, const char *fmt, ...) {
 		} break;
 		case '#': {
 			IrRef ref = va_arg(args, IrRef);
-			const char *size = sizeOp(c->ir.ptr[ref].size);
-			u32 len = strlen(size);
-			memcpy(insert, size, len);
-			insert += len;
+			u32 size = c->ir.ptr[ref].size;
+			if (size <= 8) {
+			const char *size_op = sizeOp(c->ir.ptr[ref].size);
+				u32 len = strlen(size_op);
+				memcpy(insert, size_op, len);
+				insert += len;
+			}
 			memcpy(insert, " [rsp+", 6);
 			insert += 6;
 			emitInt(c->storage[ref]);

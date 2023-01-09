@@ -1,3 +1,4 @@
+//!necc-dbg @ -run
 struct range {
 	long quant;
 } a[] = {1, 0};

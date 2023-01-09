@@ -1,3 +1,4 @@
+//!necc-dbg @ -run
 main()
 {
 	int x[] = { 1, 0 };

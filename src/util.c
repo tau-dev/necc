@@ -66,8 +66,9 @@ String zstr (const char *s) {
 	return (String) {strlen(s), s};
 }
 
-static void printError (SourceFile source, u32 offset, const char *msg, ...) {
-	printErr(source, offset);
+
+static void printError (SourceFile source, Location loc, const char *msg, ...) {
+	printErr(source, loc);
 	va_list args;
 	va_start(args, msg);
 	vfprintf(stderr, msg, args);
@@ -97,7 +98,8 @@ SourceFile *readAllAlloc (String path, String filename) {
 						const char *nullbyte = memchr(content, 0, got);
 						if (nullbyte) {
 							SourceFile source = { filename, path, {got, content} };
-							printError(source, nullbyte - content, "file should not contain a null byte");
+							Location null_loc = {0, 1, 1};
+							printError(source, null_loc, "file should not contain a null byte");
 						} else if (got == (size_t)count) {
 							content[count] = 0;
 							free(filename_z);
@@ -148,7 +150,8 @@ SourceLocation findSourcePos (const char *source, const char *pos) {
 
 static Log plainLevel (Log l) { return l & ~Log_Fatal & ~Log_Noexpand; }
 
-void printMsg (Log level, SourceFile source, u32 offset) {
+void printMsg (Log level, SourceFile source, Location loc) {
+	assert(loc.file_id == source.idx);
 	switch (source.kind) {
 	case Source_SystemDefinedMacro:
 		fprintf(stderr, "%s<system defined macro>%s %.*s:\t", BOLD, RESET, STRING_PRINTAGE(source.name));
@@ -157,11 +160,8 @@ void printMsg (Log level, SourceFile source, u32 offset) {
 		fprintf(stderr, "%s<command-line defined macro>%s %.*s:\t", BOLD, RESET, STRING_PRINTAGE(source.name));
 		break;
 	default: {
-		SourceLocation loc = findSourcePos(
-				source.content.ptr, source.content.ptr + offset);
-
 		fprintf(stderr, "%s%.*s%.*s:%lu:%lu:%s\t", BOLD, STRING_PRINTAGE(source.path), STRING_PRINTAGE(source.name),
-			(unsigned long) loc.line, (unsigned long) loc.col, RESET);
+			(unsigned long) loc.line, (unsigned long) loc.column, RESET);
 	}
 	}
 
@@ -179,14 +179,14 @@ void printMsg (Log level, SourceFile source, u32 offset) {
 	fprintf(stderr, "%s%s%s", highlights[plainLevel(level)], messages[plainLevel(level)], RESET);
 }
 
-void printErr (SourceFile source, u32 offset) {
-	printMsg(Log_Err, source, offset);
+void printErr (SourceFile source, Location loc) {
+	printMsg(Log_Err, source, loc);
 }
-void printWarn (SourceFile source, u32 offset) {
-	printMsg(Log_Warn, source, offset);
+void printWarn (SourceFile source, Location loc) {
+	printMsg(Log_Warn, source, loc);
 }
-void printInfo (SourceFile source, u32 offset) {
-	printMsg(Log_Info, source, offset);
+void printInfo (SourceFile source, Location loc) {
+	printMsg(Log_Info, source, loc);
 }
 
 void generalFatal(const char *msg, ...) {

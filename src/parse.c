@@ -22,6 +22,7 @@ Parses and typechecks tokens into IR in a single pass.
 
 static Type chartype = {Kind_Basic, .basic = Int_char};
 static Type const_chartype = {Kind_Basic, .qualifiers = Qualifier_Const, .basic = Int_char};
+static Value no_value = { .inst = IR_REF_NONE };
 
 
 typedef LIST(Symbol*) Scope;
@@ -52,7 +53,7 @@ typedef struct {
 
 
 const char *plxz(const Parse *parse) {
-	return lexz(parse->tokens, parse->pos, parse->pos, 12);
+	return lexz(parse->tokens, parse->pos, NULL, 12);
 }
 
 
@@ -67,15 +68,15 @@ typedef struct {
 static void vcomperror (Log level, bool crash_on_error, const Tokenization *t, const Token *tok, const Token *parse_pos, const char *msg, va_list args) {
 	(void) parse_pos;
 	u32 idx = tok - t->tokens;
-	TokenPosition pos = t->positions[idx];
-	SourceFile source = *t->files.ptr[pos.source_file_ref];
+	TokenLocation pos = t->positions[idx];
+	SourceFile source = *t->files.ptr[pos.source.file_id];
 
-    printMsg(level, source, pos.source_file_offset);
+    printMsg(level, source, pos.source);
 
     vfprintf(stderr, msg, args);
     fprintf(stderr, ".\n");
-	if (pos.macro_file_offset && !(level & Log_Noexpand)) {
-    	printInfo(*t->files.ptr[pos.macro_file_ref], pos.macro_file_offset);
+	if (pos.macro.line && !(level & Log_Noexpand)) {
+    	printInfo(*t->files.ptr[pos.macro.file_id], pos.macro);
     	fprintf(stderr, "(macro-expanded from here)\n");
 	}
 
@@ -94,7 +95,7 @@ static void vcomperror (Log level, bool crash_on_error, const Tokenization *t, c
 _Noreturn static void parseerror (const Parse *p, const Token *main, const char *msg, ...) {
     va_list args;
     va_start(args, msg);
-    vcomperror(Log_Err | Log_Fatal, p->opt->crash_on_error, &p->tokens, main ? main : p->pos-1, p->pos, msg, args);
+    vcomperror(Log_Err | Log_Fatal, p->opt->crash_on_error, &p->tokens, main ? main : p->pos - 1, p->pos, msg, args);
     va_end(args);
     exit(1);
 }
@@ -119,7 +120,7 @@ _Noreturn static void unexpectedToken (const Parse *p, TokenKind expected) {
 	parseerror(p, p->pos, "expected %s before the %s token", tokenName(expected), tokenName(p->pos->kind));
 }
 
-Token expect (Parse *parse, TokenKind expected) {
+static Token expect (Parse *parse, TokenKind expected) {
 	if (parse->pos->kind != expected)
 		unexpectedToken(parse, expected);
 	Token t = *parse->pos;
@@ -127,19 +128,12 @@ Token expect (Parse *parse, TokenKind expected) {
 	return t;
 }
 
-bool tryEat (Parse *parse, TokenKind kind) {
+static inline bool tryEat (Parse *parse, TokenKind kind) {
 	if (parse->pos->kind == kind) {
 		parse->pos++;
 		return true;
 	}
 	return false;
-}
-
-bool fromStandardHeader (Parse *parse, const Token *primary) {
-	assert(primary);
-	const Tokenization *t = &parse->tokens;
-	u32 p = primary - t->tokens;
-	return t->files.ptr[t->positions[p].source_file_ref]->kind == Source_StandardHeader;
 }
 
 typedef enum {
@@ -153,7 +147,8 @@ static nodiscard bool allowedNoDeclarator(Parse *, Type base_type);
 // static Declaration parseDeclarator (Parse* parse, const Token **tok, Type base_type);
 static void initializeStaticDefinition (Parse *, OrdinaryIdentifier *, Type, const Token *init_token);
 static void initializeAutoDefinition (Parse *, OrdinaryIdentifier *, Type, const Token *init_token);
-static void parseMaybeBracedInitializer(Parse *, InitializationDest, u32 offset, Type type);
+static void parseInitializer(Parse *, InitializationDest, u32 offset, Type type);
+static void maybeBracedInitializer(Parse *, InitializationDest, u32 offset, Type type, Value current_value);
 static bool tryIntConstant (Parse *, Value, u64 *result);
 static bool tryEatStaticAssert(Parse *);
 static Value arithAdd(Parse *parse, const Token *primary, Value lhs, Value rhs);
@@ -1302,7 +1297,7 @@ static Value parseExprLeftUnary (Parse *parse) {
 				InitializationDest dest = {
 					.address = stack,
 				};
-				parseMaybeBracedInitializer(parse, dest, 0, cast_target);
+				parseInitializer(parse, dest, 0, cast_target);
 				return (Value) {cast_target, stack, Ref_LValue};
 			} else {
 				// Cast operator
@@ -1671,7 +1666,7 @@ static void initializeAutoDefinition (Parse *parse, OrdinaryIdentifier *ord, Typ
 				if (tryEat(parse, Tok_CloseBrace))
 					break;
 
-				parseMaybeBracedInitializer(parse, dest, 0, type);
+				maybeBracedInitializer(parse, dest, 0, type, no_value);
 				count++;
 
 				if (!tryEat(parse, Tok_Comma)) {
@@ -1697,7 +1692,7 @@ static void initializeAutoDefinition (Parse *parse, OrdinaryIdentifier *ord, Typ
 	if (typeSize(type, &parse->target) == 0)
 		parseerror(parse, init_token, "cannot initialize incomplete type %s", printTypeHighlighted(&parse->arena, type));
 
-	parseMaybeBracedInitializer(parse, dest, 0, type);
+	parseInitializer(parse, dest, 0, type);
 }
 
 static void initializeStaticDefinition (Parse *parse, OrdinaryIdentifier *ord, Type type, const Token *init_token) {
@@ -1754,7 +1749,7 @@ static void initializeStaticDefinition (Parse *parse, OrdinaryIdentifier *ord, T
 					dest.reloc_data = new;
 				}
 
-				parseMaybeBracedInitializer(parse, dest, pos * member_size, type);
+				maybeBracedInitializer(parse, dest, pos * member_size, type, no_value);
 
 				pos++;
 				if (pos > count) count = pos;
@@ -1783,7 +1778,7 @@ static void initializeStaticDefinition (Parse *parse, OrdinaryIdentifier *ord, T
 			typeSize(type, &parse->target));
 
 	memset(dest.reloc_data.ptr, 0, typeSize(type, &parse->target));
-	parseMaybeBracedInitializer(parse, dest, 0, type);
+	parseInitializer(parse, dest, 0, type);
 
 	static_val = &parse->module->ptr[ord->static_id];
 	static_val->value_data = (String) {dest.reloc_data.len, dest.reloc_data.ptr};
@@ -1850,113 +1845,130 @@ static Value parseIntrinsic (Parse *parse, Intrinsic i) {
 }
 
 
+// Initializers: Another giant chunk of logic. STYLE Probably needs more comments.
+
 #define MEMBERS_FULL UINT64_MAX
-static Value no_value = { .inst = IR_REF_NONE };
 static u64 parseSubInitializer(Parse *parse, InitializationDest dest, u32 offset, Type type, Value current_value, bool designator_started, u64 member_idx);
+static void initializeFromValue(Parse *parse, InitializationDest dest, u32 offset, IrRef ref);
 
-static void parseMaybeBracedInitializer (Parse *parse, InitializationDest dest, u32 offset, Type type) {
-	if (tryEat(parse, Tok_OpenBrace)) {
-		u64 member_idx = 0;
-		// Recurse with the same type until hitting a close-brace.
-		if (parse->pos->kind == Tok_CloseBrace)
-			requires(parse, "empty initializers", Features_C23);
-// 		if (is_scalar)
-// 			parsemsg(Log_Warn, parse, NULL, "unnecessary braces around scalar initializer");
-
-		while (!tryEat(parse, Tok_CloseBrace)) {
-			bool designated = parse->pos->kind == Tok_Dot || parse->pos->kind == Tok_OpenBracket;
-			member_idx = parseSubInitializer(parse, dest, offset, type, no_value, designated, member_idx);
-			if (member_idx == MEMBERS_FULL && parse->pos->kind != Tok_CloseBrace)
-				parseerror(parse, NULL, "too much initialization");
-		}
-	} else {
-		parseSubInitializer(parse, dest, offset, type, no_value, designated, 0);
-	}
-}
-
-u32 findDesignatedMemberIdx(Parse *parse, Type type);
-u64 findDesignatedArrayIdx(Parse *parse, Type type);
-static void initializeFromValue(Parse *parse, Value v, InitializationDest dest);
-
-static bool subInitializerEnded (Parse *parse) {
-	return parse->pos.kind == Tok_CloseBrace || parse->pos.kind == Tok_Dot || parse->pos.kind == Tok_OpenBracket;
-}
-
-// Another giant chunk of logic. STYLE Probably needs more comments.
-// Takes enough elements from the initializer list to initialize the
-// sub-type.
-//
-// If not following a designator path, the function may be called with a
+// maybeBracedInitializer and parseSubInitializer may be called with a
 // current_value from the initializer list (and its following comma)
 // already parsed in; this is necessary because the recursion condition
 // is not grammatical, but based on the type of the current element.
-//
+
+// STYLE This deep magic needs a more descriptive name.
+static void maybeBracedInitializer (Parse *parse, InitializationDest dest, u32 offset, Type type, Value current_value) {
+	bool is_scalar = !(type.kind == Kind_Struct || type.kind == Kind_Struct_Named
+			|| type.kind == Kind_Union || type.kind == Kind_Union_Named
+			|| type.kind == Kind_Array || type.kind == Kind_VLArray);
+
+	if (current_value.inst == IR_REF_NONE) {
+		if (tryEat(parse, Tok_OpenBrace)) {
+			u64 member_idx = 0;
+			if (parse->pos->kind == Tok_CloseBrace)
+				requires(parse, "empty initializers", Features_C23);
+			if (is_scalar)
+				parsemsg(Log_Warn, parse, parse->pos-1, "unnecessary braces around scalar initializer");
+
+			while (!tryEat(parse, Tok_CloseBrace)) {
+				const Token *primary = parse->pos;
+				bool designated = parse->pos->kind == Tok_Dot || parse->pos->kind == Tok_OpenBracket;
+
+				if (member_idx == MEMBERS_FULL && !designated)
+					parseerror(parse, primary, "too much initialization");
+				member_idx = parseSubInitializer(parse, dest, offset, type, no_value, designated, member_idx);
+				if (member_idx == MEMBERS_FULL && parse->pos->kind != Tok_CloseBrace)
+					expect(parse, Tok_Comma);
+			}
+			return;
+		}
+		current_value = rvalue(parseExprAssignment(parse), parse);
+	}
+	if (is_scalar) {
+		initializeFromValue(parse, dest, offset, coercerval(current_value, type, parse, NULL, false));
+	} else if (typeCompatible(current_value.typ, type)) {
+		initializeFromValue(parse, dest, offset, current_value.inst);
+	} else {
+		parseSubInitializer(parse, dest, offset, type, current_value, false, 0);
+	}
+}
+
+static void parseInitializer (Parse *parse, InitializationDest dest, u32 offset, Type type) {
+	// maybeBracedInitializer will descend if the initializing value is
+	// not compatible to the desired type, but that only makes sense
+	// with at least one enclosing set of braces.
+	if (parse->pos->kind == Tok_OpenBrace) {
+		maybeBracedInitializer(parse, dest, offset, type, no_value);
+	} else {
+		const Token *primary = parse->pos;
+		IrRef val = coerce(parseExprAssignment(parse), type, parse, primary);
+		initializeFromValue(parse, dest, offset, val);
+	}
+}
+
+
+u32 findDesignatedMemberIdx(Parse *parse, Type type);
+u64 findDesignatedArrayIdx(Parse *parse, Type type);
+
+static bool subInitializerEnded (Parse *parse) {
+	return parse->pos->kind == Tok_CloseBrace || parse->pos->kind == Tok_Dot || parse->pos->kind == Tok_OpenBracket;
+}
+
+// Takes enough elements from the initializer list to initialize the
+// sub-type.
 // Returns the next member index to be initialized.
 
 // TODO Values must be constants when initializing static/_Thread_local values.
 // TODO Clang and GCC allow unnamed members to be braced. By my reading,
 // the standard does not actually permit that, but it still needs to be
 // supported here.
-static u64 parseSubInitializer (Parse *parse, InitializationDest dest, u32 offset, Type type, Value current_value, bool designator_started, u64 member_idx) {
+static u64 parseSubInitializer (Parse *parse, InitializationDest dest, u32 offset, Type type, Value first_value, bool designator_started, u64 member_idx) {
 	Type resolved = resolveType(type);
-	bool is_aggregate = resolved.kind == Kind_Struct || resolved.kind == Kind_Union || resolved.kind == Kind_Array;
 	bool is_array = resolved.kind == Kind_Array;
-	bool is_scalar = !is_aggregate;
-
 
 	if (designator_started) {
 		if (tryEat(parse, Tok_Dot)) {
 			member_idx = findDesignatedMemberIdx(parse, resolved);
-			Member member = resolved.members.ptr[idx];
-			parseSubInitializer(parse, dest, offset + member.offset, member.type, no_value, true, 0);
-			if (parse->pos.kind == Tok_CloseBrace)
-				return;
-		} else if (tryEat(parse, Tok_OpenBracket) {
-			parseerror(parse, NULL, "TODO Array designators");
-			return;
-		} else {
-			expect(parse, Tok_Equals);
+		} else if (tryEat(parse, Tok_OpenBracket)) {
+			member_idx = findDesignatedArrayIdx(parse, resolved);
 		}
-	}
-
-	if (is_scalar) {
-		if (current_value.inst == IR_REF_NONE) {
-			u32 braces = 0;
-			while (tryEat(parse, Tok_OpenBrace)) braces++;
-
-			current_value = parseExprAssignment(parse), parse);
-			while (braces > 0) {
-				expect(parse, Tok_CloseBrace);
-				braces--;
-			}
-		}
-		if (parse->pos->kind != Tok_CloseBrace)
-			expect(parse, Tok_Comma);
-		initializeFromValue(parse, dest, offset, coercerval(type, current_value, parse));
-		return MEMBERS_FULL;
-	}
-
-
-	if (current_value.inst == IR_REF_NONE && member_idx == 0 && parse->pos->kind != Tok_OpenBrace) {
-		current_value = rvalue(parseExprAssignment(parse), parse);
-		if (parse->pos->kind != Tok_CloseBrace)
-			expect(parse, Tok_Comma);
-		// TODO Disallow trailing comma for some versions
-	}
-
-	if (current_value.inst != IR_REF_NONE) {
-		if (typeCompatible(current_value.typ, type)) {
-			initializeFromValue(parse, dest, offset, current_value);
-			return MEMBERS_FULL;
-		} else {
+		if (!tryEat(parse, Tok_Equals)) {
 			if (is_array) {
-				parseSubInitializer(parse, dest, offset, *type.array.inner, current_value, false, 0);
+				Type inner = *type.array.inner;
+				u32 stride = typeSize(inner, &parse->target);
+				parseSubInitializer(parse, dest, offset + member_idx * stride, inner, no_value, true, 0);
 			} else {
-				CompoundMember member = resolved.members.ptr[0];
-				parseSubInitializer(parse, dest, offset + member.offset, member.type, current_value, false, 0);
+				CompoundMember member = resolved.members.ptr[member_idx];
+				parseSubInitializer(parse, dest, offset + member.offset, member.type, no_value, true, 0);
 			}
 			member_idx++;
+			if (member_idx >= type.array.count)
+				return MEMBERS_FULL;
+			if (parse->pos->kind == Tok_CloseBrace)
+				return member_idx;
+			expect(parse, Tok_Comma);
+			if (subInitializerEnded(parse))
+				return member_idx;
 		}
+	}
+
+
+	if (first_value.inst != IR_REF_NONE) {
+		assert(member_idx == 0);
+		if (is_array) {
+			maybeBracedInitializer(parse, dest, offset, *type.array.inner, first_value);
+		} else {
+			CompoundMember member = resolved.members.ptr[0];
+			maybeBracedInitializer(parse, dest, offset + member.offset, member.type, first_value);
+		}
+		member_idx++;
+		if (member_idx >= type.array.count)
+			return MEMBERS_FULL;
+		if (parse->pos->kind == Tok_CloseBrace)
+			return member_idx;
+		expect(parse, Tok_Comma);
+		if (subInitializerEnded(parse))
+			return member_idx;
 	}
 
 
@@ -1964,28 +1976,30 @@ static u64 parseSubInitializer (Parse *parse, InitializationDest dest, u32 offse
 		Type inner = *type.array.inner;
 		u32 stride = typeSize(inner, &parse->target);
 		while (true) {
+			maybeBracedInitializer(parse, dest, offset + member_idx * stride, inner, no_value);
+			member_idx++;
 			if (member_idx >= type.array.count)
 				return MEMBERS_FULL;
+			if (parse->pos->kind == Tok_CloseBrace)
+				return member_idx;
+			expect(parse, Tok_Comma);
 			if (subInitializerEnded(parse))
 				return member_idx;
-			parseMaybeBracedInitializer(parse, dest, offset + member_idx * stride, no_value, inner);
-			if (parse->pos->kind != Tok_CloseBrace)
-				expect(parse, Tok_Comma);
-			member_idx++;
 		}
 	} else {
 		Members members = resolved.members;
 		while (true) {
+			CompoundMember m = members.ptr[member_idx];
+
+			maybeBracedInitializer(parse, dest, offset + m.offset, m.type, no_value);
+			member_idx++;
 			if (member_idx >= members.len)
 				return MEMBERS_FULL;
+			if (parse->pos->kind == Tok_CloseBrace)
+				return member_idx;
+			expect(parse, Tok_Comma);
 			if (subInitializerEnded(parse))
 				return member_idx;
-			CompundMember m = members.ptr[member_idx];
-
-			parseMaybeBracedInitializer(parse, dest, offset + member_idx * stride, no_value, inner);
-			if (parse->pos->kind != Tok_CloseBrace)
-				expect(parse, Tok_Comma);
-			member_idx++;
 		}
 	}
 }
@@ -1998,46 +2012,46 @@ u32 findDesignatedMemberIdx (Parse *parse, Type type) {
 				printTypeHighlighted(&parse->arena, type));
 	}
 	Members members = type.members;
-	Symbol *sym = expect(parse, Tok_Identifier).val.symbol
+	Symbol *sym = expect(parse, Tok_Identifier).val.symbol;
 	for (u32 idx = 0; idx < members.len; idx++) {
 		if (members.ptr[idx].name == sym)
 			return idx;
 	}
-	parseerror(parse, id_tok, "%s does not have a member named %.*s",
+	parseerror(parse, id, "%s does not have a member named %.*s",
 			printTypeHighlighted(&parse->arena, type), sym->name.len, sym->name.ptr);
 }
 
 u64 findDesignatedArrayIdx (Parse *parse, Type type) {
 	const Token *id = parse->pos;
-	assert(id[-1].kind == Tok_Dot);
-	if (current.kind != Kind_Array && current.kind != Kind_VLArray) {
+	assert(id[-1].kind == Tok_OpenBracket);
+	if (type.kind != Kind_Array && type.kind != Kind_VLArray) {
 		parseerror(parse, id, "cannot use an array designator for initializing the type %s",
 				printTypeHighlighted(&parse->arena, type));
 	}
 	u64 pos;
 	if (!tryIntConstant(parse, parseExpression(parse), &pos))
-		parseerror(parse, designator, "bracket designators must be constant integer expressions");
+		parseerror(parse, id, "bracket designators must be constant integer expressions");
 	expect(parse, Tok_CloseBracket);
 
-	if (current.kind == Kind_Array && pos >= current.array.count)
-		parseerror(parse, designator, "index %lld is out of range of the array", (long long) pos);
+	if (type.kind == Kind_Array && pos >= type.array.count)
+		parseerror(parse, id, "index %lld is out of range of the array", (long long) pos);
 	return pos;
 }
 
-static void initializeFromValue(Parse *parse, InitializationDest dest, u32 offset, Value v) {
+static void initializeFromValue (Parse *parse, InitializationDest dest, u32 offset, IrRef ref) {
 	IrBuild *build = &parse->build;
-	Instruction inst = build->ir.ptr[v.inst];
+	Inst inst = build->ir.ptr[ref];
 	if (inst.kind != Ir_Constant && inst.kind != Ir_Reloc)
 		requires(parse, "non-constant initializers", Features_C99);
 
 	if (dest.reloc_data.ptr) {
 		if (inst.kind == Ir_Constant) {
 			memcpy(
-				dest.reloc_data.ptr + dest.offset,
+				dest.reloc_data.ptr + offset,
 				&inst.constant,
 				inst.size);
 		} else if (inst.kind == Ir_Reloc) {
-			Reference ref = {dest.offset, inst.reloc.id, inst.reloc.offset};
+			Reference ref = {offset, inst.reloc.id, inst.reloc.offset};
 			PUSH(*dest.reloc_references, ref);
 		} else if (inst.kind == Ir_Load && parse->build.ir.ptr[inst.mem.address].kind == Ir_Reloc) {
 			Inst loadfrom = parse->build.ir.ptr[inst.mem.address];
@@ -2049,17 +2063,17 @@ static void initializeFromValue(Parse *parse, InitializationDest dest, u32 offse
 
 			// TODO This does not yet copy references from the static value.
 			memcpy(
-				dest.reloc_data.ptr + dest.offset,
+				dest.reloc_data.ptr + offset,
 				val->value_data.ptr + loadfrom.reloc.offset,
 				inst.size
 			);
 		} else {
-			parseerror(parse, begin, "expected a static initializer (TODO print the non-static culprit)");
+			parseerror(parse, NULL, "expected a static initializer (TODO print the non-static culprit)");
 		}
 	} else {
-		IrRef offset = genImmediateInt(build, dest.offset, parse->target.ptr_size);
-		IrRef dest_addr = genAdd(build, dest.address, offset);
-		genStore(build, dest_addr, got, false);
+		IrRef offset_inst = genImmediateInt(build, offset, parse->target.ptr_size);
+		IrRef dest_addr = genAdd(build, dest.address, offset_inst);
+		genStore(build, dest_addr, ref, false);
 	}
 }
 
@@ -2764,7 +2778,7 @@ static Declaration parseDeclarator (Parse *parse, Type base_type, Namedness name
 					u8 storage;
 					Type param_type = parseTypeBase(parse, &storage);
 					Declaration param_decl = parseDeclarator(parse, param_type, Decl_PossiblyAbstract);
-					if (param_decl.type.kind == Kind_Array) {
+					if (param_decl.type.kind == Kind_Array || param_decl.type.kind == Kind_VLArray) {
 						param_decl.type.kind = Kind_Pointer;
 						param_decl.type.pointer = param_decl.type.array.inner;
 					} else if (param_decl.type.kind == Kind_Function) {
@@ -3417,7 +3431,7 @@ static inline void removeEnumness(Type *type) {
 }
 static void requires (Parse *parse, const char *desc, Features required) {
 	if (!(parse->target.version & required)) {
-		parseerror(parse, NULL, "%s are not supported under the current target (%s)",
+		parseerror(parse, parse->pos, "%s are not supported under the current target (%s)",
 				desc, versionName(parse->target.version));
 	}
 }

@@ -156,12 +156,12 @@ typedef struct Token {
 } Token;
 
 
+
 typedef struct {
-	u32 source_file_offset;
-	u16 source_file_ref;
-	u16 macro_file_ref;
-	u32 macro_file_offset;
-} TokenPosition;
+	Location source;
+	// Macro this was expanded from, or zero.
+	Location macro;
+} TokenLocation;
 
 typedef LIST(SourceFile*) FileList;
 
@@ -171,7 +171,7 @@ typedef struct {
 	FileList files;
 
 	Token *tokens;
-	TokenPosition *positions;
+	TokenLocation *positions;
 	u32 count;
 	u32 capacity;
 

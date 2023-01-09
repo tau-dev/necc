@@ -1,3 +1,4 @@
+//!necc-dbg @ -run
 #include <stdio.h>
 
 int

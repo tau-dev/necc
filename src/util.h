@@ -109,12 +109,21 @@ typedef enum {
 	Source_SystemDefinedMacro,
 } SourceKind;
 
+// Lines and columns are 1-based in accordance with most editors.
+typedef struct {
+	u32 file_id;
+	u32 line;
+	u32 column;
+} Location;
+
 typedef struct {
 	String name; // non-owning
 	String path; // non-owning
 
 	String content; // non-owning, possibly co-allocated
+
 	u32 idx;
+
 	u32 included_count;
 	SourceKind kind;
 } SourceFile;
@@ -156,8 +165,8 @@ typedef enum {
 	Log_Fatal = 0x200,
 } Log;
 
-void printMsg(Log, SourceFile, u32);
-void printErr(SourceFile, u32);
-void printWarn(SourceFile, u32);
-void printInfo(SourceFile, u32);
+void printMsg(Log, SourceFile, Location);
+void printErr(SourceFile, Location);
+void printWarn(SourceFile, Location);
+void printInfo(SourceFile, Location);
 void generalFatal(const char *msg, ...);

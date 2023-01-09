@@ -1,4 +1,3 @@
-//!necc-dbg @ -run
 #include <stdint.h>
 
 int
@@ -15,7 +14,7 @@ main()
 		return 1;
 
 	l = ~l;
-	if (x != 0xffffffffffffffff)
+	if (l != 0xffffffffffffffff)
 		return 2;
 
 
