@@ -1,5 +1,6 @@
 #include "analysis.h"
 #include "ir_gen.h"
+#include "emit.h"
 
 
 /*
@@ -25,10 +26,10 @@ should be moved into a separate file at some point).
 
 
 
-static IrRef copyUsed (IrList source, IrRef i, IrList *dest, IrRef *relocs) {
+static IrRef copyUsed (const IrList *source, IrRef i, IrList *dest, IrRef *relocs) {
 	if (relocs[i] != IR_REF_NONE) return relocs[i];
 
-	Inst inst = source.ptr[i];
+	Inst inst = source->ptr[i];
 	switch ((InstKind) inst.kind) {
 	BINOP_CASES:
 		copyUsed(source, inst.binop.lhs, dest, relocs);
@@ -71,8 +72,9 @@ static IrRef copyUsed (IrList source, IrRef i, IrList *dest, IrRef *relocs) {
 		break;
 	}
 
-	IrRef new = dest->len;
-	PUSH(*dest, inst);
+	IrRef new = dest->len++;
+	dest->ptr[new] = inst;
+	dest->locations[new] = source->locations[i];
 	relocs[i] = new;
 	return new;
 }
@@ -127,7 +129,14 @@ static void applyRelocs (IrList ir, IrRef i, IrRef *relocs) {
 
 void decimateIr (IrList *ir, Blocks blocks) {
 	IrRef *relocs = malloc(ir->len * sizeof(IrRef));
-	IrList out = {.params = ir->params, .entry = ir->entry};
+	IrList out = {
+		.ptr = calloc(ir->len, sizeof(*ir->ptr)),
+		.locations = calloc(ir->len, sizeof(*ir->locations)),
+		.capacity = ir->len,
+
+		.params = ir->params,
+		.entry = ir->entry
+	};
 
 	for (u32 i = 0; i < ir->len; i++) relocs[i] = IR_REF_NONE;
 
@@ -138,7 +147,7 @@ void decimateIr (IrList *ir, Blocks blocks) {
 
 		blk->first_inst = out.len;
 		for (u32 j = 0; j < insts.len; j++)
-			insts.ptr[j] = copyUsed(*ir, insts.ptr[j], &out, relocs);
+			insts.ptr[j] = copyUsed(ir, insts.ptr[j], &out, relocs);
 
 		u32 dest_idx = 0;
 		for (u32 j = 0; j < mems.len; j++) {
@@ -153,14 +162,14 @@ void decimateIr (IrList *ir, Blocks blocks) {
 
 		switch (blk->exit.kind) {
 		case Exit_Branch:
-			blk->exit.branch.condition = copyUsed(*ir, blk->exit.branch.condition, &out, relocs);
+			blk->exit.branch.condition = copyUsed(ir, blk->exit.branch.condition, &out, relocs);
 			break;
 		case Exit_Return:
 			if (blk->exit.ret != IR_REF_NONE)
-				blk->exit.ret = copyUsed(*ir, blk->exit.ret, &out, relocs);
+				blk->exit.ret = copyUsed(ir, blk->exit.ret, &out, relocs);
 			break;
 		case Exit_Switch:
-			blk->exit.switch_.value = copyUsed(*ir, blk->exit.switch_.value, &out, relocs);
+			blk->exit.switch_.value = copyUsed(ir, blk->exit.switch_.value, &out, relocs);
 			break;
 		case Exit_Unconditional: break;
 		case Exit_None:
@@ -173,6 +182,7 @@ void decimateIr (IrList *ir, Blocks blocks) {
 
 	free(relocs);
 	free(ir->ptr);
+	free(ir->locations);
 	*ir = out;
 }
 

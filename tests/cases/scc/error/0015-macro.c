@@ -1,3 +1,3 @@
 //!necc-dbg @ -as
-#define X(A, A) 0
+#define Xx(Ape,   Ape)    0
 

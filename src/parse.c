@@ -136,6 +136,10 @@ static inline bool tryEat (Parse *parse, TokenKind kind) {
 	return false;
 }
 
+static inline void setLoc (Parse *parse, const Token *tok) {
+	parse->build.loc = parse->tokens.positions[tok - parse->tokens.tokens].source;
+}
+
 typedef enum {
 	Decl_Named,
 	Decl_PossiblyAbstract,
@@ -172,6 +176,8 @@ static void popScope(Parse *, Scope);
 static nodiscard Scope pushScope(Parse *);
 static void requires(Parse *, const char *desc, Features);
 static OrdinaryIdentifier *define(Parse *, Declaration, u8 storage, const Token *type_token, const Token *decl_token, const Token *def_token, u32 parent_decl_id);
+
+
 
 // Parses all top level declarations into a Module.
 void parse (Arena *code_arena, Tokenization tokens, Options *opt, Module *module) {
@@ -352,7 +358,8 @@ static Value immediateIntVal(Parse *, Type typ, u64 val);
 static inline void removeEnumness(Type *t);
 
 void parseFunction (Parse *parse, Symbol *symbol, Symbol *func_sym) {
-	u32 param_count = parse->current_func_type.parameters.len;
+	FunctionType func_type = parse->current_func_type;
+	u32 param_count = func_type.parameters.len;
 
 	IrBuild *build = &parse->build;
 	*build = (IrBuild) {
@@ -363,10 +370,18 @@ void parseFunction (Parse *parse, Symbol *symbol, Symbol *func_sym) {
 	};
 	build->ir.entry = startNewBlock(build, zstr("entry"));
 	String name = symbol->name;
+	bool is_main = eql("main", name);
+	if (is_main) {
+		if (func_type.rettype->kind != Kind_Basic || func_type.rettype->basic != Int_int)
+		{
+			parseerror(parse, parse->pos, "the return type of function main() must be %s", printTypeHighlighted(&parse->arena, BASIC_INT));
+		}
+	}
 
 
 	assert(parse->scope_depth == 0);
 	Scope enclosing = pushScope(parse);
+	setLoc(parse, parse->pos);
 
 	char *terminated = aalloc(parse->code_arena, name.len + 1);
 	memcpy(terminated, name.ptr, name.len);
@@ -410,8 +425,11 @@ void parseFunction (Parse *parse, Symbol *symbol, Symbol *func_sym) {
 
 	parseCompound(parse);
 
-	// TODO Warning if this is reachable and return type is not void.
-	genReturnVal(&parse->build, IR_REF_NONE);
+	if (is_main) {
+		genReturnVal(build, genImmediateInt(build, 0, typeSize(*func_type.rettype, &parse->target)));
+	} else {
+		genReturnVal(build, IR_REF_NONE);
+	}
 
 	popScope(parse, enclosing);
 
@@ -516,6 +534,8 @@ static void parseStatement (Parse *parse, bool *had_non_declaration) {
 	}
 
 	const Token *primary = parse->pos;
+	setLoc(parse, primary);
+
 	switch (t.kind) {
 	case Tok_OpenBrace:
 		parseCompound(parse);
@@ -1865,20 +1885,28 @@ static void maybeBracedInitializer (Parse *parse, InitializationDest dest, u32 o
 	if (current_value.inst == IR_REF_NONE) {
 		if (tryEat(parse, Tok_OpenBrace)) {
 			u64 member_idx = 0;
-			if (parse->pos->kind == Tok_CloseBrace)
+			if (tryEat(parse, Tok_CloseBrace)) {
 				requires(parse, "empty initializers", Features_C23);
+				return;
+			}
+
 			if (is_scalar)
 				parsemsg(Log_Warn, parse, parse->pos-1, "unnecessary braces around scalar initializer");
 
-			while (!tryEat(parse, Tok_CloseBrace)) {
+			while (true) {
 				const Token *primary = parse->pos;
 				bool designated = parse->pos->kind == Tok_Dot || parse->pos->kind == Tok_OpenBracket;
 
 				if (member_idx == MEMBERS_FULL && !designated)
 					parseerror(parse, primary, "too much initialization");
 				member_idx = parseSubInitializer(parse, dest, offset, type, no_value, designated, member_idx);
-				if (member_idx == MEMBERS_FULL && parse->pos->kind != Tok_CloseBrace)
-					expect(parse, Tok_Comma);
+				if (tryEat(parse, Tok_Comma)) {
+					if (tryEat(parse, Tok_CloseBrace))
+						return;
+				} else {
+					expect(parse, Tok_CloseBrace);
+					return;
+				}
 			}
 			return;
 		}
@@ -1911,7 +1939,15 @@ u32 findDesignatedMemberIdx(Parse *parse, Type type);
 u64 findDesignatedArrayIdx(Parse *parse, Type type);
 
 static bool subInitializerEnded (Parse *parse) {
-	return parse->pos->kind == Tok_CloseBrace || parse->pos->kind == Tok_Dot || parse->pos->kind == Tok_OpenBracket;
+	// Yield to the enclosing braces' initialization for new designators
+	// and close-braces.
+	if (parse->pos[0].kind != Tok_Comma || parse->pos[1].kind == Tok_CloseBrace
+		|| parse->pos[1].kind == Tok_Dot || parse->pos[1].kind == Tok_OpenBracket)
+	{
+		return true;
+	}
+	parse->pos++;
+	return false;
 }
 
 // Takes enough elements from the initializer list to initialize the
@@ -1932,7 +1968,7 @@ static u64 parseSubInitializer (Parse *parse, InitializationDest dest, u32 offse
 		} else if (tryEat(parse, Tok_OpenBracket)) {
 			member_idx = findDesignatedArrayIdx(parse, resolved);
 		}
-		if (!tryEat(parse, Tok_Equals)) {
+		if (parse->pos->kind == Tok_Dot || parse->pos->kind == Tok_OpenBracket) {
 			if (is_array) {
 				Type inner = *type.array.inner;
 				u32 stride = typeSize(inner, &parse->target);
@@ -1944,11 +1980,10 @@ static u64 parseSubInitializer (Parse *parse, InitializationDest dest, u32 offse
 			member_idx++;
 			if (member_idx >= type.array.count)
 				return MEMBERS_FULL;
-			if (parse->pos->kind == Tok_CloseBrace)
-				return member_idx;
-			expect(parse, Tok_Comma);
 			if (subInitializerEnded(parse))
 				return member_idx;
+		} else {
+			expect(parse, Tok_Equals);
 		}
 	}
 
@@ -1964,9 +1999,6 @@ static u64 parseSubInitializer (Parse *parse, InitializationDest dest, u32 offse
 		member_idx++;
 		if (member_idx >= type.array.count)
 			return MEMBERS_FULL;
-		if (parse->pos->kind == Tok_CloseBrace)
-			return member_idx;
-		expect(parse, Tok_Comma);
 		if (subInitializerEnded(parse))
 			return member_idx;
 	}
@@ -1980,9 +2012,6 @@ static u64 parseSubInitializer (Parse *parse, InitializationDest dest, u32 offse
 			member_idx++;
 			if (member_idx >= type.array.count)
 				return MEMBERS_FULL;
-			if (parse->pos->kind == Tok_CloseBrace)
-				return member_idx;
-			expect(parse, Tok_Comma);
 			if (subInitializerEnded(parse))
 				return member_idx;
 		}
@@ -1995,9 +2024,6 @@ static u64 parseSubInitializer (Parse *parse, InitializationDest dest, u32 offse
 			member_idx++;
 			if (member_idx >= members.len)
 				return MEMBERS_FULL;
-			if (parse->pos->kind == Tok_CloseBrace)
-				return member_idx;
-			expect(parse, Tok_Comma);
 			if (subInitializerEnded(parse))
 				return member_idx;
 		}

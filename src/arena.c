@@ -19,26 +19,25 @@ struct ArenaBlock {
 
 Arena create_arena(size_t block_size) {
 	assert(block_size > 0);
-// #ifdef NDEBUG
-// 	return (Arena) {
-// 		.last_used = block_size,
-// 		.block_size = block_size,
-// 	};
-// #else
-	// Use a block size of 0 so that each allocation is separate, for easier debugging.
-	// PERFORMANCE This appears to be faster than bundled allocations,
-	// which is a bit bizarre. Investigate.
+#ifdef NDEBUG
+	return (Arena) {
+		.last_used = block_size,
+		.block_size = block_size,
+	};
+#else
 	return (Arena) {.last_used = 1};
-// #endif
+#endif
 }
 
 static u64 allocations = 0;
 void *aalloc(Arena* arena, size_t size) {
-	assert(arena->last_used);
+	if (size == 0)
+		return NULL;
+
 	size_t alignment = alignof(max_align_t);
 	size = (size + alignment - 1) / alignment * alignment;
 
-	if (size && arena->last_used + size > arena->block_size) {
+	if (arena->last_used + size > arena->block_size) {
 		u32 next_size = size >= arena->block_size ? size : arena->block_size;
 		ArenaBlock *new = malloc(next_size + BLOCK_HEADER);
 		if (!new) {

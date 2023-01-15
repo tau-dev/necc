@@ -1,5 +1,6 @@
 #include "ir_gen.h"
 #include "checked_arith.h"
+#include "emit.h"
 
 /*
 
@@ -14,8 +15,20 @@ Arithmetic simplifications which require e.g. use-counts happen in the analysis 
 
 
 static IrRef append (IrBuild *build, Inst inst) {
-	PUSH(build->ir, inst);
-	return build->ir.len - 1;
+	IrList *list = &build->ir;
+
+	if (list->len >= list->capacity) {
+		list->capacity = list->len * 3 / 2 + 4;
+		list->ptr = realloc(list->ptr, sizeof(*list->ptr) * list->capacity);
+		list->locations = realloc(list->locations, sizeof(*list->locations) * list->capacity);
+		if (list->ptr == NULL)
+			generalFatal("out of memory on list growth.");
+	}
+
+	list->ptr[list->len] = inst;
+	list->locations[list->len] = build->loc;
+
+	return list->len++;
 }
 
 static IrRef getPrevMemOp (IrBuild *build) {
@@ -38,14 +51,19 @@ IrRef genStackAllocVLA (IrBuild *build, IrRef size) {
 
 void genReturnVal (IrBuild *build, IrRef val) {
 	build->insertion_block->inst_end = build->ir.len;
-	build->insertion_block->exit = (Exit) {Exit_Return, .ret = val};
+	build->insertion_block->exit = (Exit) {
+		Exit_Return,
+		.ret = val,
+		.loc = build->loc,
+	};
 }
 
 void genBranch (IrBuild *build, IrRef condition) {
 // 	build->insertion_block->last_inst = build->ir.len;
 	build->insertion_block->exit = (Exit) {
 		Exit_Branch,
-		.branch = {condition}
+		.branch = {condition},
+		.loc = build->loc,
 	};
 }
 
@@ -53,7 +71,8 @@ void genJump (IrBuild *build, Block *dest) {
 // 	build->insertion_block->last_inst = build->ir.len;
 	build->insertion_block->exit = (Exit) {
 		Exit_Unconditional,
-		.unconditional = dest
+		.unconditional = dest,
+		.loc = build->loc,
 	};
 	if (dest)
 		startBlock(build, dest);
@@ -64,7 +83,8 @@ void genSwitch (IrBuild *build, IrRef val) {
 // 	build->insertion_block->last_inst = build->ir.len;
 	build->insertion_block->exit = (Exit) {
 		Exit_Switch,
-		.switch_.value = val
+		.switch_.value = val,
+		.loc = build->loc,
 	};
 }
 
@@ -509,6 +529,54 @@ void replaceWithCopy (IrList ir, IrRef original, IrRef replacement, IrRef ordere
 void discardIrBuilder (IrBuild *builder) {
 	// TODO Free loose blocks
 	free(builder->ir.ptr);
+}
+
+
+
+
+
+
+void emitIr (EmitParams params) {
+	FILE *dest = params.out;
+	Module module = params.module;
+
+	for (u32 i = 0; i < module.len; i++) {
+		StaticValue val = module.ptr[i];
+		if (val.is_public)
+			fprintf(dest, "public ");
+
+		if (val.def_state != Def_Defined) {
+			fprintf(dest, "extern %.*s\n", STRING_PRINTAGE(val.name));
+		} else if (val.def_kind == Static_Function) {
+			fprintf(dest, "%s:\n", printDeclarator(params.arena, val.type, val.name));
+			printBlock(dest, val.function_ir.entry, val.function_ir);
+		} else {
+			if (val.type.qualifiers & Static_Variable)
+				fprintf(dest, "variable ");
+			else
+				fprintf(dest, "constant ");
+			String name = val.name;
+			if (name.len == 0)
+				name = zstr("[anon]");
+			fprintf(dest, "%d (%.*s):\n", (int) i, STRING_PRINTAGE(name));
+
+			bool is_string = true;
+			String data = val.value_data;
+			for (u32 i = 0; i < data.len - 1; i++) {
+				if (data.ptr[i] < 32 || (uchar) data.ptr[i] >= 128)
+					is_string = false;
+			}
+			is_string = is_string && data.ptr[data.len - 1] == 0;
+			if (is_string) {
+				fprintf(dest, "\"%.*s\"\n", STRING_PRINTAGE(data));
+			} else {
+				for (u32 i = 0; i < data.len; i++) {
+					fprintf(dest, "%02hhx ", data.ptr[i]);
+				}
+				fprintf(dest, "\n");
+			}
+		}
+	}
 }
 
 

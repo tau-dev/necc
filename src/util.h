@@ -30,7 +30,8 @@ typedef SPAN(char) MutableString;
 #define PUSH(list, value) \
 	do { \
 		if ((list).len >= (list).capacity) {\
-			(list).ptr = realloc((list).ptr, sizeof(*(list).ptr) * ((list).len * 3 / 2 + 4)); \
+			(list).capacity = (list).len * 3 / 2 + 4; \
+			(list).ptr = realloc((list).ptr, sizeof(*(list).ptr) * (list).capacity); \
 			if ((list).ptr == NULL) {\
 				puts("ERROR: Out of memory on list growth."); \
 				exit(EXIT_FAILURE); \
@@ -42,7 +43,8 @@ typedef SPAN(char) MutableString;
 #define PUSH_A(arena, list, value) \
 	do { \
 		if ((list).len >= (list).capacity) {\
-			void *new = aalloc(arena, sizeof(*(list).ptr) * ((list).len * 2 + 4)); \
+			(list).capacity = (list).len * 2 + 4; \
+			void *new = aalloc(arena, sizeof(*(list).ptr) * (list).capacity); \
 			if ((list).ptr) memcpy(new, (list).ptr, sizeof(*(list).ptr) * (list).len); \
 			(list).ptr = new; \
 		} \

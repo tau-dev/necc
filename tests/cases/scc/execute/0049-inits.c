@@ -1,14 +1,16 @@
 //!necc-dbg @ -run
 struct S {int a; int b;};
-struct S s = { .b = 2, .a = 1};
+struct Z {int a; struct S b; int c;};
+struct Z s = { .c = 2, .b.a = 5, .b.b = 6, .a = 1};
 
-//!necc-dbg @ -run
+int printf( const char *format, ... );
+
 int
 main()
 {
-	if(s.a != 1)
-		return 1;
-	if(s.b != 2)
-		return 2;
+	printf("%d\n", s.a);
+	printf("%d\n", s.c);
+	printf("%d\n", s.b.a);
+	printf("%d\n", s.b.b);
 	return 0;
 }

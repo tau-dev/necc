@@ -26,6 +26,12 @@ typedef struct {
 	u32 len;
 	u32 capacity;
 	Inst *ptr;
+	// PERFORMANCE That's a lot of data. Only storing offsets into
+	// Tokenization's positions may benefit the copying of this data in
+	// decimateIr and the skimming for positions changes in the debug
+	// info generator.
+	Location *locations;
+
 	SPAN(Parameter) params;
 	Block *entry;
 } IrList;
@@ -215,6 +221,8 @@ typedef struct {
 		Block *unconditional;
 		IrRef ret;
 	};
+
+	Location loc;
 } Exit;
 
 
@@ -236,6 +244,7 @@ typedef struct Block {
 
 typedef struct IrBuild {
 	IrList ir;
+	Location loc;
 	Arena *block_arena;
 
 	u32 block_count;

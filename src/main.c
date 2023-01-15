@@ -11,6 +11,7 @@
 #include "ir_gen.h"
 #include "ansi.h"
 #include "analysis.h"
+#include "emit.h"
 
 
 Module module = {0};
@@ -154,7 +155,6 @@ static i32 find(const char *str, const Name *names) {
 }
 
 
-void emitX64AsmSimple(FILE *out, Arena *arena, Module module, const Target *target);
 
 bool had_output = false;
 static const char *stdout_marker = "<stdout>";
@@ -202,9 +202,8 @@ Target target_x64_linux_gcc = {
 };
 
 static String checkIncludePath(Arena *, const char *path);
-static void emitIr(Arena *arena, const char *ir_out, Module module);
-static void emitDeps(const char *deps_out, const char *out_name, FileList files, bool emit_system_files);
 static const char *concat(Arena *arena, ...);
+static void emitDeps(const char *deps_out, const char *out_name, FileList files, bool emit_system_files);
 
 int main (int argc, char **args) {
 	String input = {0};
@@ -326,7 +325,7 @@ int main (int argc, char **args) {
 	}
 
 	char tmp_exe[L_tmpnam] = {0};
-	char tmp_obj[L_tmpnam] = {0};
+// 	char tmp_obj[L_tmpnam] = {0};
 	char tmp_asm[L_tmpnam] = {0};
 
 	if (runit && !exe_out) {
@@ -334,12 +333,7 @@ int main (int argc, char **args) {
 		exe_out = tmp_exe;
 	}
 
-	if (exe_out && !obj_out) {
-		tmpnam(tmp_obj);
-		obj_out = tmp_obj;
-	}
-
-	if (obj_out && !assembly_out) {
+	if ((obj_out || exe_out) && !assembly_out) {
 		tmpnam(tmp_asm);
 		assembly_out = tmp_asm;
 	}
@@ -432,27 +426,39 @@ int main (int argc, char **args) {
 		}
 	}
 
+	EmitParams emit_params = {
+		.arena = &arena,
+		.module = module,
+		.target = &options.target,
+		.files = tokens.files,
+	};
 	// Output
 	if (ir_out) {
-		emitIr(&arena, ir_out, module);
+		emit_params.out = openOut(ir_out);
+		emitIr(emit_params);
+		fclose(emit_params.out);
 	}
 
 	if (assembly_out) {
-		FILE *dest = openOut(assembly_out);
-		emitX64AsmSimple(dest, &arena, module, &target_x64_linux_gcc);
-		fclose(dest);
+		emit_params.out = openOut(assembly_out);
+		emitX64AsmSimple(emit_params);
+		fclose(emit_params.out);
 	}
+
 	if (obj_out) {
 		assert(assembly_out);
-		const char *cmd = concat(&arena, "fasm -m700000 \"", assembly_out, "\" \"", obj_out, "\" > /dev/null", NULL);
+		const char *cmd = concat(&arena, "musl-gcc -c -x assembler \"", assembly_out, "\" -o\"", obj_out, "\" > /dev/null", NULL);
 		if (system(cmd))
 			generalFatal("failed to assemble");
 	}
 	if (exe_out) {
-		assert(obj_out);
-		const char *cmd = concat(&arena, "musl-gcc -static -lm \"", obj_out, "\" -o", exe_out, NULL);
-		if (system(cmd))
-			generalFatal("failed to link object files");
+		const char *cmd = concat(&arena, "musl-gcc -static -lm  -x assembler \"", obj_out ? obj_out : assembly_out, "\" -o", exe_out, NULL);
+		if (system(cmd)) {
+			if (obj_out)
+				generalFatal("failed to link object files");
+			else
+				generalFatal("failed to assemble");
+		}
 	}
 
 	if (runit) {
@@ -462,6 +468,7 @@ int main (int argc, char **args) {
 		char *new_argv[2] = {c, NULL};
 		execve(exe_out, new_argv, NULL);
 	}
+
 #ifndef NDEBUG
 	free_arena(&arena, "code");
 	for (u32 i = 0; i < tokens.files.len; i++)
@@ -501,47 +508,27 @@ static String checkIncludePath (Arena *arena, const char *path) {
 	return (String) {len + 1, c};
 }
 
-
-static void emitIr (Arena *arena, const char *ir_out, Module module) {
-	FILE *dest = openOut(ir_out);
-	for (u32 i = 0; i < module.len; i++) {
-		StaticValue val = module.ptr[i];
-		if (val.is_public)
-			fprintf(dest, "public ");
-
-		if (val.def_state != Def_Defined) {
-			fprintf(dest, "extern %.*s\n", STRING_PRINTAGE(val.name));
-		} else if (val.def_kind == Static_Function) {
-			fprintf(dest, "%s:\n", printDeclarator(arena, val.type, val.name));
-			printBlock(dest, val.function_ir.entry, val.function_ir);
-		} else {
-			if (val.type.qualifiers & Static_Variable)
-				fprintf(dest, "variable ");
-			else
-				fprintf(dest, "constant ");
-			String name = val.name;
-			if (name.len == 0)
-				name = zstr("[anon]");
-			fprintf(dest, "%d (%.*s):\n", (int) i, STRING_PRINTAGE(name));
-
-			bool is_string = true;
-			String data = val.value_data;
-			for (u32 i = 0; i < data.len - 1; i++) {
-				if (data.ptr[i] < 32 || (uchar) data.ptr[i] >= 128)
-					is_string = false;
-			}
-			is_string = is_string && data.ptr[data.len - 1] == 0;
-			if (is_string) {
-				fprintf(dest, "\"%.*s\"\n", STRING_PRINTAGE(data));
-			} else {
-				for (u32 i = 0; i < data.len; i++) {
-					fprintf(dest, "%02hhx ", data.ptr[i]);
-				}
-				fprintf(dest, "\n");
-			}
-		}
+static const char *concat (Arena *arena, ...) {
+	va_list args;
+	va_start(args, arena);
+	u32 len = 1;
+	for (const char *str = va_arg(args, const char*); str; str = va_arg(args, const char*)) {
+		len += strlen(str);
 	}
-	fclose(dest);
+
+	char *joined = aalloc(arena, len);
+	char *insert = joined;
+	va_end(args);
+	va_start(args, arena);
+	for (const char *str = va_arg(args, const char*); str; str = va_arg(args, const char*)) {
+		u32 l = strlen(str);
+		memcpy(insert, str, l);
+		insert += l;
+	}
+	va_end(args);
+
+	joined[len-1] = 0;
+	return joined;
 }
 
 static void emitDeps (const char *deps_out, const char *out_name, FileList files, bool emit_system_files) {
@@ -566,25 +553,3 @@ static void emitDeps (const char *deps_out, const char *out_name, FileList files
 	fclose(dest);
 }
 
-static const char *concat (Arena *arena, ...) {
-	va_list args;
-	va_start(args, arena);
-	u32 len = 1;
-	for (const char *str = va_arg(args, const char*); str; str = va_arg(args, const char*)) {
-		len += strlen(str);
-	}
-
-	char *joined = aalloc(arena, len);
-	char *insert = joined;
-	va_end(args);
-	va_start(args, arena);
-	for (const char *str = va_arg(args, const char*); str; str = va_arg(args, const char*)) {
-		u32 l = strlen(str);
-		memcpy(insert, str, l);
-		insert += l;
-	}
-	va_end(args);
-
-	joined[len-1] = 0;
-	return joined;
-}

@@ -1,6 +1,8 @@
 //!necc-dbg @ -run
+#include "00-test.h"
+
 int
 main()
 {
-	return 3-3;
+    printf("%d\n", 3);
 }

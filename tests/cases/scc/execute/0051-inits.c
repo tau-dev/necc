@@ -1,3 +1,4 @@
+#include "00-test.h"
 struct S1 {
 	int a;
 	int b;
