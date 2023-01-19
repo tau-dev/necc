@@ -165,6 +165,7 @@ static IrRef genBinOp (IrBuild *build, InstKind op, IrRef a, IrRef b, bool *over
 			i.constant = toSigned(lhs) / toSigned(rhs);
 			break;
 		case Ir_Mod:
+		case Ir_SMod:
 			if (rhs == 0) {
 				i.kind = Ir_Mod;
 				break;

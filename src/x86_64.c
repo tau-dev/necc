@@ -276,14 +276,6 @@ void emitX64AsmSimple(EmitParams params) {
 	}
 	(void)emitData;
 
-// 	for (u32 i = 0; i < module.len; i++) {
-// 		StaticValue reloc = module.ptr[i];
-// 		if (reloc.def_kind == Static_Function && reloc.def_state) {
-// 			assert(reloc.type.kind == Kind_Function);
-// 			emitFunctionLineInfo(arena, out, module, &module.ptr[i], target);
-// 		}
-// 	}
-
 	flushit(params.out);
 }
 
@@ -401,6 +393,8 @@ static void emitFunctionForward (EmitParams params, u32 id) {
 	}
 
 
+	emit(&c, " push rbp");
+	emit(&c, " mov rbp, rsp");
 	emit(&c, " sub rsp, I", c.stack_allocated);
 
 	if (c.is_memory_return)
@@ -414,7 +408,7 @@ static void emitFunctionForward (EmitParams params, u32 id) {
 			emit(&c, " mov Z [rsp+I], R", sizeOp(sizeOfRegister(info.reg1)), info.storage, info.reg1);
 
 			if (info.registers == 2)
-				emit(&c, "mov Z [rsp+I], R", sizeOp(sizeOfRegister(info.reg2)), info.storage + 8, info.reg2);
+				emit(&c, " mov Z [rsp+I], R", sizeOp(sizeOfRegister(info.reg2)), info.storage + 8, info.reg2);
 		} else {
 			c.param_info.ptr[i].storage = mem_params;
 			mem_params += roundUp(ir.params.ptr[i].size);
@@ -561,7 +555,9 @@ static void emitBlockForward (Codegen *c, Blocks blocks, u32 i) {
 				loadMaybeBigTo(c, RAX, RDX, exit.ret);
 			}
 		}
-		emit(c, " add rsp, I", c->stack_allocated);
+// 		emit(c, " add rsp, I", c->stack_allocated);
+		emit(c, " mov rsp, rbp");
+		emit(c, " pop rbp");
 		emit(c, " ret");
 		break;
 	case Exit_None: unreachable;

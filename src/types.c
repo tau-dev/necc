@@ -154,6 +154,8 @@ bool typeCompatible (Type a, Type b) {
 	case Kind_Struct_Named:
 	case Kind_Union_Named:
 		return a.nametagged == b.nametagged;
+	case Kind_Array:
+		return a.array.count == b.array.count;
 	default:
 		unreachable;
 	}

@@ -161,8 +161,7 @@ typedef struct Inst {
 	case Ir_LessThan: \
 	case Ir_LessThanOrEquals: \
 	case Ir_ShiftLeft: \
-	case Ir_ShiftRight: \
-	case Ir_Copy
+	case Ir_ShiftRight
 
 #define UNOP_CASES \
 	case Ir_BitNot: \

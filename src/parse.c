@@ -350,6 +350,7 @@ static Value parseExprBase(Parse *);
 static Value parseIntrinsic(Parse *, Intrinsic);
 // TODO The order of parameters here is inconsistent.
 static Value intPromote(Value v, Parse *, const Token*);
+static void needAssignableLval(Parse *, const Token *, Value v);
 static void discardValue(Parse *, const Token *, Value v);
 static IrRef coerce(Value v, Type t, Parse *, const Token *);
 static IrRef toBoolean(Parse *, const Token *, Value v);
@@ -828,13 +829,9 @@ static Value parseExprAssignment (Parse *parse) {
 	if (!(primary->kind == Tok_Equals || primary->kind >= Tok_Assignment_Start))
 		return v;
 
+	needAssignableLval(parse, primary, v);
+
 	parse->pos++;
-	if (v.typ.kind == Kind_Function)
-		parseerror(parse, primary, "cannot assign to a function");
-	if (!isLvalue(v))
-		parseerror(parse, primary, "cannot assign to an rvalue");
-	if (v.typ.qualifiers & Qualifier_Const)
-		parseerror(parse, primary, "cannot assign to a %sconst%s-qualified value", BOLD, RESET);
 	bool is_volatile = v.typ.qualifiers & Qualifier_Volatile;
 
 	Value assigned = parseExprAssignment(parse);
@@ -1214,26 +1211,17 @@ static Value parseExprLeftUnary (Parse *parse) {
 	case Tok_DoublePlus:
 	case Tok_DoubleMinus: {
 		Value v = parseExprLeftUnary(parse);
-		if (v.typ.kind == Kind_Function)
-			parseerror(parse, primary, "cannot modify a function");
-		if (!isLvalue(v))
-			parseerror(parse, primary, "cannot modify an rvalue");
+		needAssignableLval(parse, primary, v);
+
 		bool is_volatile = v.typ.qualifiers & Qualifier_Volatile;
 		Value rval = (Value) {v.typ, genLoad(build, v.inst, typeSize(v.typ, &parse->target), is_volatile)};
 
-		const int delta = primary->kind == Tok_DoublePlus ? 1 : -1;
+		const i64 delta = primary->kind == Tok_DoublePlus ? 1 : -1;
 
-		Value one = immediateIntVal(parse, v.typ, delta);
+		Value one = immediateIntVal(parse, BASIC_INT, delta);
+		Value result = arithAdd(parse, primary, one, rval);
 
-		Value result;
-		if (v.typ.kind == Kind_Pointer) {
-			one.typ = parse->target.ptrdiff;
-			result = pointerAdd(build, rval, one, parse, primary);
-		} else {
-			result = (Value) {v.typ, genAdd(build, rval.inst, one.inst)};
-		}
-
-		genStore(build, v.inst, result.inst, is_volatile);
+		genStore(build, v.inst, coercerval(result, v.typ, parse, primary, false), is_volatile);
 		return result;
 	}
 	case Tok_Asterisk: {
@@ -1398,26 +1386,18 @@ static Value parseExprRightUnary (Parse *parse) {
 				parseerror(parse, primary, "either the subscript or the subscripted value must be a pointer");
 			v = dereference(parse, pointerAdd(build, v, index, parse, primary));
 		} else if (tryEat(parse, Tok_DoublePlus) || tryEat(parse, Tok_DoubleMinus)) {
-			int delta = primary->kind == Tok_DoublePlus ? 1 : -1;
+			// STYLE Copypasta from preincrement
+			needAssignableLval(parse, primary, v);
 
-			if (v.typ.kind == Kind_Function)
-				parseerror(parse, primary, "cannot modify a function");
-			if (!isLvalue(v))
-				parseerror(parse, primary, "cannot modify an rvalue");
 			bool is_volatile = v.typ.qualifiers & Qualifier_Volatile;
 			Value rval = (Value) {v.typ, genLoad(build, v.inst, typeSize(v.typ, &parse->target), is_volatile)};
 
-			Value one = immediateIntVal(parse, v.typ, delta);
+			const i64 delta = primary->kind == Tok_DoublePlus ? 1 : -1;
 
-			IrRef result;
-			if (v.typ.kind == Kind_Pointer) {
-				one.typ = parse->target.ptrdiff;
-				result = pointerAdd(build, rval, one, parse, primary).inst;
-			} else {
-				result = genAdd(build, rval.inst, one.inst);
-			}
+			Value one = immediateIntVal(parse, BASIC_INT, delta);
+			Value result = arithAdd(parse, primary, one, rval);
 
-			genStore(build, v.inst, result, is_volatile);
+			genStore(build, v.inst, coercerval(result, v.typ, parse, primary, false), is_volatile);
 			v = rval;
 		} else if (parse->pos[0].kind == Tok_Dot || parse->pos[0].kind == Tok_Arrow) {
 			bool arrow = parse->pos[0].kind == Tok_Arrow;
@@ -1686,7 +1666,7 @@ static void initializeAutoDefinition (Parse *parse, OrdinaryIdentifier *ord, Typ
 				if (tryEat(parse, Tok_CloseBrace))
 					break;
 
-				maybeBracedInitializer(parse, dest, 0, type, no_value);
+				maybeBracedInitializer(parse, dest, count * member_size, type, no_value);
 				count++;
 
 				if (!tryEat(parse, Tok_Comma)) {
@@ -1890,8 +1870,12 @@ static void maybeBracedInitializer (Parse *parse, InitializationDest dest, u32 o
 				return;
 			}
 
-			if (is_scalar)
+			if (is_scalar) {
 				parsemsg(Log_Warn, parse, parse->pos-1, "unnecessary braces around scalar initializer");
+				maybeBracedInitializer(parse, dest, offset, type, no_value);
+				expect(parse, Tok_CloseBrace);
+				return;
+			}
 
 			while (true) {
 				const Token *primary = parse->pos;
@@ -3337,7 +3321,18 @@ static Value intPromote (Value val, Parse *p, const Token *primary) {
 		return (Value) {BASIC_INT, coerce(val, BASIC_INT, p, primary)};
 }
 
-static void discardValue(Parse *parse, const Token *token, Value v) {
+static void needAssignableLval (Parse *parse, const Token *token, Value v) {
+	if (v.typ.kind == Kind_Function)
+		parseerror(parse, token, "cannot modify a function");
+	if (!isLvalue(v))
+		parseerror(parse, token, "cannot modify an rvalue");
+	if (v.typ.kind == Kind_Array || v.typ.kind == Kind_VLArray)
+		parseerror(parse, token, "cannot modify an array");
+	if (v.typ.qualifiers & Qualifier_Const)
+		parseerror(parse, token, "cannot modify a const-qualified value");
+}
+
+static void discardValue (Parse *parse, const Token *token, Value v) {
 	(void) parse;
 	(void) token;
 	(void) v;

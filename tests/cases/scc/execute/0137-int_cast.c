@@ -1,3 +1,4 @@
+//!necc-dbg @ -run
 int a;
 unsigned b;
 char c;

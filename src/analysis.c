@@ -10,6 +10,54 @@ should be moved into a separate file at some point).
 
 */
 
+#define ON_OPERANDS_AND_ORDER(inst, operand_var, operation, ordering_operation)	\
+	do {	\
+		IrRef *operand_var;	\
+		switch ((InstKind) (inst).kind) {	\
+		case Ir_Copy:	\
+			operand_var = &(inst).binop.lhs; operation;	\
+			operand_var = &(inst).binop.rhs; ordering_operation;	\
+			break;	\
+		BINOP_CASES:	\
+			operand_var = &(inst).binop.lhs; operation;	\
+			operand_var = &(inst).binop.rhs; operation;	\
+			break;	\
+		UNOP_CASES:	\
+			operand_var = &(inst).unop; operation;	\
+			break;	\
+		UNOP_CONST_CASES:	\
+			operand_var = &(inst).unop_const.val; operation;	\
+			break;	\
+		case Ir_Store:	\
+		case Ir_StoreVolatile:	\
+			operand_var = &(inst).mem.source; operation;	\
+			FALLTHROUGH;	\
+		case Ir_Load:	\
+		case Ir_LoadVolatile:	\
+			operand_var = &(inst).mem.address; operation;	\
+			operand_var = &(inst).mem.ordered_after; ordering_operation;	\
+			break;	\
+		case Ir_StackAllocVLA:	\
+			operand_var = &(inst).alloc.size; operation;	\
+			break;	\
+		case Ir_PhiOut:	\
+			operand_var = &(inst).phi_out.source; operation;	\
+			break;	\
+		case Ir_Call:	\
+			operand_var = &(inst).call.ordered_after; ordering_operation;	\
+	\
+			operand_var = &(inst).call.function_ptr; operation;	\
+	\
+			ValuesSpan EXPANSION_params = (inst).call.parameters;	\
+			for (u32 p = 0; p < EXPANSION_params.len; p++) {	\
+				operand_var = &EXPANSION_params.ptr[p]; operation;	\
+			}	\
+			break;	\
+		ZEROOP_CASES:	\
+			break;	\
+		}	\
+	} while (0)
+
 
 #define RECURSE_NEXT_BLOCKS(visitor, blk, ...)  \
 	switch (blk->exit.kind) { \
@@ -30,101 +78,31 @@ static IrRef copyUsed (const IrList *source, IrRef i, IrList *dest, IrRef *reloc
 	if (relocs[i] != IR_REF_NONE) return relocs[i];
 
 	Inst inst = source->ptr[i];
-	switch ((InstKind) inst.kind) {
-	BINOP_CASES:
-		copyUsed(source, inst.binop.lhs, dest, relocs);
-		copyUsed(source, inst.binop.rhs, dest, relocs);
-		break;
-	UNOP_CASES:
-		copyUsed(source, inst.unop, dest, relocs);
-		break;
-	UNOP_CONST_CASES:
-		copyUsed(source, inst.unop_const.val, dest, relocs);
-		break;
-	case Ir_Store:
-	case Ir_StoreVolatile:
-		if (inst.mem.ordered_after != IR_REF_NONE)
-			copyUsed(source, inst.mem.ordered_after, dest, relocs);
-		copyUsed(source, inst.mem.address, dest, relocs);
-		copyUsed(source, inst.mem.source, dest, relocs);
-		break;
-	case Ir_Load:
-	case Ir_LoadVolatile:
-		if (inst.mem.ordered_after != IR_REF_NONE)
-			copyUsed(source, inst.mem.ordered_after, dest, relocs);
-		copyUsed(source, inst.mem.address, dest, relocs);
-		break;
-	case Ir_StackAllocVLA:
-		copyUsed(source, inst.alloc.size, dest, relocs);
-		break;
-	case Ir_PhiOut:
-		copyUsed(source, inst.phi_out.source, dest, relocs);
-		break;
-	case Ir_Call:
-		if (inst.call.ordered_after != IR_REF_NONE)
-			copyUsed(source, inst.call.ordered_after, dest, relocs);
-		copyUsed(source, inst.call.function_ptr, dest, relocs);
-		ValuesSpan params = inst.call.parameters;
-		for (u32 p = 0; p < params.len; p++)
-			copyUsed(source, params.ptr[p], dest, relocs);
-		break;
-	ZEROOP_CASES:
-		break;
-	}
+
+	// This needs absence of cycles.
+	ON_OPERANDS_AND_ORDER(inst, op, copyUsed(source, *op, dest, relocs),
+		if (*op != IR_REF_NONE) copyUsed(source, *op, dest, relocs));
 
 	IrRef new = dest->len++;
 	dest->ptr[new] = inst;
 	dest->locations[new] = source->locations[i];
 	relocs[i] = new;
+
 	return new;
 }
 
 
 static void applyRelocs (IrList ir, IrRef i, IrRef *relocs) {
 	Inst *inst = &ir.ptr[i];
-	switch ((InstKind) inst->kind) {
-	BINOP_CASES:
-		inst->binop.lhs = relocs[inst->binop.lhs];
-		if (inst->binop.rhs != IR_REF_NONE)
-			inst->binop.rhs = relocs[inst->binop.rhs];
-		break;
-	UNOP_CASES:
-		inst->unop = relocs[inst->unop];
-		break;
-	UNOP_CONST_CASES:
-		inst->unop_const.val = relocs[inst->unop_const.val];
-		break;
-	case Ir_Store:
-	case Ir_StoreVolatile:
-		inst->mem.source = relocs[inst->mem.source];
-		FALLTHROUGH;
-	case Ir_Load:
-	case Ir_LoadVolatile:
-		inst->mem.address = relocs[inst->mem.address];
-		if (inst->mem.ordered_after != IR_REF_NONE)
-			inst->mem.ordered_after = relocs[inst->mem.ordered_after];
-		break;
-	case Ir_StackAllocVLA:
-		inst->alloc.size = relocs[inst->alloc.size];
-		break;
-	case Ir_PhiOut:
-		inst->phi_out.source = relocs[inst->phi_out.source];
+	if (inst->kind == Ir_PhiOut) {
 		if (inst->phi_out.on_true != IR_REF_NONE)
 			inst->phi_out.on_true = relocs[inst->phi_out.on_true];
 		if (inst->phi_out.on_false != IR_REF_NONE)
 			inst->phi_out.on_false = relocs[inst->phi_out.on_false];
-		break;
-	case Ir_Call:
-		if (inst->call.ordered_after != IR_REF_NONE)
-			inst->call.ordered_after = relocs[inst->call.ordered_after];
-		inst->call.function_ptr = relocs[inst->call.function_ptr];
-		ValuesSpan params = inst->call.parameters;
-		for (u32 p = 0; p < params.len; p++)
-			params.ptr[p] = relocs[params.ptr[p]];
-		break;
-	ZEROOP_CASES:
-		break;
 	}
+
+	ON_OPERANDS_AND_ORDER(*inst, op, *op = relocs[*op],
+		if (*op != IR_REF_NONE) *op = relocs[*op]);
 }
 
 void decimateIr (IrList *ir, Blocks blocks) {
@@ -192,44 +170,7 @@ void calcLifetimes (IrList ir, ValuesSpan lastuses) {
 	memset(uses, 0, sizeof(IrRef) * lastuses.len);
 	for (u32 i = 0; i < ir.len; i++) {
 		Inst inst = ir.ptr[i];
-		switch (inst.kind) {
-		BINOP_CASES:
-			uses[inst.binop.lhs] = i;
-			if (inst.binop.rhs != IR_REF_NONE)
-				uses[inst.binop.rhs] = i;
-			break;
-		UNOP_CASES:
-			uses[inst.unop] = i;
-			break;
-		UNOP_CONST_CASES:
-			uses[inst.unop_const.val] = i;
-			break;
-		case Ir_Store:
-		case Ir_StoreVolatile:
-			uses[inst.mem.source] = i;
-			FALLTHROUGH;
-		case Ir_Load:
-		case Ir_LoadVolatile:
-			uses[inst.mem.address] = i;
-			if (inst.mem.ordered_after != IR_REF_NONE)
-				uses[inst.mem.ordered_after] = i;
-			break;
-		case Ir_StackAllocVLA:
-			uses[inst.alloc.size] = i;
-			break;
-		case Ir_PhiOut:
-			uses[inst.phi_out.source] = i;
-			break;
-		case Ir_Call:
-			uses[inst.call.function_ptr] = i;
-			ValuesSpan params = inst.call.parameters;
-			for (u32 p = 0; p < params.len; p++) {
-				uses[params.ptr[p]] = i;
-			}
-			break;
-		ZEROOP_CASES:
-			break;
-		}
+		ON_OPERANDS_AND_ORDER(inst, op, uses[*op] = i, (void) 0);
 	}
 }
 
@@ -278,45 +219,7 @@ void calcUsage (IrList ir, u16 *usage) {
 
 	for (u32 i = 0; i < ir.len; i++) {
 		Inst inst = ir.ptr[i];
-		switch ((InstKind) inst.kind) {
-		BINOP_CASES:
-			usage[inst.binop.lhs]++;
-			if (inst.binop.rhs != IR_REF_NONE)
-				usage[inst.binop.rhs]++;
-			break;
-		UNOP_CASES:
-			usage[inst.unop]++;
-			break;
-		UNOP_CONST_CASES:
-			usage[inst.unop_const.val]++;
-			break;
-		case Ir_Store:
-		case Ir_StoreVolatile:
-			usage[inst.mem.source]++;
-			FALLTHROUGH;
-		case Ir_Load:
-		case Ir_LoadVolatile:
-			usage[inst.mem.address]++;
-			if (inst.mem.ordered_after != IR_REF_NONE)
-				usage[inst.mem.ordered_after]++;
-			break;
-		case Ir_StackAllocVLA:
-			usage[inst.alloc.size]++;
-			break;
-		case Ir_PhiOut:
-			usage[inst.phi_out.source]++;
-			break;
-		case Ir_Call:
-			if (inst.call.ordered_after != IR_REF_NONE)
-				usage[inst.call.ordered_after]++;
-			usage[inst.call.function_ptr]++;
-			ValuesSpan params = inst.call.parameters;
-			for (u32 p = 0; p < params.len; p++)
-				usage[params.ptr[p]]++;
-			break;
-		ZEROOP_CASES:
-			break;
-		}
+		ON_OPERANDS_AND_ORDER(inst, op, usage[*op]++, (void) 0);
 	}
 }
 
@@ -383,6 +286,7 @@ static bool isMemInstruction(InstKind inst) {
 	case Ir_Store:
 	case Ir_StoreVolatile:
 	case Ir_Call:
+	case Ir_VaArg:
 		return true;
 	default:
 		return false;
@@ -429,44 +333,7 @@ static void cleanUpCopyReplacements(IrList ir, Block *blk) {
 
 void resolveCopies (IrList ir, Blocks blocks) {
 	for (u32 i = 0; i < ir.len; i++) {
-		Inst *inst = &ir.ptr[i];
-		switch (inst->kind) {
-		BINOP_CASES:
-			decopy(ir, &inst->binop.lhs);
-			if (inst->binop.rhs != IR_REF_NONE)
-				decopy(ir, &inst->binop.rhs);
-			break;
-		UNOP_CASES:
-			decopy(ir, &inst->unop);
-			break;
-		UNOP_CONST_CASES:
-			decopy(ir, &inst->unop_const.val);
-			break;
-		case Ir_Store:
-		case Ir_StoreVolatile:
-			decopy(ir, &inst->mem.source);
-			FALLTHROUGH;
-		case Ir_Load:
-		case Ir_LoadVolatile:
-			decopy(ir, &inst->mem.address);
-			decopyOrder(ir, &inst->mem.ordered_after);
-			break;
-		case Ir_StackAllocVLA:
-			decopy(ir, &inst->alloc.size);
-			break;
-		case Ir_PhiOut:
-			decopy(ir, &inst->phi_out.source);
-			break;
-		case Ir_Call:
-			decopyOrder(ir, &inst->call.ordered_after);
-			decopy(ir, &inst->call.function_ptr);
-			ValuesSpan params = inst->call.parameters;
-			for (u32 p = 0; p < params.len; p++)
-				decopy(ir, &params.ptr[p]);
-			break;
-		ZEROOP_CASES:
-			break;
-		}
+		ON_OPERANDS_AND_ORDER(ir.ptr[i], op, decopy(ir, op), decopyOrder(ir, op));
 	}
 
 	for (u32 i = 0; i < blocks.len; i++) {

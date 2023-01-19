@@ -1,3 +1,4 @@
+//!necc-dbg @ -ir
 int
 main(void)
 {
@@ -17,7 +18,7 @@ main(void)
 	u = -1l;
 	u = -1u;
 	u = -1ll;
-	u = -1llu & 3;
+    u = -1llu & 3;
 	u = -1llu < 0;
 	return 0;
 }

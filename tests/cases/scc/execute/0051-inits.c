@@ -1,3 +1,4 @@
+//!necc-dbg @ -run
 #include "00-test.h"
 struct S1 {
 	int a;
@@ -14,7 +15,7 @@ struct S2 {
 	struct S1 s;
 };
 
-struct S2 v = {1, 2, 3, {4, 5}};
+struct S2 v = {1, 2, 3, .s = {4, 5}};
 
 int
 main()

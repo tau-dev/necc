@@ -1,3 +1,4 @@
+//!necc-dbg @ -ir -O
 int
 main(void)
 {

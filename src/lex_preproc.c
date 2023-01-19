@@ -52,8 +52,10 @@ typedef enum {
 
 
 typedef enum {
+	If_If,
+	If_IfDef,
+	If_IfnDef,
 	If_Else,
-	If_ElseIf,
 	If_End,
 } IfClass;
 
@@ -138,6 +140,7 @@ enum Directive {
 	Directive_Else,
 	Directive_Elif,
 	Directive_Elifdef,
+	Directive_Elifndef,
 	Directive_Endif,
 
 	Directive_Error,
@@ -156,6 +159,7 @@ Keyword preproc_directives[] = {
 	{"else", Directive_Else},
 	{"elif", Directive_Elif},
 	{"elifdef", Directive_Elifdef},
+	{"elifndef", Directive_Elifndef},
 	{"endif", Directive_Endif},
 
 	{"pragma", Directive_Pragma},
@@ -457,6 +461,10 @@ static Token getToken (Arena *str_arena, SourceFile source, Location *loc, Symbo
 						tok.literal_type = Int_longlong;
 					}
 				}
+				if (pos[0] == 'u' || pos[0] == 'U') {
+					is_unsigned = true;
+					pos++;
+				}
 				// FIXME Use platform-correct integer sizes.
 				if (is_unsigned) {
 					if (tok.literal_type == Int_int && tok.val.integer_s > UINT32_MAX)
@@ -525,8 +533,8 @@ typedef struct ExpansionParams {
 	SymbolList *symbols;
 
 	SourceFile source;
-	Location expansion_loc;
-	Location *source_loc;
+	Location expansion_start;
+	Location *loc;
 	const char **src;
 } ExpansionParams;
 
@@ -538,11 +546,12 @@ static void ensureCapacity (Tokenization *t, u32 required);
 static void appendOneToken(Tokenization *t, Token tok, TokenLocation pos);
 static String restOfLine (SourceFile source, Location *, const char **pos);
 static SpaceClass tryGobbleSpace(SourceFile source, Location *, const char **p);
+static void skipToValidBranchOrEnd(ExpansionParams, IfClass, u32 *depth, const char **p, Tokenization *eval_buf);
 static void skipToEndIf(SourceFile source, Location *, const char **p);
 static IfClass skipToElseIfOrEnd(SourceFile source, Location *, const char **p);
 static Token getTokenSpaced(Arena *, SourceFile, Location *, SymbolList *, const char **p);
 static bool gobbleSpaceToNewline(const char **p, Location *loc);
-static bool evalPreprocExpression(ExpansionParams, Tokenization *, Location *);
+static bool evalPreprocExpression(ExpansionParams, Tokenization *);
 static const char *defineMacro(Arena *arena, Arena *generated_strings, SymbolList *, String name, SourceFile, Location *loc, const char *pos);
 static void predefineMacros(Arena *arena, Arena *genrated_strings, SymbolList *, FileList *, StringList to_define, SourceKind);
 static bool tokenHasSymbol(TokenKind k);
@@ -560,6 +569,7 @@ Tokenization lex (Arena *generated_strings, String filename, LexParams paths) {
 	LIST(Inclusion) includes_stack = {0};
 	Tokenization prepreoc_evaluation_buf = {0};
 	MacroStack macro_expansion_stack = {0};
+	u32 if_depth = 0;
 
 	for (u32 i = 0; i < ARRSIZE(standard_keywords); i++)
 		getSymbol(&t.symbols, zstr(standard_keywords[i].name))->keyword = standard_keywords[i].key;
@@ -591,6 +601,7 @@ Tokenization lex (Arena *generated_strings, String filename, LexParams paths) {
 		.stack = &macro_expansion_stack,
 		.strings_arena = generated_strings,
 		.symbols = &t.symbols,
+		.loc = &loc,
 		.src = &pos,
 	};
 	bool first_line_in_file = true;
@@ -725,41 +736,31 @@ Tokenization lex (Arena *generated_strings, String filename, LexParams paths) {
 			} break;
 			case Directive_If: {
 				expansion.source = source;
-				expansion.expansion_loc = begin;
-				expansion.source_loc = &loc;
-				while (!evalPreprocExpression(expansion, &prepreoc_evaluation_buf, &loc) &&
-					skipToElseIfOrEnd(source, &loc, &pos) == If_ElseIf);
+				expansion.expansion_start = begin;
 
+				skipToValidBranchOrEnd(expansion, If_If, &if_depth, &pos, &prepreoc_evaluation_buf);
 			} break;
 			case Directive_Ifdef:
 			case Directive_Ifndef: {
-				bool required = dir == Directive_Ifdef;
-				tok = getTokenSpaced(generated_strings, source, &loc, &t.symbols, &pos);
-				if (tok.kind != Tok_Identifier)
-					lexerror(source, loc, "#ifdef must be followed by an identifier");
+				expansion.source = source;
+				expansion.expansion_start = begin;
 
-
-				bool got = t.symbols.ptr[tok.val.symbol_idx].macro;
-				if (got != required) {
-					if (tryGobbleSpace(source, &loc, &pos) != Space_Linebreak)
-						lexerror(source, loc, "#ifdef may not be followed by more than one identifier");
-
-					expansion.source = source;
-					expansion.expansion_loc = begin;
-					expansion.source_loc = &loc;
-					while (skipToElseIfOrEnd(source, &loc, &pos) == If_ElseIf &&
-						!evalPreprocExpression(expansion, &prepreoc_evaluation_buf, &loc));
-
-				}
-
+				IfClass class = dir == Directive_Ifdef ? If_IfDef : If_IfnDef;
+				skipToValidBranchOrEnd(expansion, class, &if_depth, &pos, &prepreoc_evaluation_buf);
 			} break;
 			case Directive_Else:
+			case Directive_Elifdef:
+			case Directive_Elifndef:
 			case Directive_Elif: {
-				// TODO Check correct nesting
+				if (if_depth == 0)
+					lexerror(source, begin, "unmatched #else");
+				if_depth--;
 				skipToEndIf(source, &loc, &pos);
 			} break;
 			case Directive_Endif: {
-				// TODO Check correct nesting
+				if (if_depth == 0)
+					lexerror(source, begin, "unmatched #endif");
+				if_depth--;
 			} break;
 			case Directive_Error: {
 				Location start = loc;
@@ -790,8 +791,7 @@ Tokenization lex (Arena *generated_strings, String filename, LexParams paths) {
 			if (macro) {
 				Tokenization *arguments = NULL;
 				expansion.source = source;
-				expansion.expansion_loc = begin;
-				expansion.source_loc = &loc;
+				expansion.expansion_start = begin;
 
 				if (macro->is_function_like) {
 					Token paren = getTokenSpaced(generated_strings, source, &loc, &t.symbols, &pos);
@@ -895,10 +895,10 @@ static bool expandInto (const ExpansionParams ex, Tokenization *dest, bool is_ar
 				MacroToken paren = takeToken(ex, &level_of_argument_source);
 				if (paren.tok.kind != Tok_OpenParen) {
 					appendOneToken(dest, t.tok, (TokenLocation) {
-						.source = t.loc, .macro = ex.expansion_loc,
+						.source = t.loc, .macro = ex.expansion_start,
 					});
 					appendOneToken(dest, paren.tok, (TokenLocation) {
-						.source = paren.loc, .macro = ex.expansion_loc,
+						.source = paren.loc, .macro = ex.expansion_start,
 					});
 					collapseMacroStack(ex.stack, &level_of_argument_source);
 					continue;
@@ -933,7 +933,7 @@ static bool expandInto (const ExpansionParams ex, Tokenization *dest, bool is_ar
 			collapseMacroStack(ex.stack, &level_of_argument_source);
 			appendOneToken(dest, t.tok, (TokenLocation) {
 				.source = t.loc,
-				.macro = ex.expansion_loc,
+				.macro = ex.expansion_start,
 			});
 		}
 	}
@@ -967,7 +967,7 @@ static Tokenization *takeArguments(const ExpansionParams ex, Macro *mac) {
 			if (param_idx + 1 == expected_count || (mac->is_vararg && param_idx + 2 >= expected_count)) {
 				break;
 			} else {
-				lexerror(ex.source, *ex.source_loc,
+				lexerror(ex.source, *ex.loc,
 						"too few arguments provided"); // TODO Better location
 			}
 		} else {
@@ -978,7 +978,7 @@ static Tokenization *takeArguments(const ExpansionParams ex, Macro *mac) {
 					// TODO Fill out preceded_by_space etc.
 					appendOneToken(&argument_bufs[param_idx], (Token) {.kind = Tok_Comma, }, (TokenLocation) {0});
 				} else {
-					lexerror(ex.source, *ex.source_loc,
+					lexerror(ex.source, *ex.loc,
 							"too many arguments provided"); // TODO Better location
 				}
 			}
@@ -1012,7 +1012,7 @@ static MacroToken takeToken (const ExpansionParams ex, u32 *marker) {
 			if (t.parameter) {
 				if (t.tok.kind == Tok_PreprocDirective) {
 					if (followed_by_concat)
-						lexerror(ex.source, *ex.source_loc, "(TODO location, phrasing) stringified parameter can not followed by concatenation");
+						lexerror(ex.source, *ex.loc, "(TODO location, phrasing) stringified parameter can not followed by concatenation");
 					Tokenization arg = repl->toks[t.parameter-1];
 					t.tok = stringify(ex.strings_arena, ex.symbols, arg);
 					return t;
@@ -1047,7 +1047,7 @@ static MacroToken takeToken (const ExpansionParams ex, u32 *marker) {
 					} else if (t.tok.kind == Tok_Key_Line) {
 						t.tok.kind = Tok_Integer;
 						t.tok.literal_type = Int_int;
-						t.tok.val.integer_s = ex.expansion_loc.line;
+						t.tok.val.integer_s = ex.expansion_start.line;
 					}
 					return t;
 				}
@@ -1067,9 +1067,9 @@ static MacroToken takeToken (const ExpansionParams ex, u32 *marker) {
 		collapseMacroStack(stack, marker);
 	}
 
-	bool have_space = tryGobbleSpace(ex.source, ex.source_loc, ex.src);
-	Location token_loc = *ex.source_loc;
-	Token t = getToken(ex.strings_arena, ex.source, ex.source_loc, ex.symbols, ex.src);
+	bool have_space = tryGobbleSpace(ex.source, ex.loc, ex.src);
+	Location token_loc = *ex.loc;
+	Token t = getToken(ex.strings_arena, ex.source, ex.loc, ex.symbols, ex.src);
 	t.preceded_by_space = have_space;
 	return (MacroToken) {
 		.tok = t,
@@ -1122,7 +1122,7 @@ static MacroToken concatenate (const ExpansionParams ex, Token first, u32 *marke
 	*insert = 0;
 
 	const char *src = rep;
-	operator.tok = getToken(ex.strings_arena, ex.source, ex.source_loc, ex.symbols, &src);
+	operator.tok = getToken(ex.strings_arena, ex.source, ex.loc, ex.symbols, &src);
 	return operator;
 }
 
@@ -1306,6 +1306,53 @@ static void skipToEndIf (SourceFile source, Location *loc, const char **p) {
 // 	loc->column += pos - line_begin;
 }
 
+static void skipToValidBranchOrEnd (
+	ExpansionParams ex,
+	IfClass class,
+	u32 *depth,
+	const char **p,
+	Tokenization *eval_buf)
+{
+	(*depth)++;
+	while (true) {
+		switch (class) {
+		case If_If:
+			if (evalPreprocExpression(ex, eval_buf))
+				return;
+			break;
+		case If_IfDef: {
+			Token tok = getTokenSpaced(ex.strings_arena, ex.source, ex.loc, ex.symbols, p);
+			if (tok.kind != Tok_Identifier)
+				lexerror(ex.source, *ex.loc, "#ifdef must be followed by an identifier");
+
+			gobbleSpaceToNewline(ex.src, ex.loc);
+			if (**ex.src != '\n')
+				lexerror(ex.source, *ex.loc, "#ifdef may not be followed by more than one identifier");
+
+			if (ex.symbols->ptr[tok.val.symbol_idx].macro)
+				return;
+		} break;
+		case If_IfnDef: {
+			Token tok = getTokenSpaced(ex.strings_arena, ex.source, ex.loc, ex.symbols, p);
+			if (tok.kind != Tok_Identifier)
+				lexerror(ex.source, *ex.loc, "#ifndef must be followed by an identifier");
+			gobbleSpaceToNewline(ex.src, ex.loc);
+			if (**ex.src != '\n')
+				lexerror(ex.source, *ex.loc, "#ifndef may not be followed by more than one identifier");
+
+			if (ex.symbols->ptr[tok.val.symbol_idx].macro == NULL)
+				return;
+		} break;
+		case If_Else:
+			return;
+		case If_End:
+			(*depth)--;
+			return;
+		}
+		class = skipToElseIfOrEnd(ex.source, ex.loc, p);
+	}
+}
+
 static IfClass skipToElseIfOrEnd (SourceFile source, Location *loc, const char **p) {
 	const char *pos = *p;
 
@@ -1319,22 +1366,24 @@ static IfClass skipToElseIfOrEnd (SourceFile source, Location *loc, const char *
 			line_begin = pos + 1;
 		} else if (*pos == '#' && at_start_of_line) {
 			pos++;
-			while (isSpace(*pos)) {
-				if (*pos == '\n') {
-					newLine(loc);
-					line_begin = pos + 1;
-				}
-				pos++;
-			}
+			while (isSpace(*pos) && *pos != '\n') pos++;
+
 			const char *begin = pos;
 			while (*pos && !isSpace(*pos)) pos++;
 			String directive = {pos - begin, begin};
-			if (eql("if", directive) || eql("ifdef", directive)) {
-				loc->column += pos - line_begin;
-				line_begin = pos;
+			if (eql("if", directive) || eql("ifdef", directive) || eql("ifndef", directive)) {
+				while (*pos && pos[-1] != '\n') pos++;
+				loc->line++;
 				skipToEndIf(source, loc, &pos);
+				line_begin = pos;
 			} else if (eql("elif", directive)) {
-				result = If_ElseIf;
+				result = If_If;
+				break;
+			} else if (eql("elifdef", directive)) {
+				result = If_IfDef;
+				break;
+			} else if (eql("elifndef", directive)) {
+				result = If_IfnDef;
 				break;
 			} else if (eql("else", directive)) {
 				// TODO Check that the line ends after the directive.
@@ -1522,40 +1571,40 @@ static u64 parseCore(ConstParse *parse) {
 	}
 }
 
-static bool evalPreprocExpression(ExpansionParams params, Tokenization *buf, Location *loc) {
+static bool evalPreprocExpression(ExpansionParams params, Tokenization *buf) {
 	const char *pos = *params.src;
 	Arena *const str_arena = params.strings_arena;
 	buf->count = 0;
 
 	while (true) {
-		gobbleSpaceToNewline(&pos, loc);
+		gobbleSpaceToNewline(&pos, params.loc);
 		if (*pos == '\n' || *pos == 0)
 			break;
-		Location begin = *loc;
-		Token tok = getToken(str_arena, params.source, loc, params.symbols, &pos);
+		Location begin = *params.loc;
+		Token tok = getToken(str_arena, params.source, params.loc, params.symbols, &pos);
 		if (tok.kind == Tok_Identifier) {
 			Symbol *sym = &params.symbols->ptr[tok.val.symbol_idx];
 			if (eql("defined", sym->name)) {
-				tok = getTokenSpaced(str_arena, params.source, loc, params.symbols, &pos);
+				tok = getTokenSpaced(str_arena, params.source, params.loc, params.symbols, &pos);
 				bool parenthesized = tok.kind == Tok_OpenParen;
 				if (parenthesized)
-					tok = getTokenSpaced(str_arena, params.source, loc, params.symbols, &pos);
+					tok = getTokenSpaced(str_arena, params.source, params.loc, params.symbols, &pos);
 
 				if (tok.kind != Tok_Identifier)
-					lexerror(params.source, *loc, "the operator %sdefined%s expects an identifier as an argument", BOLD, RESET);
+					lexerror(params.source, *params.loc, "the operator %sdefined%s expects an identifier as an argument", BOLD, RESET);
 
 				bool found = params.symbols->ptr[tok.val.symbol_idx].macro;
 				tok = (Token) {Tok_Integer, .literal_type = Int_int, .val.integer_s = found};
 
 				if (parenthesized) {
-					gobbleSpaceToNewline(&pos, loc);
-					if (*pos == '\n' || *pos == 0 || getToken(str_arena, params.source, loc, params.symbols, &pos).kind != Tok_CloseParen)
-						lexerror(params.source, *loc, "missing closing parenthesis");
+					gobbleSpaceToNewline(&pos, params.loc);
+					if (*pos == '\n' || *pos == 0 || getToken(str_arena, params.source, params.loc, params.symbols, &pos).kind != Tok_CloseParen)
+						lexerror(params.source, *params.loc, "missing closing parenthesis");
 				}
 			} else {
 				if (sym->macro) {
 					if (sym->macro->parameters.len > 0)
-						lexerror(params.source, *loc, "TODO Expand function-like macros in preprocessor constant expressions");
+						lexerror(params.source, *params.loc, "TODO Expand function-like macros in preprocessor constant expressions");
 					PUSH(*params.stack, ((Replacement) {sym->macro}));
 					expandInto(params, buf, false);
 					continue;
@@ -1565,7 +1614,7 @@ static bool evalPreprocExpression(ExpansionParams params, Tokenization *buf, Loc
 		appendOneToken(buf, tok, (TokenLocation) {begin});
 	}
 	*params.src = pos;
-	appendOneToken(buf, (Token) {Tok_EOF}, (TokenLocation) {*loc});
+	appendOneToken(buf, (Token) {Tok_EOF}, (TokenLocation) {*params.loc});
 
 	ConstParse parse = {params.source, buf, buf->tokens};
 	u64 res = parseOr(&parse);
@@ -1935,11 +1984,6 @@ static Symbol *getSymbol (SymbolList *list, String name) {
 
 static u32 getSymbolId (SymbolList *list, String name) {
 	u64 hash = strHash(name);
-
-	if (eql("int", name)) {
-		int x = 2;
-		(void) x;
-	}
 
 	if ((u32) hash == 0) hash = 1073741824; // 2^30, lel
 	u32 searched = hash;
