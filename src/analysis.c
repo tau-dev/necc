@@ -10,7 +10,7 @@ should be moved into a separate file at some point).
 
 */
 
-#define ON_OPERANDS_AND_ORDER(inst, operand_var, operation, ordering_operation)	\
+#define ON_OPERANDS_AND_ORDER(ir, inst, operand_var, operation, ordering_operation)	\
 	do {	\
 		IrRef *operand_var;	\
 		switch ((InstKind) (inst).kind) {	\
@@ -45,12 +45,11 @@ should be moved into a separate file at some point).
 			break;	\
 		case Ir_Call:	\
 			operand_var = &(inst).call.ordered_after; ordering_operation;	\
-	\
 			operand_var = &(inst).call.function_ptr; operation;	\
 	\
-			ValuesSpan EXPANSION_params = (inst).call.parameters;	\
-			for (u32 p = 0; p < EXPANSION_params.len; p++) {	\
-				operand_var = &EXPANSION_params.ptr[p]; operation;	\
+			Call EXPANSION_call = AUX_DATA(Call, (ir), (inst).call.data);	\
+			for (u32 p = 0; p < EXPANSION_call.arguments.len; p++) {	\
+				operand_var = &EXPANSION_call.arguments.ptr[p]; operation;	\
 			}	\
 			break;	\
 		ZEROOP_CASES:	\
@@ -75,13 +74,13 @@ should be moved into a separate file at some point).
 
 
 static IrRef copyUsed (const IrList *source, IrRef i, IrList *dest, IrRef *relocs) {
-	if (relocs[i] != IR_REF_NONE) return relocs[i];
+	if (relocs[i] != IDX_NONE) return relocs[i];
 
 	Inst inst = source->ptr[i];
 
 	// This needs absence of cycles.
-	ON_OPERANDS_AND_ORDER(inst, op, copyUsed(source, *op, dest, relocs),
-		if (*op != IR_REF_NONE) copyUsed(source, *op, dest, relocs));
+	ON_OPERANDS_AND_ORDER(*source, inst, op, copyUsed(source, *op, dest, relocs),
+		if (*op != IDX_NONE) copyUsed(source, *op, dest, relocs));
 
 	IrRef new = dest->len++;
 	dest->ptr[new] = inst;
@@ -95,14 +94,14 @@ static IrRef copyUsed (const IrList *source, IrRef i, IrList *dest, IrRef *reloc
 static void applyRelocs (IrList ir, IrRef i, IrRef *relocs) {
 	Inst *inst = &ir.ptr[i];
 	if (inst->kind == Ir_PhiOut) {
-		if (inst->phi_out.on_true != IR_REF_NONE)
+		if (inst->phi_out.on_true != IDX_NONE)
 			inst->phi_out.on_true = relocs[inst->phi_out.on_true];
-		if (inst->phi_out.on_false != IR_REF_NONE)
+		if (inst->phi_out.on_false != IDX_NONE)
 			inst->phi_out.on_false = relocs[inst->phi_out.on_false];
 	}
 
-	ON_OPERANDS_AND_ORDER(*inst, op, *op = relocs[*op],
-		if (*op != IR_REF_NONE) *op = relocs[*op]);
+	ON_OPERANDS_AND_ORDER(ir, *inst, op, *op = relocs[*op],
+		if (*op != IDX_NONE) *op = relocs[*op]);
 }
 
 void decimateIr (IrList *ir, Blocks blocks) {
@@ -112,11 +111,12 @@ void decimateIr (IrList *ir, Blocks blocks) {
 		.locations = calloc(ir->len, sizeof(*ir->locations)),
 		.capacity = ir->len,
 
+		.aux_data = ir->aux_data,
 		.params = ir->params,
 		.entry = ir->entry
 	};
 
-	for (u32 i = 0; i < ir->len; i++) relocs[i] = IR_REF_NONE;
+	for (u32 i = 0; i < ir->len; i++) relocs[i] = IDX_NONE;
 
 	for (u32 i = 0; i < blocks.len; i++) {
 		Block *blk = blocks.ptr[i];
@@ -129,9 +129,9 @@ void decimateIr (IrList *ir, Blocks blocks) {
 
 		u32 dest_idx = 0;
 		for (u32 j = 0; j < mems.len; j++) {
-			assert(mems.ptr[j] != IR_REF_NONE);
+			assert(mems.ptr[j] != IDX_NONE);
 
-			if (relocs[mems.ptr[j]] != IR_REF_NONE) {
+			if (relocs[mems.ptr[j]] != IDX_NONE) {
 				mems.ptr[dest_idx] = relocs[mems.ptr[j]];
 				dest_idx++;
 			}
@@ -143,7 +143,7 @@ void decimateIr (IrList *ir, Blocks blocks) {
 			blk->exit.branch.condition = copyUsed(ir, blk->exit.branch.condition, &out, relocs);
 			break;
 		case Exit_Return:
-			if (blk->exit.ret != IR_REF_NONE)
+			if (blk->exit.ret != IDX_NONE)
 				blk->exit.ret = copyUsed(ir, blk->exit.ret, &out, relocs);
 			break;
 		case Exit_Switch:
@@ -170,7 +170,7 @@ void calcLifetimes (IrList ir, ValuesSpan lastuses) {
 	memset(uses, 0, sizeof(IrRef) * lastuses.len);
 	for (u32 i = 0; i < ir.len; i++) {
 		Inst inst = ir.ptr[i];
-		ON_OPERANDS_AND_ORDER(inst, op, uses[*op] = i, (void) 0);
+		ON_OPERANDS_AND_ORDER(ir, inst, op, uses[*op] = i, (void) 0);
 	}
 }
 
@@ -219,7 +219,7 @@ void calcUsage (IrList ir, u16 *usage) {
 
 	for (u32 i = 0; i < ir.len; i++) {
 		Inst inst = ir.ptr[i];
-		ON_OPERANDS_AND_ORDER(inst, op, usage[*op]++, (void) 0);
+		ON_OPERANDS_AND_ORDER(ir, inst, op, usage[*op]++, (void) 0);
 	}
 }
 
@@ -251,7 +251,7 @@ void arithSimplify (IrList ir, u16 *uses) {
 						// negation can be elided.
 						rhs = ir.ptr[lhs.binop.rhs];
 						if (rhs.kind == Ir_Constant && rhs.constant == 0)
-							replaceWithCopy(ir, i, lhs.binop.lhs, IR_REF_NONE);
+							replaceWithCopy(ir, i, lhs.binop.lhs, IDX_NONE);
 					}
 					break;
 				default: break;
@@ -272,7 +272,7 @@ static void decopy (IrList ir, IrRef *ref) {
 }
 
 static void decopyOrder (IrList ir, IrRef *ref) {
-	while (*ref != IR_REF_NONE && ir.ptr[*ref].kind == Ir_Copy) {
+	while (*ref != IDX_NONE && ir.ptr[*ref].kind == Ir_Copy) {
 		assert(ir.ptr[*ref].binop.rhs != *ref);
 		*ref = ir.ptr[*ref].binop.rhs;
 	}
@@ -333,12 +333,12 @@ static void cleanUpCopyReplacements(IrList ir, Block *blk) {
 
 void resolveCopies (IrList ir, Blocks blocks) {
 	for (u32 i = 0; i < ir.len; i++) {
-		ON_OPERANDS_AND_ORDER(ir.ptr[i], op, decopy(ir, op), decopyOrder(ir, op));
+		ON_OPERANDS_AND_ORDER(ir, ir.ptr[i], op, decopy(ir, op), decopyOrder(ir, op));
 	}
 
 	for (u32 i = 0; i < blocks.len; i++) {
 		Block *blk = blocks.ptr[i];
-		if (blk->exit.kind == Exit_Return && blk->exit.ret != IR_REF_NONE)
+		if (blk->exit.kind == Exit_Return && blk->exit.ret != IDX_NONE)
 			decopy(ir, &blk->exit.ret);
 		else if (blk->exit.kind == Exit_Branch)
 			decopy(ir, &blk->exit.branch.condition);
@@ -363,7 +363,7 @@ void storeLoadPropagate (IrList ir, Blocks blocks) {
 			IrRef ref = mem.ptr[i];
 			Inst inst = insts[ref];
 
-			if (inst.kind == Ir_Load && inst.mem.ordered_after != IR_REF_NONE) {
+			if (inst.kind == Ir_Load && inst.mem.ordered_after != IDX_NONE) {
 				Inst store = insts[inst.mem.ordered_after];
 				if (store.kind == Ir_Store && store.mem.address == inst.mem.address)
 					replaceWithCopy(ir, ref, store.mem.source, store.mem.ordered_after);
@@ -432,7 +432,7 @@ void innerBlockPropagate (IrList ir, Blocks blocks) {
 			Inst inst = insts[ref];
 
 			if (inst.kind == Ir_Load || inst.kind == Ir_Store) {
-				while (inst.mem.ordered_after != IR_REF_NONE) {
+				while (inst.mem.ordered_after != IDX_NONE) {
 					Inst prev = insts[inst.mem.ordered_after];
 					Alias a = canAlias(ir, prev, inst.mem.address);
 					if (a == Alias_Never) {

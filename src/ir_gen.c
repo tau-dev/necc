@@ -31,10 +31,29 @@ static IrRef append (IrBuild *build, Inst inst) {
 	return list->len++;
 }
 
+
+static u32 pushAuxData(IrList *ir, const void *data, u32 len) {
+	ir->aux_data.len = (ir->aux_data.len + 7) / 8 * 8;
+
+	if (ir->aux_data.len + len >= ir->aux_data.capacity) {
+		ir->aux_data.capacity = (ir->aux_data.len + len) * 3 / 2 + 4;
+		ir->aux_data.ptr = realloc(ir->aux_data.ptr, sizeof(*ir->aux_data.ptr) * ir->aux_data.capacity);
+		if (ir->aux_data.ptr == NULL) {
+			puts("ERROR: Out of memory on list growth.");
+			exit(EXIT_FAILURE);
+		}
+	}
+	memcpy(ir->aux_data.ptr + ir->aux_data.len, data, len);
+	u32 res = ir->aux_data.len;
+	ir->aux_data.len += len;
+	return res;
+}
+
+
 static IrRef getPrevMemOp (IrBuild *build) {
 	IrRefList mems = build->insertion_block->mem_instructions;
 	if (mems.len == 0)
-		return IR_REF_NONE;
+		return IDX_NONE;
 	return mems.ptr[mems.len-1];
 }
 
@@ -43,8 +62,14 @@ IrRef genParameter (IrBuild *build, u32 param_id) {
 }
 
 IrRef genStackAllocFixed (IrBuild *build, u32 size) {
-	return append(build, (Inst) {Ir_StackAllocFixed, PTR_SIZE, .alloc = {size}});
+	return append(build, (Inst) {Ir_StackAllocFixed, PTR_SIZE, .alloc = {size, IDX_NONE}});
 }
+
+IrRef genStackAllocNamed(IrBuild *build, IrRef size, Declaration decl) {
+	u32 data = pushAuxData(&build->ir, &decl, sizeof decl);
+	return append(build, (Inst) {Ir_StackAllocFixed, PTR_SIZE, .alloc = {size, data}});
+}
+
 IrRef genStackAllocVLA (IrBuild *build, IrRef size) {
 	return append(build, (Inst) {Ir_StackAllocVLA, PTR_SIZE, .alloc = {size}});
 }
@@ -93,7 +118,7 @@ Block *newBlock (IrBuild *build, String label) {
 	*new_block = (Block) {
 		.label = label,
 		.id = build->block_count++,
-		.last_store_op = IR_REF_NONE,
+		.last_store_op = IDX_NONE,
 	};
 	return new_block;
 }
@@ -213,7 +238,7 @@ static IrRef genBinOp (IrBuild *build, InstKind op, IrRef a, IrRef b, bool *over
 				break;
 			case Ir_Div:
 				if (constant == 0)
-					return IR_REF_NONE; // ???
+					return IDX_NONE; // ???
 				if (constant == 1)
 					return i.binop.lhs;
 				break;
@@ -444,12 +469,15 @@ IrRef genZeroExt (IrBuild *build, IrRef source, u16 target) {
 }
 
 IrRef genCall (IrBuild *build, IrRef func, ValuesSpan args, u16 size, bool is_vararg) {
-	IrRef call = append(build, (Inst) {Ir_Call, size, .call = {func, args, getPrevMemOp(build), is_vararg}});
-	build->insertion_block->last_store_op = call;
+	Call call = {args, is_vararg};
+	u32 data = pushAuxData(&build->ir, &call, sizeof call);
 
-	PUSH_A(build->block_arena, build->insertion_block->mem_instructions, call);
-	PUSH_A(build->block_arena, build->insertion_block->ordered_instructions, call);
-	return call;
+	IrRef inst = append(build, (Inst) {Ir_Call, size, .call = {func, getPrevMemOp(build), data}});
+	build->insertion_block->last_store_op = inst;
+
+	PUSH_A(build->block_arena, build->insertion_block->mem_instructions, inst);
+	PUSH_A(build->block_arena, build->insertion_block->ordered_instructions, inst);
+	return inst;
 }
 
 IrRef genGlobal (IrBuild *build, u32 id) {
@@ -491,7 +519,7 @@ IrRef genPhiIn (IrBuild *build, u16 size) {
 
 
 IrRef genPhiOut (IrBuild *build, IrRef source) {
-	u32 inst = append(build, (Inst) {Ir_PhiOut, build->ir.ptr[source].size, .phi_out = {source, IR_REF_NONE, IR_REF_NONE}});
+	u32 inst = append(build, (Inst) {Ir_PhiOut, build->ir.ptr[source].size, .phi_out = {source, IDX_NONE, IDX_NONE}});
 	PUSH_A(build->block_arena, build->insertion_block->ordered_instructions, inst);
 	return inst;
 }
@@ -524,6 +552,39 @@ void replaceWithCopy (IrList ir, IrRef original, IrRef replacement, IrRef ordere
 	ir.ptr[original].kind = Ir_Copy;
 	ir.ptr[original].binop.lhs = replacement;
 	ir.ptr[original].binop.rhs = ordered_after;
+}
+
+void genSetZero(IrBuild *build, IrRef address, u32 size, bool is_volatile) {
+	u32 zero8 = genImmediateInt(build, 0, I64);
+	u32 pos = 0;
+	while (pos + 8 <= size) {
+		u32 offset = genImmediateInt(build, pos, I64);
+		u32 dest = genAdd(build, address, offset);
+		genStore(build, dest, zero8, is_volatile);
+		pos += 8;
+	}
+	if (size - pos >= 4) {
+		u32 zero_rest = genImmediateInt(build, 0, 4);
+		u32 offset = genImmediateInt(build, pos, I64);
+		u32 dest = genAdd(build, address, offset);
+		genStore(build, dest, zero_rest, is_volatile);
+		pos += 4;
+	}
+	if (size - pos >= 2) {
+		u32 zero_rest = genImmediateInt(build, 0, 2);
+		u32 offset = genImmediateInt(build, pos, I64);
+		u32 dest = genAdd(build, address, offset);
+		genStore(build, dest, zero_rest, is_volatile);
+		pos += 2;
+	}
+
+	if (size - pos >= 1) {
+		assert(size - pos == 1);
+		u32 zero_rest = genImmediateInt(build, 0, 1);
+		u32 offset = genImmediateInt(build, pos, I64);
+		u32 dest = genAdd(build, address, offset);
+		genStore(build, dest, zero_rest, is_volatile);
+	}
 }
 
 
@@ -584,7 +645,7 @@ void emitIr (EmitParams params) {
 typedef unsigned long ulong;
 typedef unsigned int uint;
 static void printOrder (FILE *out, IrRef r) {
-	if (r != IR_REF_NONE)
+	if (r != IDX_NONE)
 		fprintf(out, " after %lu", (ulong) r);
 	fprintf(out, "\n");
 }
@@ -619,20 +680,21 @@ void printBlock (FILE *dest, Block *blk, IrList ir) {
 			continue;
 		case Ir_Call: {
 			fprintf(dest, "call %lu (", (ulong) inst.call.function_ptr);
-			ValuesSpan params = inst.call.parameters;
-			for (u32 i = 0; i < params.len; i++) {
-				fprintf(dest, "%lu", (ulong) params.ptr[i]);
-				if (i + 1 < params.len)
+
+			Call call = AUX_DATA(Call, ir, inst.call.data);
+			for (u32 i = 0; i < call.arguments.len; i++) {
+				fprintf(dest, "%lu", (ulong) call.arguments.ptr[i]);
+				if (i + 1 < call.arguments.len)
 					fprintf(dest, ", ");
 			}
 			fprintf(dest, ")");
-			printOrder(dest, inst.mem.ordered_after);
+			printOrder(dest, inst.call.ordered_after);
 		} continue;
 		case Ir_PhiOut:
 			fprintf(dest, "phi %lu", (ulong) inst.phi_out.source);
-			if (inst.phi_out.on_true != IR_REF_NONE)
+			if (inst.phi_out.on_true != IDX_NONE)
 				fprintf(dest, " true->%lu", (ulong) inst.phi_out.on_true);
-			if (inst.phi_out.on_false != IR_REF_NONE)
+			if (inst.phi_out.on_false != IDX_NONE)
 				fprintf(dest, " false->%lu", (ulong) inst.phi_out.on_false);
 			fprintf(dest, "\n");
 			continue;
@@ -733,7 +795,7 @@ void printBlock (FILE *dest, Block *blk, IrList ir) {
 		printBlock(dest, exit.branch.on_false, ir);
 		break;
 	case Exit_Return:
-		if (exit.ret == IR_REF_NONE)
+		if (exit.ret == IDX_NONE)
 			fprintf(dest, "       ret\n");
 		else
 			fprintf(dest, "       ret %lu\n", (ulong) exit.ret);

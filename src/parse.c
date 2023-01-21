@@ -22,7 +22,7 @@ Parses and typechecks tokens into IR in a single pass.
 
 static Type chartype = {Kind_Basic, .basic = Int_char};
 static Type const_chartype = {Kind_Basic, .qualifiers = Qualifier_Const, .basic = Int_char};
-static Value no_value = { .inst = IR_REF_NONE };
+static Value no_value = { .inst = IDX_NONE };
 
 
 typedef LIST(Symbol*) Scope;
@@ -230,7 +230,7 @@ void parse (Arena *code_arena, Tokenization tokens, Options *opt, Module *module
 			bool object_def = decl.type.kind != Kind_Function && parse.pos->kind == Tok_Equals;
 
 			OrdinaryIdentifier *ord = define(&parse, decl, storage, type_token, primary,
-					function_def || object_def ? parse.pos : NULL, IR_REF_NONE);
+					function_def || object_def ? parse.pos : NULL, IDX_NONE);
 
 
 			if (function_def) {
@@ -397,7 +397,7 @@ void parseFunction (Parse *parse, Symbol *symbol, Symbol *func_sym) {
 		.def_kind = Static_Variable,
 		.def_state = Def_Defined,
 		.value_data = {name.len+1, terminated},
-		.parent_decl = IR_REF_NONE,
+		.parent_decl = IDX_NONE,
 	}));
 
 	bool is_new;
@@ -411,7 +411,9 @@ void parseFunction (Parse *parse, Symbol *symbol, Symbol *func_sym) {
 	for (u32 i = 0; i < param_count; i++) {
 		Declaration param = parse->current_func_type.parameters.ptr[i];
 
-		IrRef slot = genStackAllocFixed(build, typeSize(param.type, &parse->target));
+		// TODO Omit declaration data if not generating debug info.
+		IrRef slot = genStackAllocNamed(build, typeSize(param.type, &parse->target), param);
+
 		build->ir.params.ptr[i].size = typeSize(param.type, &parse->target);
 		IrRef paramval = genParameter(build, i);
 		genStore(build, slot, paramval, false);
@@ -429,7 +431,7 @@ void parseFunction (Parse *parse, Symbol *symbol, Symbol *func_sym) {
 	if (is_main) {
 		genReturnVal(build, genImmediateInt(build, 0, typeSize(*func_type.rettype, &parse->target)));
 	} else {
-		genReturnVal(build, IR_REF_NONE);
+		genReturnVal(build, IDX_NONE);
 	}
 
 	popScope(parse, enclosing);
@@ -545,7 +547,7 @@ static void parseStatement (Parse *parse, bool *had_non_declaration) {
 		parse->pos++;
 		// TODO Check against function return type
 		if (tryEat(parse, Tok_Semicolon)) {
-			genReturnVal(build, IR_REF_NONE);
+			genReturnVal(build, IDX_NONE);
 		} else {
 			IrRef val = coerce(parseExpression(parse),
 					*parse->current_func_type.rettype,
@@ -786,7 +788,7 @@ static void parseStatement (Parse *parse, bool *had_non_declaration) {
 					definer, parse->current_func_id);
 
 			if (ord->kind == Sym_Value_Auto) {
-				ord->value = (Value) {decl.type, genStackAllocFixed(build, typeSize(decl.type, &parse->target)), Ref_LValue};
+				ord->value = (Value) {decl.type, genStackAllocNamed(build, typeSize(decl.type, &parse->target), decl), Ref_LValue};
 				if (definer)
 					initializeAutoDefinition(parse, ord, decl.type, definer);
 			} else {
@@ -794,7 +796,7 @@ static void parseStatement (Parse *parse, bool *had_non_declaration) {
 					initializeStaticDefinition(parse, ord, decl.type, definer);
 			}
 
-			if (!definer && decl.type.kind == Kind_VLArray && decl.type.array.count == IR_REF_NONE)
+			if (!definer && decl.type.kind == Kind_VLArray && decl.type.array.count == IDX_NONE)
 				parseerror(parse, decl_token, "cannot infer size of array without initializer");
 		} while (tryEat(parse, Tok_Comma));
 
@@ -950,8 +952,8 @@ static Value parseExprElvis (Parse *parse) {
 		genJump(build, join);
 
 		IrRef dest = genPhiIn(build, typeSize(common, &parse->target));
-		setPhiOut(build, src_l, dest, IR_REF_NONE);
-		setPhiOut(build, src_r, dest, IR_REF_NONE);
+		setPhiOut(build, src_l, dest, IDX_NONE);
+		setPhiOut(build, src_r, dest, IDX_NONE);
 		cond = (Value) {common, dest};
 	}
 	return cond;
@@ -989,8 +991,8 @@ static Value parseExprOr (Parse *parse) {
 		head->exit.branch.on_true = join;
 		IrRef res = genPhiIn(build, int_size);
 
-		setPhiOut(build, constant, res, IR_REF_NONE);
-		setPhiOut(build, rhs_val, res, IR_REF_NONE);
+		setPhiOut(build, constant, res, IDX_NONE);
+		setPhiOut(build, rhs_val, res, IDX_NONE);
 		lhs = (Value) {BASIC_INT, res};
 	}
 	return lhs;
@@ -1029,8 +1031,8 @@ static Value parseExprAnd (Parse *parse) {
 		head->exit.branch.on_false = join;
 		IrRef res = genPhiIn(build, int_size);
 
-		setPhiOut(build, constant, IR_REF_NONE, res);
-		setPhiOut(build, rhs_val, res, IR_REF_NONE);
+		setPhiOut(build, constant, IDX_NONE, res);
+		setPhiOut(build, rhs_val, res, IDX_NONE);
 		lhs = (Value) {BASIC_INT, res};
 	}
 	return lhs;
@@ -1637,11 +1639,12 @@ static Attributes parseAttributes (Parse *parse) {
 
 static void initializeAutoDefinition (Parse *parse, OrdinaryIdentifier *ord, Type type, const Token *init_token) {
 	assert(ord->kind == Sym_Value_Auto);
+	IrBuild *build = &parse->build;
 	InitializationDest dest = { .address = ord->value.inst };
 
 	if (type.kind == Kind_VLArray) {
-		if (type.array.count == IR_REF_NONE) {
-			IrBuild *build = &parse->build;
+		// TODOZero-initialize non-covered members.
+		if (type.array.count == IDX_NONE) {
 			u32 *size_constant = &build->ir.ptr[dest.address].alloc.size;
 			type = *type.array.inner;
 
@@ -1692,6 +1695,8 @@ static void initializeAutoDefinition (Parse *parse, OrdinaryIdentifier *ord, Typ
 	if (typeSize(type, &parse->target) == 0)
 		parseerror(parse, init_token, "cannot initialize incomplete type %s", printTypeHighlighted(&parse->arena, type));
 
+	// PERFORMANCE This could generate significant load on the memory optimizer.
+	genSetZero(build, dest.address, typeSize(type, &parse->target), false);
 	parseInitializer(parse, dest, 0, type);
 }
 
@@ -1703,7 +1708,7 @@ static void initializeStaticDefinition (Parse *parse, OrdinaryIdentifier *ord, T
 	InitializationDest dest = { .reloc_references = &refs };
 
 	if (type.kind == Kind_VLArray) {
-		if (type.array.count == IR_REF_NONE) {
+		if (type.array.count == IDX_NONE) {
 			static_val->type.kind = Kind_Array;
 			if (parse->pos->kind == Tok_String) {
 				// TODO Type checking
@@ -1815,7 +1820,7 @@ static Value parseIntrinsic (Parse *parse, Intrinsic i) {
 			parseerror(parse, first, "va_start expects an lvalue");
 		if (v.typ.kind != Kind_Array || v.typ.array.inner->kind != Kind_Basic)
 			parseerror(parse, first, "va_start expects a va_list, not a %s", printTypeHighlighted(&parse->arena, v.typ));
-		genVaStart(build, v.inst, IR_REF_NONE /*ignored*/);
+		genVaStart(build, v.inst, IDX_NONE /*ignored*/);
 
 		return (Value){ BASIC_VOID };
 	}
@@ -1862,7 +1867,7 @@ static void maybeBracedInitializer (Parse *parse, InitializationDest dest, u32 o
 			|| type.kind == Kind_Union || type.kind == Kind_Union_Named
 			|| type.kind == Kind_Array || type.kind == Kind_VLArray);
 
-	if (current_value.inst == IR_REF_NONE) {
+	if (current_value.inst == IDX_NONE) {
 		if (tryEat(parse, Tok_OpenBrace)) {
 			u64 member_idx = 0;
 			if (tryEat(parse, Tok_CloseBrace)) {
@@ -1972,7 +1977,7 @@ static u64 parseSubInitializer (Parse *parse, InitializationDest dest, u32 offse
 	}
 
 
-	if (first_value.inst != IR_REF_NONE) {
+	if (first_value.inst != IDX_NONE) {
 		assert(member_idx == 0);
 		if (is_array) {
 			maybeBracedInitializer(parse, dest, offset, *type.array.inner, first_value);
@@ -2125,7 +2130,7 @@ static Type parseTypeBase (Parse *parse, u8 *storage) {
 	Type type;
 	if (!tryParseTypeBase(parse, &type, storage)) {
 		if (parse->pos->kind == Tok_Identifier) {
-			requires(parse, "default types of int", Features_DefaultInt);
+			requires(parse, "expected a type name; default types of int", Features_DefaultInt);
 			if (storage)
 				*storage = Storage_Unspecified;
 			return BASIC_INT;
@@ -2829,7 +2834,7 @@ static Declaration parseDeclarator (Parse *parse, Type base_type, Namedness name
 				inner->array.count = 0;
 			} else if (parse->pos->kind == Tok_CloseBracket) {
 				inner->kind = Kind_VLArray;
-				inner->array.count = IR_REF_NONE;
+				inner->array.count = IDX_NONE;
 			} else {
 				u64 count;
 				Value count_val = parseExprAssignment(parse);
@@ -2900,7 +2905,7 @@ static Linkage linkage(Parse *parse, OrdinaryIdentifier *id) {
 	if (id->kind != Sym_Value_Static)
 		return Link_None;
 	StaticValue *val = &parse->module->ptr[id->static_id];
-	if (val->parent_decl != IR_REF_NONE)
+	if (val->parent_decl != IDX_NONE)
 		return Link_None;
 	return val->is_public ? Link_External : Link_Internal;
 }
@@ -2933,7 +2938,7 @@ static void defGlobal (
 			.decl_location = decl_token,
 			.def_kind = decl.type.kind == Kind_Function ? Static_Function : Static_Variable,
 			.def_state = tentative ? Def_Tentative : Def_Undefined,
-			.parent_decl = IR_REF_NONE,
+			.parent_decl = IDX_NONE,
 		}));
 	}
 }
@@ -2947,7 +2952,7 @@ static OrdinaryIdentifier *define (
 	const Token *defining_token,
 	u32 parent_decl)
 {
-	bool file_scope = parent_decl == IR_REF_NONE;
+	bool file_scope = parent_decl == IDX_NONE;
 	bool msvc = parse->target.version & Features_MSVC_Extensions;
 
 	OrdinaryIdentifier *existing = decl.name->ordinary;
@@ -3383,7 +3388,7 @@ static IrRef coercerval (Value v, Type t, Parse *p, const Token *primary, bool a
 	IrBuild *build = &p->build;
 
 	if (t.kind == Kind_Void)
-		return IR_REF_NONE;
+		return IDX_NONE;
 	removeEnumness(&v.typ);
 	removeEnumness(&t);
 

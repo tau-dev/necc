@@ -5,7 +5,7 @@ typedef struct {
 	const Target *target;
 
 	FILE *out;
-	FILE *debug_out;
+	bool emit_debug_info;
 	FileList files;
 } EmitParams;
 

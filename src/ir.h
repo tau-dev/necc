@@ -6,7 +6,9 @@
 #include "util.h"
 #include "arena.h"
 
-#define IR_REF_NONE ((u32) -1)
+#define IDX_NONE ((u32) -1)
+
+#define AUX_DATA(type, ir, idx) (*(type*) ((ir).aux_data.ptr + (idx)))
 
 typedef struct Block Block;
 typedef struct Inst Inst;
@@ -32,15 +34,16 @@ typedef struct {
 	// info generator.
 	Location *locations;
 
+	LIST(char) aux_data;
 	SPAN(Parameter) params;
 	Block *entry;
 } IrList;
 
 
 typedef struct {
-	IrRef function_ptr;
-	ValuesSpan parameters;
-	IrRef ordered_after;
+	// PERFORMANCE The arguments could probably be stored as a flexible
+	// array member.
+	ValuesSpan arguments;
 	bool is_vararg;
 } Call;
 
@@ -91,6 +94,8 @@ typedef enum {
 } InstKind;
 
 
+typedef struct Type Type;
+
 // typedef SPAN(PhiNode) PhiNodes;
 
 // TODO Compress the heck out of this data.
@@ -100,9 +105,13 @@ typedef struct Inst {
 
 	union {
 		u64 constant;
-		Call call;
-
 		IrRef unop;
+
+		struct {
+			IrRef function_ptr;
+			IrRef ordered_after;
+			u32 data;
+		} call;
 		struct {
 			u32 id;
 			i64 offset;
@@ -117,7 +126,7 @@ typedef struct Inst {
 		} unop_const;
 		struct {
 			u32 size; // IrRef for Ir_StackAllocVLA
-			u32 known_offset; // STYLE Without this, instructions could be immutable
+			u32 decl_data;
 		} alloc;
 		struct {
 			IrRef address;

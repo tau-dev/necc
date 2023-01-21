@@ -68,9 +68,7 @@ static Name flags[] = {
 	{"run", F_Run},
 	{"ir", F_EmitIr},
 	{"as", F_EmitAssembly},
-	{"o", F_EmitExe},
 	{"out", F_EmitExe},
-	{"c", F_EmitObj},
 	{"obj", F_EmitObj},
 	{"M", F_EmitDeps},
 	{"deps", F_EmitDeps},
@@ -78,8 +76,8 @@ static Name flags[] = {
 	{"localdeps", F_EmitLocalDeps},
 
 	{"O", F_OptSimple},
-	{"Ostore-load", F_OptStoreLoad},
 	{"Oarith", F_OptArith},
+	{"Omem0", F_OptStoreLoad},
 	{"Omem1", F_OptMemreduce},
 	{"Omem2", F_OptMemreduceStrong},
 	{"Werr", F_Werror},
@@ -105,8 +103,8 @@ const char *help_string = "Usage:\n"
 	" -Werr/-Werror   Fail the compilation if warnings are generated.\n"
 	"\n"
 	"The following output options write to stdout by default, or may be followed by ‘=<FILENAME>’ to specify an output file. Default: ‘-o=a.out’.\n"
-	" -o/-out         Generate an executable.\n"
-	" -c/-obj         Generate an object file.\n"
+	" -out            Generate an executable.\n"
+	" -obj            Generate an object file.\n"
 	" -lib            Generate an archive. (TODO)\n"
 	" -so/-dll        Generate a shared/dynamically linked library. (TODO)\n"
 	" -as             Generate assembly code in the flat assembler format.\n"
@@ -123,7 +121,7 @@ const char *help_string = "Usage:\n"
 	"Optimizations:\n"
 	" -O              Perform optimizations: -Omem1, -Oarith.\n"
 	" -Oarith         Apply some arithmetic simplifications.\n"
-	" -Ostore-load    Fold simple store-load sequences.\n"
+	" -Omem0    Fold simple store-load sequences.\n"
 	" -Omem1          Perform block-local memory elisions.\n"
 	" -Omem2          Perform whole-function memory elisions.\n"
 	"\n"
@@ -250,7 +248,7 @@ int main (int argc, char **args) {
 				fprintf(stderr, "%s NECC Version 0.0%s\n", BOLD, RESET);
 				return 0;
 			case F_Crashing: options.crash_on_error = true; break;
-			case F_Debug: options.gen_debug = true; break;
+			case F_Debug: options.emit_debug = true; break;
 			case F_EmitIr: setOut(&ir_out, direct_arg); break;
 			case F_EmitAssembly: setOut(&assembly_out, direct_arg); break;
 			case F_EmitObj: setOut(&obj_out, direct_arg); break;
@@ -431,6 +429,7 @@ int main (int argc, char **args) {
 		.module = module,
 		.target = &options.target,
 		.files = tokens.files,
+		.emit_debug_info = options.emit_debug,
 	};
 	// Output
 	if (ir_out) {

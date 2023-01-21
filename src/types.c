@@ -28,11 +28,12 @@ const char *versionName(Version v) {
 
 
 Type resolveType (Type t) {
-	return t.kind == Kind_Struct_Named || t.kind == Kind_Union_Named ? t.nametagged->type : t;
+	return t.kind == Kind_Struct_Named || t.kind == Kind_Union_Named || t.kind == Kind_Enum_Named ?
+		t.nametagged->type : t;
 }
 
 bool arrayUnknownSize (Type t) {
-	return t.kind == Kind_VLArray && t.array.count == IR_REF_NONE;
+	return t.kind == Kind_VLArray && t.array.count == IDX_NONE;
 }
 
 // Result of 0 means incomplete type.
@@ -83,7 +84,7 @@ u32 typeSize (Type t, const Target *target) {
 	case Kind_Array:
 		return t.array.count * typeSize(*t.array.inner, target);
 	case Kind_VLArray:
-		assert(t.array.count == IR_REF_NONE);
+		assert(t.array.count == IDX_NONE);
 		return 0;
 	default: assert(!"TODO Calculate other type sizes.");
 	}
@@ -93,7 +94,7 @@ bool isFlexibleArrayMember (Members m, u32 index) {
 	if (index + 1 != m.len)
 		return false;
 	Type t = m.ptr[m.len - 1].type;
-	return t.kind == Kind_VLArray && t.array.count == IR_REF_NONE;
+	return t.kind == Kind_VLArray && t.array.count == IDX_NONE;
 }
 
 u32 typeAlignment (Type t, const Target *target) {
@@ -343,7 +344,7 @@ void printTypeTail (Type t, char **pos, const char *end) {
 		printTypeTail(*t.array.inner, pos, end);
 		break;
 	case Kind_VLArray:
-		if (t.array.count == IR_REF_NONE)
+		if (t.array.count == IDX_NONE)
 			printto(pos, end, "[]");
 		else
 			printto(pos, end, "[val_%llu]", (unsigned long long) t.array.count);

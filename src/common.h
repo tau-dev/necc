@@ -25,7 +25,7 @@ typedef struct Target {
 typedef struct {
 	Target target;
 	bool crash_on_error;
-	bool gen_debug;
+	bool emit_debug;
 
 	bool warn_on_wrapping;
 	bool warn_char_subscript;

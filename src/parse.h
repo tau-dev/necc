@@ -97,7 +97,7 @@ typedef struct {
 	Type type;
 
 	String name;
-	u32 parent_decl; // IR_REF_NONE if absent
+	u32 parent_decl; // IDX_NONE if absent
 
 	String value_data;
 	References value_references;

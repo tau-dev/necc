@@ -4,7 +4,8 @@
 #include "parse.h"
 
 IrRef genParameter(IrBuild *, u32 param_id);
-IrRef genStackAlloc(IrBuild *, IrRef size);
+IrRef genStackAllocVLA(IrBuild *, IrRef size);
+IrRef genStackAllocNamed(IrBuild *, IrRef size, Declaration);
 IrRef genStackAllocFixed(IrBuild *, u32 size);
 // IrRef genReturn(IrBuild *);
 IrRef genAdd(IrBuild *, IrRef, IrRef);
@@ -45,6 +46,8 @@ IrRef genVaStart(IrBuild *build, IrRef va_list_addr, IrRef param);
 IrRef genVaArg(IrBuild *build, IrRef va_list_addr, IrRef size);
 
 void replaceWithCopy(IrList ir, IrRef original, IrRef replacement, IrRef ordered_after);
+void genSetZero(IrBuild *, IrRef address, u32 size, bool is_volatile);
+
 void genReturnVal(IrBuild *, IrRef val);
 void genBranch(IrBuild *, IrRef condition);
 void genJump(IrBuild *, Block *blk);

@@ -84,6 +84,9 @@ typedef struct {
 	FileList files;
 	bool emit_stabs;
 
+	StringMap *types;
+	const Target *target;
+
 	u16 *usage;
 	Storage *storage;
 	u32 stack_allocated;
@@ -196,10 +199,12 @@ static void emitData(Codegen *, Module, String data, References);
 static void emitDataLine(FILE *, u32 len, const char *data);
 static void emitDataString(u32 len, const char *data);
 static void emitDataRaw(u32 len, const char *data);
+static u32 typeDebugData(Codegen *, Type t);
 static void emitName(Codegen *, Module module, u32 id);
 static void emitJump(Codegen *, const char *inst, const Block *dest);
 static void emitFunctionForward(EmitParams, u32);
 static void emitBlockForward(Codegen *, Blocks, u32);
+static void emitStabsLoc(Codegen *c, IrRef i);
 static void emitInstForward(Codegen *c, IrRef i);
 static inline u16 sizeOfRegister(Register size);
 static inline Storage registerSize(u16 size);
@@ -209,6 +214,9 @@ static const char *sizeSuffix(u16 size);
 static bool isMemory(u16 size);
 static u16 valueSize(Codegen *, IrRef);
 static void emit(Codegen *c, const char *fmt, ...);
+static void emitString(String s);
+static void emitZString(const char *);
+static void emitInt(u64 i);
 static void flushit(FILE *f);
 
 int splice_dest_order(const void *a, const void *b) {
@@ -219,7 +227,9 @@ void emitX64AsmSimple(EmitParams params) {
 // 	FILE *out, FILE *debug_out, Arena *arena, Module module, const Target *target;
 	Codegen globals = {
 		.out = params.out,
-		.emit_stabs = true
+		.arena = params.arena,
+		.emit_stabs = params.emit_debug_info,
+		.target = params.target,
 	};
 	Module module = params.module;
 
@@ -311,6 +321,166 @@ static void emitData (Codegen *c, Module module, String data, References referen
 	emitDataLine(c->out, data.len - pos, data.ptr + pos);
 }
 
+typedef struct TypeData {
+	String view;
+	Type type;
+	u32 id;
+} TypeData;
+
+static void emitType(Codegen *, Type, u32 id);
+
+static u32 typeDebugData (Codegen *c, Type t) {
+	String view = {sizeof(t), (char *)&t};
+	void **entry = mapGetOrCreate(c->types, view);
+	if (*entry)
+		return ((TypeData *)*entry)->id;
+
+	*entry = ALLOC(c->arena, TypeData);
+	u32 id = c->types->used;
+
+	TypeData *data = *entry;
+	data->id = id;
+	data->type = t;
+	data->view = (String) {sizeof(data->type), (char *) &data->type};
+
+	emitType(c, t, id);
+	return id;
+}
+
+
+static inline bool isAlpha (char c) {
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_';
+}
+static inline bool isDigit (char c) {
+	return c >= '0' && c <= '9';
+}
+static inline bool isAlnum (char c) {
+	return isAlpha(c) || isDigit(c);
+}
+
+
+static void emitType (Codegen *c, Type type, u32 id) {
+	Type res = resolveType(type);
+	switch (res.kind) {
+	case Kind_Union:
+	case Kind_Struct:
+		for (u32 i = 0; i < res.members.len; i++)
+			typeDebugData(c, res.members.ptr[i].type);
+		break;
+	case Kind_Pointer:
+		typeDebugData(c, *type.pointer);
+		break;
+	case Kind_Array:
+	case Kind_VLArray:
+		typeDebugData(c, *type.array.inner);
+		break;
+	case Kind_Function:
+	case Kind_FunctionPtr:
+		typeDebugData(c, *type.function.rettype);
+		for (u32 i = 0; i < type.function.parameters.len; i++) {
+			typeDebugData(c, type.function.parameters.ptr[i].type);
+		}
+		break;
+	case Kind_Basic:
+	case Kind_Void:
+	case Kind_Enum:
+		break;
+	default: unreachable;
+	}
+
+	emitZString(".stabs \"");
+
+	char *name = printType(c->arena, type);
+	emitZString(name);
+	emitZString(":t");
+	emitInt(id);
+	emitZString("=");
+
+	switch (res.kind) {
+	case Kind_Enum:
+		emitZString("-1");// TODO Portablility
+		break;
+	case Kind_Array:
+	case Kind_VLArray:
+		emitZString("ar-1;0;");
+		if (res.kind == Kind_Array)
+			emitInt(type.array.count);
+		else
+			emitZString("-1");
+		emitZString(";");
+		emitInt(typeDebugData(c, *type.array.inner));
+		break;
+	case Kind_FunctionPtr:
+		*insert++ = '*';
+		FALLTHROUGH;
+	case Kind_Function: {
+		*insert++ = 'f';
+		emitInt(typeDebugData(c, *type.function.rettype));
+
+		if (!type.function.missing_prototype) {
+			*insert++ = ',';
+			u32 count = type.function.parameters.len;
+			emitInt(count);
+			*insert++ = ';';
+			for (u32 i = 0; i < type.function.parameters.len; i++) {
+				Declaration decl = type.function.parameters.ptr[i];
+				emitString(decl.name->name);
+				*insert++ = ':';
+				emitInt(typeDebugData(c, decl.type));
+				emitZString(",1;");
+			}
+		}
+		*insert++ = ';';
+
+	} break;
+	case Kind_Pointer:
+		emitZString("*");
+		emitInt(typeDebugData(c, *type.pointer));
+		break;
+	case Kind_Struct:
+		emitZString("s");
+		emitInt(typeSize(res, c->target));
+		for (u32 i = 0; i < res.members.len; i++) {
+			CompoundMember m = res.members.ptr[i];
+			emitString(m.name->name);
+			emitZString(":");
+			emitInt(typeDebugData(c, m.type));
+			emitZString(",");
+			emitInt(m.offset * 8);
+			emitZString(",");
+			emitInt(typeSize(m.type, c->target) * 8);
+			emitZString(";");
+		}
+		emitZString(";");
+		break;
+	case Kind_Void:
+		emitZString("-11"); break;
+	case Kind_Basic:
+		switch ((int) type.basic) {
+		case Int_bool: emitZString("-5"); break;
+		case Int_char: emitZString("-2"); break;
+		case Int_suchar | Int_unsigned: emitZString("-5"); break;
+		case Int_suchar: emitZString("-6"); break;
+		case Int_short: emitZString("-3"); break;
+		case Int_int: emitZString("-1"); break;
+		case Int_long: emitZString("-4"); break;
+		case Int_longlong: emitZString("-31"); break;
+		case Int_short | Int_unsigned: emitZString("-7"); break;
+		case Int_int | Int_unsigned: emitZString("-8"); break;
+		case Int_long | Int_unsigned: emitZString("-10"); break;
+		case Int_longlong | Int_unsigned: emitZString("-32"); break;
+		default: unreachable;
+		}
+		break;
+	default:
+		unreachable;
+	}
+	emitZString("\",128,0,0,0\n");
+
+	if (insert > buf + (BUF - MAX_LINE))
+		flushit(c->out);
+}
+
 static u32 roundUp(u32 x)  {
 	return ((x + 7) / 8) * 8;
 }
@@ -332,12 +502,16 @@ static void emitFunctionForward (EmitParams params, u32 id) {
 
 	IrList ir = reloc->function_ir;
 
+	StringMap types = {0};
 	Codegen c = {
 		.arena = params.arena,
 		.out = params.out,
 		.current_id = id,
-		.emit_stabs = true,
+		.emit_stabs = params.emit_debug_info,
 		.files = params.files,
+		.target = params.target,
+
+		.types = &types,
 
 		.is_memory_return = mem_return,
 		.storage = calloc(ir.len, sizeof(Storage)),
@@ -382,14 +556,13 @@ static void emitFunctionForward (EmitParams params, u32 id) {
 	for (u32 i = 0; i < ir.len; i++) {
 		Inst inst = ir.ptr[i];
 
-		if (inst.kind == Ir_StackAllocFixed) {
-			ir.ptr[i].alloc.known_offset = c.stack_allocated;
-			c.stack_allocated += roundUp(inst.alloc.size);
-		}
 		if (inst.kind == Ir_Parameter)
 			continue;
 		c.storage[i] = c.stack_allocated;
 		c.stack_allocated += roundUp(inst.size);
+
+		if (inst.kind == Ir_StackAllocFixed)
+			c.stack_allocated += roundUp(inst.alloc.size);
 	}
 
 
@@ -419,7 +592,7 @@ static void emitFunctionForward (EmitParams params, u32 id) {
 		Inst inst = ir.ptr[i];
 
 		if (inst.kind == Ir_StackAllocFixed) {
-			emit(&c, " lea rax, [rsp+I]", inst.alloc.known_offset);
+			emit(&c, " lea rax, [rsp+I]", c.storage[i]+8);
 			emit(&c, " mov #, rax", i);
 		}
 	}
@@ -439,7 +612,28 @@ static void emitFunctionForward (EmitParams params, u32 id) {
 	free(linearized.ptr);
 	emit(&c, "");
 
+
+
+
+	if (c.emit_stabs) {
+		emit(&c, ".stabs \"S:ZI\",36,0,0,S\n", reloc->name,
+			reloc->is_public ? "F" : "f",
+			typeDebugData(&c, *reloc->type.function.rettype), reloc->name);
+		for (u32 i = 0; i < ir.len; i++) {
+			Inst inst = ir.ptr[i];
+
+			if (inst.kind == Ir_StackAllocFixed) {
+				if (c.emit_stabs && inst.alloc.decl_data != IDX_NONE) {
+					Declaration decl = AUX_DATA(Declaration, ir, inst.alloc.decl_data);
+					emit(&c, ".stabs \"S:I\",128,0,0,~I", decl.name->name, typeDebugData(&c, decl.type),
+						(i32) (c.storage[i]+8) - c.stack_allocated);
+				}
+			}
+		}
+	}
+
 	free(c.storage);
+	mapFree(c.types);
 }
 
 
@@ -502,16 +696,18 @@ static void emitBlockForward (Codegen *c, Blocks blocks, u32 i) {
 
 
 	emit(c, "..I_I_S:", c->current_id, block->id, block->label);
+	if (c->emit_stabs && block->first_inst < block->inst_end)
+		emitStabsLoc(c, block->first_inst);
 
 	IrRefList false_phis = {0};
 
-	for (u32 i = block->first_inst; i < block->inst_end; i++) {
-		IrRef ref = i;
-
+	for (IrRef ref = block->first_inst; ref < block->inst_end; ref++) {
+		if (c->emit_stabs && ref > block->first_inst)
+			emitStabsLoc(c, ref);
 		emitInstForward(c, ref);
 
 		Inst inst = c->ir.ptr[ref];
-		if (inst.kind == Ir_PhiOut && inst.phi_out.on_false != IR_REF_NONE)
+		if (inst.kind == Ir_PhiOut && inst.phi_out.on_false != IDX_NONE)
 			PUSH(false_phis, ref);
 	}
 
@@ -547,7 +743,7 @@ static void emitBlockForward (Codegen *c, Blocks blocks, u32 i) {
 			emitJump(c, "jnz", exit.switch_.default_case);
 	} break;
 	case Exit_Return:
-		if (exit.ret != IR_REF_NONE) {
+		if (exit.ret != IDX_NONE) {
 			if (c->is_memory_return) {
 				emit(c, " mov rax, qword ptr [rsp]");
 				copyTo(c, RAX, 0, RSP, c->storage[exit.ret], valueSize(c, exit.ret));
@@ -568,28 +764,10 @@ static void emitBlockForward (Codegen *c, Blocks blocks, u32 i) {
 
 
 static void emitInstForward(Codegen *c, IrRef i) {
-	assert(i != IR_REF_NONE);
+	assert(i != IDX_NONE);
 
 	Inst inst = c->ir.ptr[i];
-	Location loc = c->ir.locations[i];
 
-	if (c->emit_stabs) {
-		bool labeled = false;
-		if (i == 0 || c->ir.locations[i-1].file_id != loc.file_id) {
-			SourceFile *src = c->files.ptr[loc.file_id];
-			emit(c, ".stabs \"SS\",100,0,0,..IiI",
-				src->path, src->name, c->current_id, i);
-			labeled = true;
-		}
-		if (i == 0 || c->ir.locations[i-1].line != loc.line) {
-			emit(c, ".stabn 68,0,I,..IiI",
-				loc.line, c->current_id, i);
-			labeled = true;
-		}
-
-		if (labeled)
-			emit(c, "..IiI:", c->current_id, i);
-	}
 	const char *suff = sizeSuffix(inst.size);
 
 	switch ((InstKind) inst.kind) {
@@ -715,7 +893,7 @@ static void emitInstForward(Codegen *c, IrRef i) {
 		emit(c, " mov #, rax", i);
 		break;
 	case Ir_PhiOut: {
-		if (inst.phi_out.on_true != IR_REF_NONE) {
+		if (inst.phi_out.on_true != IDX_NONE) {
 			copyTo(c, RSP, c->storage[inst.phi_out.on_true],
 				RSP, c->storage[inst.phi_out.source],
 				valueSize(c, inst.phi_out.source));
@@ -760,7 +938,8 @@ static void emitInstForward(Codegen *c, IrRef i) {
 		copyTo(c, RSP, c->storage[i], RDX, 0, inst.size);
 	} break;
 	case Ir_Call: {
-		ValuesSpan params = inst.call.parameters;
+		Call call = AUX_DATA(Call, c->ir, inst.call.data);
+		ValuesSpan args = call.arguments;
 		bool memory_return = isMemory(inst.size);
 
 // 		emit(c, "	; call");
@@ -772,8 +951,8 @@ static void emitInstForward(Codegen *c, IrRef i) {
 		// argument passing. Need to unify caller and callee definitions
 		// per ABI.
 		u32 stack_memory = 0;
-		for (u32 p = 0; p < params.len; p++) {
-			u32 size = valueSize(c, params.ptr[p]);
+		for (u32 p = 0; p < args.len; p++) {
+			u32 size = valueSize(c, args.ptr[p]);
 			bool bigg = size > 8;
 			if (isMemory(size) || param_slot + bigg >= parameter_regs_count)
 				stack_memory += size;
@@ -784,8 +963,8 @@ static void emitInstForward(Codegen *c, IrRef i) {
 		i32 stack_mem_pos = -stack_memory;
 
 		param_slot = memory_return;
-		for (u32 p = 0; p < params.len; p++) {
-			IrRef param = params.ptr[p];
+		for (u32 p = 0; p < args.len; p++) {
+			IrRef param = args.ptr[p];
 			u16 param_size = valueSize(c, param);
 			bool bigg = param_size > 8;
 			if (isMemory(param_size) || param_slot + bigg >= parameter_regs_count) {
@@ -824,6 +1003,25 @@ static void emitInstForward(Codegen *c, IrRef i) {
 	}
 }
 
+static void emitStabsLoc (Codegen *c, u32 i) {
+	Location loc = c->ir.locations[i];
+
+	bool labeled = false;
+	if (i == 0 || c->ir.locations[i-1].file_id != loc.file_id) {
+		SourceFile *src = c->files.ptr[loc.file_id];
+		emit(c, ".stabs \"SS\",100,0,0,..IiI",
+			src->path, src->name, c->current_id, i);
+		labeled = true;
+	}
+	if (i == 0 || c->ir.locations[i-1].line != loc.line) {
+		emit(c, ".stabn 68,0,I,..IiI",
+			loc.line, c->current_id, i);
+		labeled = true;
+	}
+
+	if (labeled)
+		emit(c, "..IiI:", c->current_id, i);
+}
 
 // static void emitFunctionLineInfo (Arena *arena, FILE *out, Module module, StaticValue *reloc, const Target *target) {
 // 	ir = reloc->function_ir;
@@ -943,9 +1141,7 @@ static void emitDataLine (FILE *out, u32 len, const char *data) {
 }
 
 static void emitDataString (u32 len, const char *data) {
-	const char *pref = " .ascii \"";
-	memcpy(insert, pref, strlen(pref));
-	insert += strlen(pref);
+	emitZString(" .ascii \"");
 	memcpy(insert, data, len);
 	insert += len;
 	memcpy(insert, "\"\n", 2);
@@ -996,20 +1192,13 @@ H hex char
 */
 
 
-static void emitInt(u64 i);
-
-
 static void emit (Codegen *c, const char *fmt, ...) {
 	va_list args;
 	va_start(args, fmt);
 	for (const char *p = fmt; *p; p++) {
 		switch (*p) {
 		case 'Z': {
-			const char *str = va_arg(args, const char *);
-			u32 len = strlen(str);
-			if (len)
-				memcpy(insert, str, len);
-			insert += len;
+			emitZString(va_arg(args, const char *));
 		} break;
 		case 'S': {
 			String str = va_arg(args, String);
@@ -1035,8 +1224,7 @@ static void emit (Codegen *c, const char *fmt, ...) {
 			memcpy(insert, " [rsp+", 6);
 			insert += 6;
 			emitInt(c->storage[ref]);
-			memcpy(insert, "]", 1);
-			insert += 1;
+			*insert++ = ']';
 		} break;
 		case 'I':
 			emitInt(va_arg(args, u32));
@@ -1070,6 +1258,7 @@ static void emit (Codegen *c, const char *fmt, ...) {
 		} break;
 		default:
 			assert(!(*p >= 'A' && *p <= 'Z'));
+			if (*p == '\\') p++;
 			*insert++ = *p;
 		}
 	}
@@ -1101,4 +1290,12 @@ static void emitInt (u64 i) {
 	}
 }
 
-
+static void emitString (String s) {
+	memcpy(insert, s.ptr, s.len);
+	insert += s.len;
+}
+static void emitZString (const char *s) {
+	u32 len = strlen(s);
+	memcpy(insert, s, len);
+	insert += len;
+}

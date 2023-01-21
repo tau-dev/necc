@@ -76,7 +76,7 @@ typedef struct {
 
 typedef struct {
 	Type *inner;
-	u32 count; // IrRef for VLA (IR_REF_NONE for unkown size), number otherwise.
+	u32 count; // IrRef for VLA (IDX_NONE for unkown size), number otherwise.
 } ArrayType;
 
 
