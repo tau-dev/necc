@@ -6,8 +6,6 @@
 #include "util.h"
 #include "arena.h"
 
-#define IDX_NONE ((u32) -1)
-
 #define AUX_DATA(type, ir, idx) (*(type*) ((ir).aux_data.ptr + (idx)))
 
 typedef struct Block Block;
@@ -44,7 +42,6 @@ typedef struct {
 	// PERFORMANCE The arguments could probably be stored as a flexible
 	// array member.
 	ValuesSpan arguments;
-	bool is_vararg;
 } Call;
 
 
@@ -60,25 +57,32 @@ typedef enum {
 	Ir_StackDeallocVLA, // Not referred to
 	Ir_Copy,
 	Ir_Load,
-	Ir_LoadVolatile,
 	Ir_Store, // Not referred to
-	Ir_StoreVolatile, // Not referred to
 
 	Ir_Access,
 	Ir_Truncate,
 	Ir_SignExtend,
 	Ir_ZeroExtend,
-	Ir_IntToFloat,
-	Ir_FloatToInt,
+	Ir_UIntToFloat,
+	Ir_SIntToFloat,
+	Ir_FloatToSInt,
+	Ir_FloatToUInt,
 
 	Ir_Add,
 	Ir_Sub,
 	Ir_Mul,
-	Ir_SMul, // TODO I'm stupid, signedness does not matter for the low bits.
 	Ir_Div,
 	Ir_SDiv,
 	Ir_Mod,
 	Ir_SMod,
+
+	Ir_FAdd,
+	Ir_FSub,
+	Ir_FMul,
+	Ir_FDiv,
+	Ir_FMod,
+	Ir_FCast,
+
 	Ir_BitAnd,
 	Ir_BitOr,
 	Ir_BitNot,
@@ -94,13 +98,25 @@ typedef enum {
 } InstKind;
 
 
+enum InstProperties {
+	Prop_Mem_Volatile = 1,
+
+	Prop_Arith_NoSignedOverflow = 1,
+
+	Prop_Call_Vararg = 1,
+};
+
 typedef struct Type Type;
 
 // typedef SPAN(PhiNode) PhiNodes;
 
+struct f {int (*x)(); int a; int b;};
+
 // TODO Compress the heck out of this data.
 typedef struct Inst {
 	u8 kind;
+	struct f x;
+	u8 properties;
 	u16 size;
 
 	union {
@@ -158,11 +174,15 @@ typedef struct Inst {
 	case Ir_Add: \
 	case Ir_Sub: \
 	case Ir_Mul: \
-	case Ir_SMul: \
 	case Ir_Div: \
 	case Ir_SDiv: \
 	case Ir_Mod: \
 	case Ir_SMod: \
+	case Ir_FAdd: \
+	case Ir_FSub: \
+	case Ir_FMul: \
+	case Ir_FDiv: \
+	case Ir_FMod: \
 	case Ir_BitOr: \
 	case Ir_BitXor: \
 	case Ir_BitAnd: \
@@ -177,8 +197,11 @@ typedef struct Inst {
 	case Ir_Truncate: \
 	case Ir_SignExtend: \
 	case Ir_ZeroExtend: \
-	case Ir_FloatToInt: \
-	case Ir_IntToFloat: \
+	case Ir_FCast: \
+	case Ir_FloatToSInt: \
+	case Ir_FloatToUInt: \
+	case Ir_SIntToFloat: \
+	case Ir_UIntToFloat: \
 	case Ir_StackDeallocVLA: \
 	case Ir_VaArg
 

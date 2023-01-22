@@ -21,8 +21,15 @@ typedef enum {
 } BasicType;
 
 typedef enum {
+	Float_Single,
+	Float_Double,
+	Float_LongDouble,
+} FloatType;
+
+typedef enum {
 	Kind_Void,
 	Kind_Basic,
+	Kind_Float,
 	Kind_Struct_Named,
 	Kind_Struct,
 	Kind_Union_Named,
@@ -92,6 +99,7 @@ typedef struct Type {
 
 	union {
 		BasicType basic;
+		FloatType real;
 		FunctionType function;
 		Type *pointer;
 		ArrayType array;
@@ -156,7 +164,6 @@ u32 typeAlignment(Type t, const Target *target);
 u32 addMemberOffset(u32 *offset, Type t, const Target *target);
 bool isFlexibleArrayMember(Members m, u32 index);
 int rankDiff(BasicType a, BasicType b);
-bool arrayUnknownSize(Type t);
 
 char *printDeclarator(Arena *a, Type t, String name);
 char *printType(Arena *a, Type t);
@@ -172,4 +179,27 @@ void printTypeTail(Type t, char **insert, const char *end);
 // #define BASIC_CHAR ((Type) {Kind_Basic, .basic = Int_char})
 #define INT_SIZE I32
 
+static inline bool isSignedOrUnsignedIntegerType (Type t) {
+	return t.kind == Kind_Basic && t.basic != Int_char;
+}
+static inline bool isIntegerType (Type t) {
+	return t.kind == Kind_Enum || t.kind == Kind_Enum_Named || t.kind == Kind_Basic;
+}
+static inline bool isArithmeticType (Type t) {
+	return t.kind == Kind_Float || isIntegerType(t);
+}
+static inline bool isScalar (Type t) {
+	return t.kind == Kind_Pointer || t.kind == Kind_Pointer || isArithmeticType(t);
+}
+static inline bool isUnknownSizeArray (Type t) {
+	return t.kind == Kind_VLArray && t.array.count == IDX_NONE;
+}
 
+static inline u16 floatSize (FloatType f) {
+	switch (f) {
+	case Float_Single: return 4;
+	case Float_Double: return 8;
+	case Float_LongDouble: return 10;
+	}
+	unreachable;
+}

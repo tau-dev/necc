@@ -409,7 +409,6 @@ int main (int argc, char **args) {
 			}
 			if (opt_arith) {
 				resolveCopies(val->function_ir, linearized);
-// 				decimateIr(&val->function_ir, linearized);
 				u16 *uses = malloc(val->function_ir.len * 2);
 				calcUsage(val->function_ir, uses);
 				arithSimplify(val->function_ir, uses);

@@ -99,6 +99,9 @@ typedef LIST(String) StringList;
 #define i32 int32_t
 #define i64 int64_t
 
+#define IDX_NONE ((u32) -1)
+
+
 u64 strHash(String);
 
 typedef enum {

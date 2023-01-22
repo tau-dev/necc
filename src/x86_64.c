@@ -211,6 +211,7 @@ static inline Storage registerSize(u16 size);
 static inline Register registerSized(Register, u16);
 static const char *sizeOp(u16 size);
 static const char *sizeSuffix(u16 size);
+static const char *sizeFSuffix(u16 size);
 static bool isMemory(u16 size);
 static u16 valueSize(Codegen *, IrRef);
 static void emit(Codegen *c, const char *fmt, ...);
@@ -678,11 +679,19 @@ static bool loadMaybeBigTo (Codegen *c, Register reg1, Register reg2, IrRef i) {
 }
 
 
-static void triple (Codegen *c, const char *inst, const char *suff, IrRef lhs, IrRef rhs, IrRef dest) {
+static void triple (Codegen *c, const char *inst, u16 size, IrRef lhs, IrRef rhs, IrRef dest) {
 	Register rax = loadTo(c, RAX, lhs);
-	emit(c, " ZZ R, #", inst, suff, rax, rhs);
+	emit(c, " ZZ R, #", inst, sizeSuffix(size), rax, rhs);
 	emit(c, " mov #, R", dest, rax);
 }
+
+static void ftriple (Codegen *c, const char *inst, u16 size, IrRef lhs, IrRef rhs, IrRef dest) {
+	const char *suff = sizeFSuffix(size);
+	emit(c, " movsZ xmm1, #", suff, lhs);
+	emit(c, " ZZ xmm1, #", inst, suff, rhs);
+	emit(c, " movsZ #, xmm1", suff, dest);
+}
+
 
 // This backend performs _no_ register allocation.
 static void emitBlockForward (Codegen *c, Blocks blocks, u32 i) {
@@ -768,21 +777,17 @@ static void emitInstForward(Codegen *c, IrRef i) {
 
 	Inst inst = c->ir.ptr[i];
 
-	const char *suff = sizeSuffix(inst.size);
-
 	switch ((InstKind) inst.kind) {
-	case Ir_Add: triple(c, "add", suff, inst.binop.lhs, inst.binop.rhs, i); break;
-	case Ir_Sub: triple(c, "sub", suff, inst.binop.lhs, inst.binop.rhs, i); break;
-	case Ir_SMul: triple(c, "imul", suff, inst.binop.lhs, inst.binop.rhs, i); break;
-	case Ir_Mul:
+	case Ir_Add: triple(c, "add", inst.size, inst.binop.lhs, inst.binop.rhs, i); break;
+	case Ir_Sub: triple(c, "sub", inst.size, inst.binop.lhs, inst.binop.rhs, i); break;
+	case Ir_Mul: triple(c, "imul", inst.size, inst.binop.lhs, inst.binop.rhs, i); break;
 	case Ir_Div:
 	case Ir_SDiv: {
 		emit(c, " xor rdx, rdx");
 		loadTo(c, RAX, inst.binop.lhs);
 
-		const char *op = inst.kind == Ir_Mul ? "mul" :
-				inst.kind == Ir_Div ? "div" : "idiv";
-		emit(c, " ZZ #", op, suff, inst.binop.rhs);
+		const char *op = inst.kind == Ir_Div ? "div" : "idiv";
+		emit(c, " ZZ #", op, sizeSuffix(inst.size), inst.binop.rhs);
 		emit(c, " mov #, R", i, registerSized(RAX, inst.size));
 	} break;
 	case Ir_Mod:
@@ -791,12 +796,18 @@ static void emitInstForward(Codegen *c, IrRef i) {
 		loadTo(c, RAX, inst.binop.lhs);
 
 		const char *op = inst.kind == Ir_Mod ? "div" : "idiv";
-		emit(c, " Z #", op, inst.binop.rhs);
+		emit(c, " ZZ #", op, sizeSuffix(inst.size), inst.binop.rhs);
 		emit(c, " mov #, R", i, registerSized(RDX, inst.size));
 	} break;
-	case Ir_BitOr: triple(c, "or", suff, inst.binop.lhs, inst.binop.rhs, i); break;
-	case Ir_BitXor: triple(c, "xor", suff, inst.binop.lhs, inst.binop.rhs, i); break;
-	case Ir_BitAnd: triple(c, "and", suff, inst.binop.lhs, inst.binop.rhs, i); break;
+	case Ir_FAdd: ftriple(c, "adds", inst.size, inst.binop.lhs, inst.binop.rhs, i); break;
+	case Ir_FSub: ftriple(c, "subs", inst.size, inst.binop.lhs, inst.binop.rhs, i); break;
+	case Ir_FMul: ftriple(c, "muls", inst.size, inst.binop.lhs, inst.binop.rhs, i); break;
+	case Ir_FDiv: ftriple(c, "divs", inst.size, inst.binop.lhs, inst.binop.rhs, i); break;
+	case Ir_FMod: unreachable;
+
+	case Ir_BitOr: triple(c, "or", inst.size, inst.binop.lhs, inst.binop.rhs, i); break;
+	case Ir_BitXor: triple(c, "xor", inst.size, inst.binop.lhs, inst.binop.rhs, i); break;
+	case Ir_BitAnd: triple(c, "and", inst.size, inst.binop.lhs, inst.binop.rhs, i); break;
 	case Ir_BitNot: {
 		Register reg = loadTo(c, RAX, inst.unop);
 		emit(c, " not R", reg);
@@ -851,12 +862,10 @@ static void emitInstForward(Codegen *c, IrRef i) {
 		emit(c, " mov R, #", registerSized(RAX, valueSize(c, inst.unop)), inst.unop);
 		emit(c, " mov #, R", i, registerSized(RAX, inst.size));
 	} break;
-	case Ir_Store:
-	case Ir_StoreVolatile: {
+	case Ir_Store: {
 		copyTo(c, loadTo(c, RAX, inst.mem.address), 0, RSP, c->storage[inst.mem.source], inst.size);
 	} break;
-	case Ir_Load:
-	case Ir_LoadVolatile: {
+	case Ir_Load: {
 		copyTo(c, RSP, c->storage[i], loadTo(c, RAX, inst.mem.address), 0, inst.size);
 	} break;
 	case Ir_Access: {
@@ -902,9 +911,29 @@ static void emitInstForward(Codegen *c, IrRef i) {
 	case Ir_Copy: break;
 	case Ir_PhiIn: break;
 	case Ir_StackDeallocVLA: break;
-	case Ir_IntToFloat:
-	case Ir_FloatToInt: {
-		assert(!"TODO codegen float stuff");
+	case Ir_FCast: {
+		u32 source = c->ir.ptr[inst.unop].size;
+		const char *fsuff = sizeFSuffix(inst.size);
+		emit(c, " cvtsZ2sZ xmm1, #", sizeFSuffix(source), fsuff, inst.unop);
+		emit(c, " movsZ #, xmm1", fsuff, i);
+	} break;
+	case Ir_UIntToFloat: // TODO This is a hack, must be handled differently.
+	case Ir_SIntToFloat: {
+		const char *fsuff = sizeFSuffix(inst.size);
+		loadTo(c, RAX, inst.unop);
+
+		emit(c, " cvtsi2sZ xmm1, rax", fsuff);
+		emit(c, " movsZ #, xmm1", fsuff, i);
+	} break;
+	case Ir_FloatToUInt:
+		assert(!"TODO codegen float->uint");
+		break;
+	case Ir_FloatToSInt: {
+		const char *fsuff = sizeFSuffix(c->ir.ptr[inst.unop].size);
+
+		emit(c, " movsZ xmm0, [rsp+I]", fsuff, c->storage[inst.unop]);
+		emit(c, " cvttsZ2si rax, xmm0", fsuff);
+		emit(c, " mov #, R", i, registerSized(RAX, inst.size));
 	} break;
 	case Ir_VaStart: {
 		loadTo(c, RAX, inst.binop.lhs);
@@ -1098,7 +1127,13 @@ static const char *sizeSuffix (u16 size) {
 		return "q";
 	return NULL;
 }
-
+static const char *sizeFSuffix (u16 size) {
+	switch (size) {
+	case 4: return "s";
+	case 8: return "d";
+	}
+	unreachable;
+}
 static u16 valueSize (Codegen *c, IrRef ref) {
 	return c->ir.ptr[ref].size;
 }

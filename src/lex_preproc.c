@@ -427,19 +427,27 @@ static Token getToken (Arena *str_arena, SourceFile source, Location *loc, Symbo
 			while (isDigit(*pos) || (is_hex && isHexDigit(*pos)))
 				pos++;
 
-			if (*pos == '.') {
+			if (*pos == '.' || *pos == 'f' || *pos == 'F') {
 				pos++;
 				while (isDigit(*pos))
 					pos++;
 				if (*pos == 'e' || *pos == 'E')
 					pos++;
-				if (*pos == '-' || *pos == '+')
+				if ((*pos == '-' || *pos == '+') && isDigit(pos[1]))
 					pos++;
 
 				while (isDigit(*pos))
 					pos++;
+				tok = (Token) {
+					Tok_Real,
+					.literal_type = Float_Double,
+					.val.real = strtod(start, NULL)
+				};
 
-				tok = (Token) {Tok_Real, .val.real = strtod(start, NULL)};
+				if (*pos == 'f' || *pos == 'F') {
+					tok.literal_type = Float_Single,
+					pos++;
+				}
 			} else {
 				tok = (Token) {Tok_Integer,
 					.literal_type = Int_int,
@@ -1830,7 +1838,6 @@ static const char *defineMacro (
 		free(sym->macro->tokens.ptr);
 	sym->macro = mac;
 
-
 	u32 param_count = 0;
 	if (pos[0] == '(') {
 		pos++;
@@ -1981,6 +1988,7 @@ String processStringLiteral(Arena *arena, String src) {
 	for (u32 i = 0; i < src.len; i++) {
 		if (src.ptr[i] == '\\') {
 			i++;
+			if (src.ptr[i] == '\n') continue;
 			res[len] = escape_codes[(uchar) src.ptr[i]];
 		} else {
 			res[len] = src.ptr[i];

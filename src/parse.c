@@ -351,6 +351,7 @@ static Value parseIntrinsic(Parse *, Intrinsic);
 // TODO The order of parameters here is inconsistent.
 static Value intPromote(Value v, Parse *, const Token*);
 static void needAssignableLval(Parse *, const Token *, Value v);
+static void needScalar(Parse *, const Token *, Type t);
 static void discardValue(Parse *, const Token *, Value v);
 static IrRef coerce(Value v, Type t, Parse *, const Token *);
 static IrRef toBoolean(Parse *, const Token *, Value v);
@@ -1497,8 +1498,10 @@ static Value parseExprBase (Parse *parse) {
 	}
 	case Tok_Integer:
 		return immediateIntVal(parse, (Type) {Kind_Basic, .basic = t.literal_type}, t.val.integer_u);
-// 	case Tok_Real:
-// 		return (Value) {{Kind_Basic, {Basic_double}}, genImmediateReal(t.val.real)};
+	case Tok_Real: {
+		IrRef inst = genImmediateReal(build, t.val.real, 8);
+		return (Value) {{Kind_Float, .real = Float_Double}, inst};
+	}
 	case Tok_String: {
 		parse->pos--;
 		u32 id = parseStringLiteral(parse);
@@ -2163,19 +2166,13 @@ static bool tryParseTypeBase (Parse *parse, Type *type, u8 *storage_dest) {
 	while (is_type_token) {
 		switch (parse->pos->kind) {
 		case Tok_Key_Double:
-			// Ugly hacks to patch over TODO Floating point numbers!
-			base.kind = Kind_Basic;
-			base.basic = Int_int;
-			if (longness[0])
-				longness[1] = parse->pos;
-			else
-				longness[0] = parse->pos;
+			base.kind = Kind_Float;
+			base.real = Float_Double;
 			bases++;
 			break;
 		case Tok_Key_Float:
-			// TODO
-			base.kind = Kind_Basic;
-			base.basic = Int_int;
+			base.kind = Kind_Float;
+			base.real = Float_Single;
 			modifiable = false;
 			bases++;
 			break;
@@ -2323,7 +2320,7 @@ static bool tryParseTypeBase (Parse *parse, Type *type, u8 *storage_dest) {
 				requires(parse, "explicity enum-underlying types", Features_C23);
 				const Token *type_token = parse->pos;
 				Type underlying = parseTypeBase(parse, NULL);
-				if (underlying.kind != Kind_Basic)
+				if (!isIntegerType(underlying))
 					parseerror(parse, type_token, "the underlying type of an enumeration must be an integer type, %s is not permitted", printTypeHighlighted(&parse->arena, underlying));
 				base.basic = underlying.basic;
 			}
@@ -2515,6 +2512,16 @@ static bool tryParseTypeBase (Parse *parse, Type *type, u8 *storage_dest) {
 		return false;
 
 	if (modifiable) {
+		if (base.kind == Kind_Float) {
+			assert(base.real == Float_Double);
+			if (longness[0]) {
+				if (longness[1])
+					parseerror(parse, longness[1], "unknown type %slong long double%s", BOLD, RESET);
+				base.real = Float_LongDouble;
+			}
+			return true;
+		}
+		assert(base.kind == Kind_Basic);
 		if (base.basic == Int_int) {
 			if (longness[0] && shortness)
 				parseerror(parse, longness[0], "integer cannot be %sshort%s and %long%s at the same time", BOLD, RESET, BOLD, RESET);
@@ -2613,16 +2620,16 @@ static Type parseStructUnionBody(Parse *parse, bool is_struct) {
 			if (bare_colon || tryEat(parse, Tok_Colon)) {
 				const Token *colon = parse->pos - 1;
 				Type basetype = bare_colon ? base : decl.type;
-				if (basetype.kind != Kind_Basic)
-					parseerror(parse, colon, "a bit field must have integer type, %s does not work",
+				if (!isSignedOrUnsignedIntegerType(basetype))
+					parseerror(parse, colon, "a bit-field must have integer type, %s does not work",
 							printTypeHighlighted(&parse->arena, basetype));
 				if (basetype.basic != Int_bool && (basetype.basic & ~Int_unsigned) != Int_int)
-					requires(parse, "bit fields of types other than int", Features_GNU_Extensions);
+					requires(parse, "bit-fields of types other than int", Features_GNU_Extensions);
 
 				u64 bitsize;
 				if (!tryIntConstant(parse, parseExpression(parse), &bitsize))
 					parseerror(parse, colon, "the width of a bit field must be a constant integer expression");
-				// TODO
+				parsemsg(Log_Warn, parse, colon, "TODO bit-fields");
 			}
 
 			// TODO Support VLAs
@@ -2630,7 +2637,7 @@ static Type parseStructUnionBody(Parse *parse, bool is_struct) {
 			if (is_struct)
 				member_offset = addMemberOffset(&current_offset, decl.type, &parse->target);
 
-			if (arrayUnknownSize(decl.type)) {
+			if (isUnknownSizeArray(decl.type)) {
 				if (!(parse->pos[0].kind == Tok_Semicolon && parse->pos[1].kind == Tok_CloseBrace)) {
 					// TOOD "such a structure (and any union containing,
 					// possibly recursively, a member that is such a
@@ -3095,7 +3102,9 @@ static Value arithAdd (Parse *parse, const Token *primary, Value lhs, Value rhs)
 	} else {
 		Type common = arithmeticConversions(parse, primary, &lhs, &rhs);
 		IrRef inst;
-		if (common.basic & Int_unsigned) {
+		if (common.kind == Kind_Float) {
+			inst = genFAdd(&parse->build, lhs.inst, rhs.inst);
+		} else if (common.basic & Int_unsigned) {
 			inst = genAdd(&parse->build, lhs.inst, rhs.inst);
 		} else {
 			bool overflow = false;
@@ -3133,7 +3142,9 @@ static Value arithSub (Parse *parse, const Token *primary, Value lhs, Value rhs)
 		Type common = arithmeticConversions(parse, primary, &lhs, &rhs);
 
 		IrRef inst;
-		if (common.basic & Int_unsigned) {
+		if (common.kind == Kind_Float) {
+			inst = genFSub(&parse->build, lhs.inst, rhs.inst);
+		} else if (common.basic & Int_unsigned) {
 			inst = genSub(&parse->build, lhs.inst, rhs.inst);
 		} else {
 			bool overflow = false;
@@ -3150,7 +3161,14 @@ static Value arithMultiplicativeOp (Parse *parse, const Token *primary, TokenKin
 	IrRef inst;
 	bool overflow_or_div0 = false;
 	assert(op == Tok_Asterisk || op == Tok_Percent || op == Tok_Slash);
-	if (common.basic & Int_unsigned) {
+	if (common.kind == Kind_Float) {
+		if (op == Tok_Asterisk)
+			inst = genFMul(&parse->build, lhs.inst, rhs.inst);
+		else if (op == Tok_Percent)
+			inst = genFMod(&parse->build, lhs.inst, rhs.inst);
+		else
+			inst = genFDiv(&parse->build, lhs.inst, rhs.inst);
+	} else if (common.basic & Int_unsigned) {
 		if (op == Tok_Asterisk)
 			inst = genMulUnsigned(&parse->build, lhs.inst, rhs.inst);
 		else if (op == Tok_Percent)
@@ -3170,7 +3188,31 @@ static Value arithMultiplicativeOp (Parse *parse, const Token *primary, TokenKin
 	return (Value) {common, inst};
 }
 
+
 static Type arithmeticConversions (Parse *parse, const Token *primary, Value *a, Value *b) {
+	if (a->typ.kind == Kind_Float) {
+		if (b->typ.kind == Kind_Float) {
+			if (b->typ.real > a->typ.real) {
+				*a = (Value) {b->typ, .inst = genFCast(&parse->build, a->inst, floatSize(a->typ.real))};
+				return b->typ;
+			} else {
+				*b = (Value) {a->typ, .inst = genFCast(&parse->build, b->inst, floatSize(a->typ.real))};
+				return a->typ;
+			}
+		} else {
+			needScalar(parse, primary, b->typ);
+			removeEnumness(&b->typ);
+			*b = (Value) {a->typ, .inst = genIntToFloat(&parse->build, b->inst, floatSize(a->typ.real), b->typ.basic & Int_unsigned)};
+			return a->typ;
+		}
+	}
+	if (b->typ.kind == Kind_Float) {
+		needScalar(parse, primary, a->typ);
+			removeEnumness(&a->typ);
+		*a = (Value) {b->typ, .inst = genIntToFloat(&parse->build, a->inst, floatSize(b->typ.real), a->typ.basic & Int_unsigned)};
+		return b->typ;
+	}
+
 	*a = intPromote(*a, parse, primary);
 	*b = intPromote(*b, parse, primary);
 
@@ -3243,7 +3285,7 @@ static Type arithmeticConversions (Parse *parse, const Token *primary, Value *a,
 
 static bool isZeroConstant (Parse *parse, Value v) {
 	u64 val;
-	return v.typ.kind == Kind_Basic && tryIntConstant(parse, v, &val) && val == 0;
+	return isIntegerType(v.typ) && tryIntConstant(parse, v, &val) && val == 0;
 }
 
 static Value pointerAdd (IrBuild *ir, Value lhs, Value rhs, Parse *op_parse, const Token *token) {
@@ -3313,8 +3355,7 @@ static Value intPromote (Value val, Parse *p, const Token *primary) {
 	val = rvalue(val, p);
 	removeEnumness(&val.typ);
 
-	if (val.typ.kind != Kind_Basic)
-		parseerror(p, primary, "expected a scalar type, got %s", printTypeHighlighted(&p->arena, val.typ));
+	needScalar(p, primary, val.typ);
 
 	if (rankDiff(val.typ.basic, Int_int) >= 0)
 		return val;
@@ -3335,6 +3376,11 @@ static void needAssignableLval (Parse *parse, const Token *token, Value v) {
 		parseerror(parse, token, "cannot modify an array");
 	if (v.typ.qualifiers & Qualifier_Const)
 		parseerror(parse, token, "cannot modify a const-qualified value");
+}
+
+static void needScalar (Parse *p, const Token *token, Type t) {
+	if (!isScalar(t))
+		parseerror(p, token, "expected a scalar type, got %s", printTypeHighlighted(&p->arena, t));
 }
 
 static void discardValue (Parse *parse, const Token *token, Value v) {
@@ -3398,23 +3444,34 @@ static IrRef coercerval (Value v, Type t, Parse *p, const Token *primary, bool a
 		return toBoolean(p, primary, v);
 
 	// Integer conversions
-	if (v.typ.kind == Kind_Basic && t.kind == Kind_Basic) {
+	if (t.kind == Kind_Basic) {
 		u16 target = p->target.typesizes[t.basic & ~Int_unsigned];
-		u16 source = p->target.typesizes[v.typ.basic & ~Int_unsigned];
-		assert(source == build->ir.ptr[v.inst].size);
+		if (v.typ.kind == Kind_Basic) {
+			u16 source = p->target.typesizes[v.typ.basic & ~Int_unsigned];
+			assert(source == build->ir.ptr[v.inst].size);
 
-		// TODO Is it reasonable to omit the truncation on signed
-		// destination? This could cause a UB overflow to potentially
-		// screw with much later calculations.
-		if (target < source) {
-			return genTrunc(build, v.inst, target);
-		} else if (target == source) {
-			return v.inst;
-		} else {
-			if (t.basic & Int_unsigned)
-				return genZeroExt(build, v.inst, target);
-			else
-				return genSignExt(build, v.inst, target);
+			// TODO Is it reasonable to omit the truncation on signed
+			// destination? This could cause a UB overflow to potentially
+			// screw with much later calculations.
+			if (target < source) {
+				return genTrunc(build, v.inst, target);
+			} else if (target == source) {
+				return v.inst;
+			} else {
+				if (t.basic & Int_unsigned)
+					return genZeroExt(build, v.inst, target);
+				else
+					return genSignExt(build, v.inst, target);
+			}
+		} else if (v.typ.kind == Kind_Float) {
+			return genFloatToInt(build, v.inst, target, t.basic & Int_unsigned);
+		}
+	} else if (t.kind == Kind_Float) {
+		u16 target = floatSize(t.real);
+		if (v.typ.kind == Kind_Basic) {
+			return genIntToFloat(build, v.inst, target, v.typ.basic & Int_unsigned);
+		} else if (v.typ.kind == Kind_Float) {
+			return genFCast(build, v.inst, target);
 		}
 	}
 

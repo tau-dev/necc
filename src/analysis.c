@@ -29,11 +29,9 @@ should be moved into a separate file at some point).
 			operand_var = &(inst).unop_const.val; operation;	\
 			break;	\
 		case Ir_Store:	\
-		case Ir_StoreVolatile:	\
 			operand_var = &(inst).mem.source; operation;	\
 			FALLTHROUGH;	\
 		case Ir_Load:	\
-		case Ir_LoadVolatile:	\
 			operand_var = &(inst).mem.address; operation;	\
 			operand_var = &(inst).mem.ordered_after; ordering_operation;	\
 			break;	\
@@ -168,6 +166,7 @@ void calcLifetimes (IrList ir, ValuesSpan lastuses) {
 	assert(ir.len == lastuses.len);
 	IrRef *uses = lastuses.ptr;
 	memset(uses, 0, sizeof(IrRef) * lastuses.len);
+
 	for (u32 i = 0; i < ir.len; i++) {
 		Inst inst = ir.ptr[i];
 		ON_OPERANDS_AND_ORDER(ir, inst, op, uses[*op] = i, (void) 0);
@@ -282,9 +281,7 @@ static void decopyOrder (IrList ir, IrRef *ref) {
 static bool isMemInstruction(InstKind inst) {
 	switch (inst) {
 	case Ir_Load:
-	case Ir_LoadVolatile:
 	case Ir_Store:
-	case Ir_StoreVolatile:
 	case Ir_Call:
 	case Ir_VaArg:
 		return true;
@@ -296,7 +293,6 @@ static bool isMemInstruction(InstKind inst) {
 static bool isOrderedInstruction(InstKind inst) {
 	switch (inst) {
 	case Ir_Store:
-	case Ir_StoreVolatile:
 	case Ir_Call:
 	case Ir_PhiOut:
 	case Ir_VaArg:
@@ -376,20 +372,21 @@ void storeLoadPropagate (IrList ir, Blocks blocks) {
 typedef enum {
 	Alias_Never,
 	Alias_Maybe,
-	Alias_Always,
+	Alias_AlwaysPartial,
+	Alias_AlwaysExact,
 } Alias;
 
-Alias canAlias(IrList ir, Inst inst, IrRef address1) {
+Alias canAlias(IrList ir, Inst inst, IrRef address1, u16 size1) {
 	switch (inst.kind) {
 	case Ir_Call:
 		return Alias_Maybe;
 	case Ir_Load:
-	case Ir_LoadVolatile:
-	case Ir_Store:
-	case Ir_StoreVolatile: {
+	case Ir_Store: {
 		IrRef address2 = inst.mem.address;
-		if (address1 == address2)
-			return Alias_Always;
+		u32 size2 = inst.size;
+		if (address1 == address2) {
+			return size1 == size2 ? Alias_AlwaysExact : Alias_AlwaysPartial;
+		}
 		Inst address_inst1 = ir.ptr[address1];
 		Inst address_inst2 = ir.ptr[address2];
 
@@ -406,9 +403,14 @@ Alias canAlias(IrList ir, Inst inst, IrRef address1) {
 		if (address_inst1.kind == Ir_Reloc && address_inst2.kind == Ir_Reloc) {
 			if (address_inst1.reloc.id != address_inst2.reloc.id)
 				return Alias_Never;
-			if (address_inst1.reloc.offset == address_inst2.reloc.offset)
-				return Alias_Always;
-			// TODO Calculate overlap
+			u32 offset1 = address_inst1.reloc.offset;
+			u32 offset2 = address_inst2.reloc.offset;
+			if (offset1 == offset2 && size1 == size2)
+				return Alias_AlwaysExact;
+			if (offset1 < offset2 + size2 && offset1 + size1 > offset2)
+				return Alias_AlwaysPartial;
+			else
+				return Alias_Never;
 		}
 
 		// TODO A StackAlloc can also never alias a parameter or a global
@@ -421,6 +423,8 @@ Alias canAlias(IrList ir, Inst inst, IrRef address1) {
 	}
 }
 
+static inline bool instVolatile (Inst i) { return i.properties & Prop_Mem_Volatile; }
+
 void innerBlockPropagate (IrList ir, Blocks blocks) {
 	Inst *insts = ir.ptr;
 
@@ -431,14 +435,16 @@ void innerBlockPropagate (IrList ir, Blocks blocks) {
 			IrRef ref = mem.ptr[i];
 			Inst inst = insts[ref];
 
-			if (inst.kind == Ir_Load || inst.kind == Ir_Store) {
+			if ((inst.kind == Ir_Load || inst.kind == Ir_Store) && !instVolatile(inst)) {
 				while (inst.mem.ordered_after != IDX_NONE) {
 					Inst prev = insts[inst.mem.ordered_after];
-					Alias a = canAlias(ir, prev, inst.mem.address);
+					if (instVolatile(prev))
+						break;
+					Alias a = canAlias(ir, prev, inst.mem.address, inst.size);
 					if (a == Alias_Never) {
 						inst.mem.ordered_after = prev.mem.ordered_after;
-					} else if (a == Alias_Always) {
-						if (prev.kind == Ir_Store || prev.kind == Ir_StoreVolatile) {
+					} else if (a == Alias_AlwaysExact) {
+						if (prev.kind == Ir_Store) {
 							if (inst.kind == Ir_Load)
 								replaceWithCopy(ir, ref, prev.mem.source, prev.mem.ordered_after);
 							else {
@@ -446,7 +452,7 @@ void innerBlockPropagate (IrList ir, Blocks blocks) {
 							}
 							break;
 						} else {
-							assert(prev.kind == Ir_Load || prev.kind == Ir_LoadVolatile);
+							assert(prev.kind == Ir_Load);
 							if (inst.kind == Ir_Load)
 								replaceWithCopy(ir, ref, inst.mem.ordered_after, prev.mem.ordered_after);
 							break;

@@ -32,10 +32,6 @@ Type resolveType (Type t) {
 		t.nametagged->type : t;
 }
 
-bool arrayUnknownSize (Type t) {
-	return t.kind == Kind_VLArray && t.array.count == IDX_NONE;
-}
-
 // Result of 0 means incomplete type.
 u32 typeSize (Type t, const Target *target) {
 	switch (t.kind) {
@@ -73,6 +69,8 @@ u32 typeSize (Type t, const Target *target) {
 	case Kind_Basic:
 		assert(t.basic != (Int_char | Int_unsigned) && t.basic != (Int_bool | Int_unsigned));
 		return target->typesizes[t.basic & ~Int_unsigned];
+	case Kind_Float:
+		return floatSize(t.real);
 	case Kind_Enum:
 		return target->typesizes[Int_int];
 	case Kind_Pointer:
@@ -146,6 +144,8 @@ bool typeCompatible (Type a, Type b) {
 		return typeCompatible(*a.pointer, *b.pointer);
 	case Kind_Basic:
 		return a.basic == b.basic;
+	case Kind_Float:
+		return a.real == b.real;
 	case Kind_Enum:
 		// TODO
 		return true;
@@ -179,6 +179,7 @@ static void printComplete (char **pos, const char *end, Type t, String name) {
 	printTypeBase(t, pos, end);
 	switch (t.kind) {
 	case Kind_Basic:
+	case Kind_Float:
 	case Kind_Void:
 	case Kind_Struct:
 	case Kind_Struct_Named:
@@ -256,6 +257,17 @@ void printTypeBase(Type t, char **pos, const char *end) {
 			printto(pos, end, "long"); break;
 		case Int_longlong:
 			printto(pos, end, "long long"); break;
+		default: assert(!"illegal type value");
+		}
+	} break;
+	case Kind_Float: {
+		switch (t.real) {
+		case Float_Single:
+			printto(pos, end, "float"); break;
+		case Float_Double:
+			printto(pos, end, "double"); break;
+		case Float_LongDouble:
+			printto(pos, end, "long double"); break;
 		default: assert(!"illegal type value");
 		}
 	} break;

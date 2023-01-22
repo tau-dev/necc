@@ -4,7 +4,7 @@
 
 /*
 
-Generates IR, while doing a first constant-folding pass, and prints it in a nicely formatted form.
+Generates IR while doing a first constant-folding pass, and prints it in a nicely formatted form.
 Arithmetic simplifications which require e.g. use-counts happen in the analysis pass arithSimplify.
 
 */
@@ -58,20 +58,20 @@ static IrRef getPrevMemOp (IrBuild *build) {
 }
 
 IrRef genParameter (IrBuild *build, u32 param_id) {
-	return append(build, (Inst) {Ir_Parameter, build->ir.params.ptr[param_id].size, .unop = param_id});
+	return append(build, (Inst) {Ir_Parameter, .size = build->ir.params.ptr[param_id].size, .unop = param_id});
 }
 
 IrRef genStackAllocFixed (IrBuild *build, u32 size) {
-	return append(build, (Inst) {Ir_StackAllocFixed, PTR_SIZE, .alloc = {size, IDX_NONE}});
+	return append(build, (Inst) {Ir_StackAllocFixed, .size = PTR_SIZE, .alloc = {size, IDX_NONE}});
 }
 
 IrRef genStackAllocNamed(IrBuild *build, IrRef size, Declaration decl) {
 	u32 data = pushAuxData(&build->ir, &decl, sizeof decl);
-	return append(build, (Inst) {Ir_StackAllocFixed, PTR_SIZE, .alloc = {size, data}});
+	return append(build, (Inst) {Ir_StackAllocFixed, .size = PTR_SIZE, .alloc = {size, data}});
 }
 
 IrRef genStackAllocVLA (IrBuild *build, IrRef size) {
-	return append(build, (Inst) {Ir_StackAllocVLA, PTR_SIZE, .alloc = {size}});
+	return append(build, (Inst) {Ir_StackAllocVLA, .size = PTR_SIZE, .alloc = {size}});
 }
 
 void genReturnVal (IrBuild *build, IrRef val) {
@@ -143,10 +143,14 @@ static inline i64 toSigned(u64 i) {
 	return i <= INT64_MAX ? (i64) i : i == UINT64_MAX ? (i64) -1 : -(i64) (i - INT64_MAX);
 }
 
-static IrRef genBinOp (IrBuild *build, InstKind op, IrRef a, IrRef b, bool *overflow) {
+static IrRef genBinOp (IrBuild *build, InstKind op, u8 properties, IrRef a, IrRef b, bool *overflow) {
 	Inst *inst = build->ir.ptr;
 	assert(inst[a].size == inst[b].size || op == Ir_ShiftLeft || op == Ir_ShiftRight);
-	Inst i = {op, inst[a].size, .binop = {a, b}};
+	Inst i = {op,
+		.properties = properties,
+		.size = inst[a].size,
+		.binop = {a, b}
+	};
 
 	bool commutative = op == Ir_Add || op == Ir_Mul || op == Ir_BitAnd || op == Ir_BitOr || op == Ir_BitXor || op == Ir_Equals;
 	if (inst[a].kind == Ir_Constant && inst[b].kind == Ir_Constant) {
@@ -164,14 +168,15 @@ static IrRef genBinOp (IrBuild *build, InstKind op, IrRef a, IrRef b, bool *over
 				*overflow = true;
 			i.constant = lhs - rhs; break;
 		case Ir_Mul:
-			i.constant = lhs * rhs; break;
-		case Ir_SMul:
-			if (mulSignedOverflow(toSigned(lhs), toSigned(rhs), i.size)) {
-				i.kind = Ir_SMul;
+			if ((properties & Prop_Arith_NoSignedOverflow)
+				&& mulSignedOverflow(toSigned(lhs), toSigned(rhs), i.size))
+			{
+				i.kind = Ir_Mul;
 				*overflow = true;
 				break;
+			} else {
+				i.constant = lhs * rhs;
 			}
-			i.constant = toSigned(lhs) * toSigned(rhs);
 			break;
 		case Ir_Div:
 			if (rhs == 0) {
@@ -237,8 +242,9 @@ static IrRef genBinOp (IrBuild *build, InstKind op, IrRef a, IrRef b, bool *over
 					return i.binop.lhs;
 				break;
 			case Ir_Div:
+			case Ir_SDiv:
 				if (constant == 0)
-					return IDX_NONE; // ???
+					break;
 				if (constant == 1)
 					return i.binop.lhs;
 				break;
@@ -266,78 +272,96 @@ static IrRef genBinOp (IrBuild *build, InstKind op, IrRef a, IrRef b, bool *over
 IrRef genAdd (IrBuild *build, IrRef a, IrRef b) {
 	Inst *inst = build->ir.ptr;
 	assert(inst[a].size == inst[b].size);
-	return genBinOp(build, Ir_Add, a, b, NULL);
+	return genBinOp(build, Ir_Add, 0, a, b, NULL);
 }
 IrRef genAddSigned (IrBuild *build, IrRef a, IrRef b, bool *overflow) {
 	Inst *inst = build->ir.ptr;
 	assert(inst[a].size == inst[b].size);
-	return genBinOp(build, Ir_Add, a, b, overflow);
+	return genBinOp(build, Ir_Add, Prop_Arith_NoSignedOverflow, a, b, overflow);
+}
+IrRef genFAdd (IrBuild *build, IrRef a, IrRef b) {
+	Inst *inst = build->ir.ptr;
+	assert(inst[a].size == inst[b].size);
+	return genBinOp(build, Ir_FAdd, 0, a, b, NULL);
 }
 
 IrRef genSub (IrBuild *build, IrRef a, IrRef b) {
 	Inst *inst = build->ir.ptr;
 	assert(inst[a].size == inst[b].size);
-	return genBinOp(build, Ir_Sub, a, b, NULL);
+	return genBinOp(build, Ir_Sub, 0, a, b, NULL);
 }
-
 IrRef genSubSigned (IrBuild *build, IrRef a, IrRef b, bool *overflow) {
 	Inst *inst = build->ir.ptr;
 	assert(inst[a].size == inst[b].size);
-	return genBinOp(build, Ir_Sub, a, b, overflow);
+	return genBinOp(build, Ir_Sub, Prop_Arith_NoSignedOverflow, a, b, overflow);
+}
+IrRef genFSub (IrBuild *build, IrRef a, IrRef b) {
+	Inst *inst = build->ir.ptr;
+	assert(inst[a].size == inst[b].size);
+	return genBinOp(build, Ir_FSub, 0, a, b, NULL);
 }
 
 
 IrRef genMulUnsigned (IrBuild *build, IrRef a, IrRef b) {
-	return genBinOp(build, Ir_Mul, a, b, NULL);
+	return genBinOp(build, Ir_Mul, 0, a, b, NULL);
 }
 IrRef genMulSigned (IrBuild *build, IrRef a, IrRef b, bool *overflow) {
-	return genBinOp(build, Ir_SMul, a, b, overflow);
+	return genBinOp(build, Ir_Mul, Prop_Arith_NoSignedOverflow, a, b, overflow);
+}
+IrRef genFMul (IrBuild *build, IrRef a, IrRef b) {
+	return genBinOp(build, Ir_FMul, 0, a, b, NULL);
 }
 
 IrRef genDivUnsigned (IrBuild *build, IrRef a, IrRef b, bool *overflow_or_div0) {
-	return genBinOp(build, Ir_Div, a, b, overflow_or_div0);
+	return genBinOp(build, Ir_Div, 0, a, b, overflow_or_div0);
 }
 IrRef genDivSigned (IrBuild *build, IrRef a, IrRef b, bool *overflow_or_div0) {
-	return genBinOp(build, Ir_SDiv, a, b, overflow_or_div0);
+	return genBinOp(build, Ir_SDiv, Prop_Arith_NoSignedOverflow, a, b, overflow_or_div0);
+}
+IrRef genFDiv (IrBuild *build, IrRef a, IrRef b) {
+	return genBinOp(build, Ir_FDiv, 0, a, b, NULL);
 }
 
 IrRef genModUnsigned (IrBuild *build, IrRef a, IrRef b, bool *overflow_or_div0) {
-	return genBinOp(build, Ir_Mod, a, b, overflow_or_div0);
+	return genBinOp(build, Ir_Mod, 0, a, b, overflow_or_div0);
 }
 IrRef genModSigned (IrBuild *build, IrRef a, IrRef b, bool *overflow_or_div0) {
-	return genBinOp(build, Ir_SMod, a, b, overflow_or_div0);
+	return genBinOp(build, Ir_SMod, Prop_Arith_NoSignedOverflow, a, b, overflow_or_div0);
+}
+IrRef genFMod (IrBuild *build, IrRef a, IrRef b) {
+	return genBinOp(build, Ir_FMod, 0, a, b, NULL);
 }
 
 IrRef genOr (IrBuild *build, IrRef a, IrRef b) {
 	Inst *inst = build->ir.ptr;
 	assert(inst[a].size == inst[b].size);
-	return genBinOp(build, Ir_BitOr, a, b, NULL);
+	return genBinOp(build, Ir_BitOr, 0, a, b, NULL);
 }
 
 IrRef genXor (IrBuild *build, IrRef a, IrRef b) {
 	Inst *inst = build->ir.ptr;
 	assert(inst[a].size == inst[b].size);
-	return genBinOp(build, Ir_BitXor, a, b, NULL);
+	return genBinOp(build, Ir_BitXor, 0, a, b, NULL);
 }
 
 IrRef genAnd (IrBuild *build, IrRef a, IrRef b) {
 	Inst *inst = build->ir.ptr;
 	assert(inst[a].size == inst[b].size);
-	return genBinOp(build, Ir_BitAnd, a, b, NULL);
+	return genBinOp(build, Ir_BitAnd, 0, a, b, NULL);
 }
 
 IrRef genShiftLeft (IrBuild *build, IrRef a, IrRef b) {
-	return genBinOp(build, Ir_ShiftLeft, a, b, NULL);
+	return genBinOp(build, Ir_ShiftLeft, 0, a, b, NULL);
 }
 
 IrRef genShiftRight (IrBuild *build, IrRef a, IrRef b) {
-	return genBinOp(build, Ir_ShiftRight, a, b, NULL);
+	return genBinOp(build, Ir_ShiftRight, 0, a, b, NULL);
 }
 
 
 IrRef genBitNot (IrBuild *build, IrRef a) {
 	Inst *inst = build->ir.ptr;
-	Inst i = {Ir_BitNot, inst[a].size, .unop = a};
+	Inst i = {Ir_BitNot, .size = inst[a].size, .unop = a};
 	if (inst[a].kind == Ir_Constant) {
 		i.kind = Ir_Constant;
 		i.constant = ~inst[a].constant;
@@ -349,7 +373,7 @@ IrRef genBitNot (IrBuild *build, IrRef a) {
 
 IrRef genNot(IrBuild *build, IrRef a) {
 	Inst *inst = build->ir.ptr;
-	Inst i = {Ir_Equals, inst[a].size};
+	Inst i = {Ir_Equals, .size = inst[a].size};
 
 	if (inst[a].kind == Ir_Constant) {
 		i.kind = Ir_Constant;
@@ -368,7 +392,7 @@ IrRef genNot(IrBuild *build, IrRef a) {
 IrRef genEquals(IrBuild *build, IrRef a, IrRef b, u16 size) {
 	Inst *inst = build->ir.ptr;
 	assert(inst[a].size == inst[b].size);
-	Inst i = {Ir_Equals, size, .binop = {a, b}};
+	Inst i = {Ir_Equals, .size = size, .binop = {a, b}};
 
 	if (inst[a].kind == Ir_Constant) {
 		if (inst[b].kind == Ir_Constant) {
@@ -398,7 +422,7 @@ IrRef genEquals(IrBuild *build, IrRef a, IrRef b, u16 size) {
 IrRef genLessThan(IrBuild *build, IrRef a, IrRef b, u16 size) {
 	Inst *inst = build->ir.ptr;
 	assert(inst[a].size == inst[b].size);
-	Inst i = {Ir_LessThan, size, .binop = {a, b}};
+	Inst i = {Ir_LessThan, .size = size, .binop = {a, b}};
 
 	if (inst[a].kind == Ir_Constant && inst[b].kind == Ir_Constant) {
 		i.kind = Ir_Constant;
@@ -411,7 +435,7 @@ IrRef genLessThan(IrBuild *build, IrRef a, IrRef b, u16 size) {
 IrRef genLessThanOrEquals(IrBuild *build, IrRef a, IrRef b, u16 size) {
 	Inst *inst = build->ir.ptr;
 	assert(inst[a].size == inst[b].size);
-	Inst i = {Ir_LessThanOrEquals, size, .binop = {a, b}};
+	Inst i = {Ir_LessThanOrEquals, .size = size, .binop = {a, b}};
 
 	if (inst[a].kind == Ir_Constant && inst[b].kind == Ir_Constant) {
 		i.kind = Ir_Constant;
@@ -423,13 +447,14 @@ IrRef genLessThanOrEquals(IrBuild *build, IrRef a, IrRef b, u16 size) {
 
 IrRef genImmediateInt (IrBuild *build, long long i, u16 size) {
 	assert(size <= 8);
-	return append(build, (Inst) {Ir_Constant, size, .constant = i});
+	return append(build, (Inst) {Ir_Constant, .size = size, .constant = i});
 }
 
-IrRef genImmediateReal (IrBuild *build, double r) {
-	(void) r;
-	(void) build;
-	return 0; // TODO
+IrRef genImmediateReal (IrBuild *build, double r, u16 size) {
+	Inst inst = {Ir_Constant, .size = size};
+	memcpy(&inst.constant, &r, 8);
+
+	return append(build, inst);
 }
 
 IrRef genTrunc (IrBuild *build, IrRef source, u16 target) {
@@ -440,7 +465,7 @@ IrRef genTrunc (IrBuild *build, IrRef source, u16 target) {
 	if (inst[source].kind == Ir_Constant)
 		return genImmediateInt(build, inst[source].constant & (((u64) 1 << target*8) - 1), target);
 
-	return append(build, (Inst) {Ir_Truncate, target, .unop = source});
+	return append(build, (Inst) {Ir_Truncate, .size = target, .unop = source});
 }
 
 IrRef genSignExt (IrBuild *build, IrRef source, u16 target) {
@@ -454,7 +479,7 @@ IrRef genSignExt (IrBuild *build, IrRef source, u16 target) {
 	}
 
 
-	return append(build, (Inst) {Ir_SignExtend, target, .unop = source});
+	return append(build, (Inst) {Ir_SignExtend, .size = target, .unop = source});
 }
 
 IrRef genZeroExt (IrBuild *build, IrRef source, u16 target) {
@@ -465,14 +490,35 @@ IrRef genZeroExt (IrBuild *build, IrRef source, u16 target) {
 	if (inst[source].kind == Ir_Constant)
 		return genImmediateInt(build, inst[source].constant, target);
 
-	return append(build, (Inst) {Ir_ZeroExtend, target, .unop = source});
+	return append(build, (Inst) {Ir_ZeroExtend, .size = target, .unop = source});
+}
+
+IrRef genFCast (IrBuild *build, IrRef source, u16 target) {
+	Inst *inst = build->ir.ptr;
+	if (inst[source].size == target)
+		return source;
+
+	return append(build, (Inst) {Ir_FCast, .size = target, .unop = source});
+}
+
+IrRef genIntToFloat (IrBuild *build, IrRef source, u16 target, bool is_unsigned) {
+	return append(build, (Inst) {is_unsigned ? Ir_UIntToFloat : Ir_SIntToFloat, .size = target, .unop = source});
+}
+
+IrRef genFloatToInt (IrBuild *build, IrRef source, u16 target, bool is_unsigned) {
+	return append(build, (Inst) {is_unsigned ? Ir_FloatToUInt : Ir_FloatToSInt, .size = target, .unop = source});
 }
 
 IrRef genCall (IrBuild *build, IrRef func, ValuesSpan args, u16 size, bool is_vararg) {
-	Call call = {args, is_vararg};
+	Call call = {args};
 	u32 data = pushAuxData(&build->ir, &call, sizeof call);
 
-	IrRef inst = append(build, (Inst) {Ir_Call, size, .call = {func, getPrevMemOp(build), data}});
+	IrRef inst = append(build, (Inst) {
+		Ir_Call,
+		.properties = is_vararg ? Prop_Call_Vararg : 0,
+		.size = size,
+		.call = {func, getPrevMemOp(build), data}
+	});
 	build->insertion_block->last_store_op = inst;
 
 	PUSH_A(build->block_arena, build->insertion_block->mem_instructions, inst);
@@ -481,13 +527,14 @@ IrRef genCall (IrBuild *build, IrRef func, ValuesSpan args, u16 size, bool is_va
 }
 
 IrRef genGlobal (IrBuild *build, u32 id) {
-	return append(build, (Inst) {Ir_Reloc, PTR_SIZE, .binop = {id}});
+	return append(build, (Inst) {Ir_Reloc, .size = PTR_SIZE, .binop = {id}});
 }
 
 IrRef genLoad (IrBuild *build, IrRef ref, u16 size, bool is_volatile) {
 	IrRef load = append(build, (Inst) {
-		is_volatile ? Ir_LoadVolatile : Ir_Load,
-		size,
+		Ir_Load,
+		.properties = is_volatile ? Prop_Mem_Volatile : 0,
+		.size = size,
 		.mem = { .address = ref, .ordered_after = build->insertion_block->last_store_op }
 	});
 	PUSH_A(build->block_arena, build->insertion_block->mem_instructions, load);
@@ -498,8 +545,9 @@ IrRef genStore (IrBuild *build, IrRef dest, IrRef value, bool is_volatile) {
 	Inst val = build->ir.ptr[value];
 	// TODO Assert dest->size == target pointer size
 	IrRef store = append(build, (Inst) {
-		is_volatile ? Ir_StoreVolatile : Ir_Store,
-		val.size,
+		Ir_Store,
+		.properties = is_volatile ? Prop_Mem_Volatile : 0,
+		.size = val.size,
 		.mem = { .address = dest, .source = value, .ordered_after = getPrevMemOp(build) }
 	});
 	build->insertion_block->last_store_op = store;
@@ -510,16 +558,16 @@ IrRef genStore (IrBuild *build, IrRef dest, IrRef value, bool is_volatile) {
 }
 
 IrRef genAccess (IrBuild *build, IrRef value, IrRef offset, IrRef size) {
-	return append(build, (Inst) {Ir_Access, size, .unop_const = {value, offset}});
+	return append(build, (Inst) {Ir_Access, .size = size, .unop_const = {value, offset}});
 }
 
 IrRef genPhiIn (IrBuild *build, u16 size) {
-	return append(build, (Inst) {Ir_PhiIn, size});
+	return append(build, (Inst) {Ir_PhiIn, .size = size});
 }
 
 
 IrRef genPhiOut (IrBuild *build, IrRef source) {
-	u32 inst = append(build, (Inst) {Ir_PhiOut, build->ir.ptr[source].size, .phi_out = {source, IDX_NONE, IDX_NONE}});
+	u32 inst = append(build, (Inst) {Ir_PhiOut, .size = build->ir.ptr[source].size, .phi_out = {source, IDX_NONE, IDX_NONE}});
 	PUSH_A(build->block_arena, build->insertion_block->ordered_instructions, inst);
 	return inst;
 }
@@ -532,7 +580,7 @@ void setPhiOut (IrBuild *build, IrRef phi, IrRef dest_true, IrRef dest_false) {
 }
 
 IrRef genVaArg (IrBuild *build, IrRef va_list_addr, IrRef size) {
-	IrRef store = append(build, (Inst) {Ir_VaArg, size, .unop = va_list_addr});
+	IrRef store = append(build, (Inst) {Ir_VaArg, .size = size, .unop = va_list_addr});
 
 	// TODO This should be a mem instruction too.
 	PUSH_A(build->block_arena, build->insertion_block->ordered_instructions, store);
@@ -540,7 +588,7 @@ IrRef genVaArg (IrBuild *build, IrRef va_list_addr, IrRef size) {
 }
 
 IrRef genVaStart (IrBuild *build, IrRef va_list_addr, IrRef param) {
-	IrRef store = append(build, (Inst) {Ir_VaStart, 0, .unop_const = {va_list_addr, param}});
+	IrRef store = append(build, (Inst) {Ir_VaStart, .size = 0, .unop_const = {va_list_addr, param}});
 
 	// TODO This should be a mem instruction too.
 	PUSH_A(build->block_arena, build->insertion_block->ordered_instructions, store);
@@ -691,7 +739,7 @@ void printBlock (FILE *dest, Block *blk, IrList ir) {
 			printOrder(dest, inst.call.ordered_after);
 		} continue;
 		case Ir_PhiOut:
-			fprintf(dest, "phi %lu", (ulong) inst.phi_out.source);
+			fprintf(dest, "out-phi %lu ? ", (ulong) inst.phi_out.source);
 			if (inst.phi_out.on_true != IDX_NONE)
 				fprintf(dest, " true->%lu", (ulong) inst.phi_out.on_true);
 			if (inst.phi_out.on_false != IDX_NONE)
@@ -699,7 +747,7 @@ void printBlock (FILE *dest, Block *blk, IrList ir) {
 			fprintf(dest, "\n");
 			continue;
 		case Ir_PhiIn:
-			fprintf(dest, "->phi\n");
+			fprintf(dest, "in-phi\n");
 			continue;
 		case Ir_Parameter:
 			fprintf(dest, "param %lu\n", (ulong) inst.size);
@@ -717,19 +765,13 @@ void printBlock (FILE *dest, Block *blk, IrList ir) {
 			fprintf(dest, "discard %lu\n", (ulong) inst.unop);
 			continue;
 		case Ir_Load:
-			fprintf(dest, "load i%lu, [%lu]", (ulong) inst.size * 8, (ulong) inst.mem.address);
-			printOrder(dest, inst.mem.ordered_after);
-			continue;
-		case Ir_LoadVolatile:
-			fprintf(dest, "load volatile i%lu, [%lu]", (ulong) inst.size * 8, (ulong) inst.mem.address);
+			fprintf(dest, "load%s i%lu, [%lu]", inst.properties & Prop_Mem_Volatile ? " volatile" : "",
+					(ulong) inst.size * 8, (ulong) inst.mem.address);
 			printOrder(dest, inst.mem.ordered_after);
 			continue;
 		case Ir_Store:
-			fprintf(dest, "store [%lu] %lu", (ulong) inst.mem.address, (ulong) inst.mem.source);
-			printOrder(dest, inst.mem.ordered_after);
-			continue;
-		case Ir_StoreVolatile:
-			fprintf(dest, "store volatile [%lu] %lu", (ulong) inst.mem.address, (ulong) inst.mem.source);
+			fprintf(dest, "store%s [%lu] %lu", inst.properties & Prop_Mem_Volatile ? " volatile" : "",
+					(ulong) inst.mem.address, (ulong) inst.mem.source);
 			printOrder(dest, inst.mem.ordered_after);
 			continue;
 		case Ir_BitNot:
@@ -744,14 +786,23 @@ void printBlock (FILE *dest, Block *blk, IrList ir) {
 		case Ir_ZeroExtend:
 			fprintf(dest, "zeroex i%lu, %lu\n", (ulong) inst.size * 8, (ulong) inst.unop);
 			continue;
+		case Ir_FCast:
+			fprintf(dest, "fcast f%lu, %lu\n", (ulong) inst.size * 8, (ulong) inst.unop);
+			break;
 		case Ir_Access:
 			fprintf(dest, "access i%lu, %lu @ %lu\n", (ulong) inst.size * 8, (ulong) inst.unop_const.val, (ulong) inst.unop_const.offset);
 			continue;
-		case Ir_IntToFloat:
-			fprintf(dest, "int->float %lu\n", (ulong) inst.unop);
+		case Ir_SIntToFloat:
+			fprintf(dest, "s%lu->float %lu\n", (ulong) inst.size * 8, (ulong) inst.unop);
 			continue;
-		case Ir_FloatToInt:
-			fprintf(dest, "float->int %lu\n", (ulong) inst.unop);
+		case Ir_UIntToFloat:
+			fprintf(dest, "u%lu->float %lu\n", (ulong) inst.size * 8, (ulong) inst.unop);
+			continue;
+		case Ir_FloatToSInt:
+			fprintf(dest, "float->s%lu %lu\n", (ulong) inst.size * 8, (ulong) inst.unop);
+			continue;
+		case Ir_FloatToUInt:
+			fprintf(dest, "float->u%lu %lu\n", (ulong) inst.size * 8, (ulong) inst.unop);
 			continue;
 		case Ir_VaArg:
 			fprintf(dest, "va_arg i%lu, %lu\n", (ulong) inst.size * 8, (ulong) inst.unop);
@@ -760,13 +811,17 @@ void printBlock (FILE *dest, Block *blk, IrList ir) {
 			fprintf(dest, "va_start %lu, param %lu\n", (ulong) inst.unop_const.val, (ulong) inst.unop_const.offset);
 			continue;
 		case Ir_Add: fprintf(dest, "add"); break;
+		case Ir_FAdd: fprintf(dest, "fadd"); break;
 		case Ir_Sub: fprintf(dest, "sub"); break;
+		case Ir_FSub: fprintf(dest, "fsub"); break;
 		case Ir_Mul: fprintf(dest, "mul"); break;
-		case Ir_SMul: fprintf(dest, "smul"); break;
+		case Ir_FMul: fprintf(dest, "fmul"); break;
 		case Ir_Div: fprintf(dest, "div"); break;
 		case Ir_SDiv: fprintf(dest, "sdiv"); break;
+		case Ir_FDiv: fprintf(dest, "fdiv"); break;
 		case Ir_Mod: fprintf(dest, "mod"); break;
 		case Ir_SMod: fprintf(dest, "smod"); break;
+		case Ir_FMod: fprintf(dest, "fmod"); break;
 		case Ir_BitAnd: fprintf(dest, "and"); break;
 		case Ir_BitOr: fprintf(dest, "or"); break;
 		case Ir_BitXor: fprintf(dest, "xor"); break;
