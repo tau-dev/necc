@@ -67,7 +67,7 @@ const char *tz(Token t) {
 	return buf.ptr;
 }
 
-const char *lexz(Tokenization t, const Token *current, const Token *parse_pos, u32 count) {
+const char *lexz(TokenList t, const Token *current, const Token *parse_pos, u32 count) {
 	int ctx_len = 8;
 	if (count) ctx_len = (count + 1) / 2;
 

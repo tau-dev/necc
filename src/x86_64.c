@@ -813,15 +813,17 @@ static void emitInstForward(Codegen *c, IrRef i) {
 		emit(c, " not R", reg);
 		emit(c, " mov #, R", i, reg);
 	} break;
-	case Ir_LessThan: {
+	case Ir_LessThan:
+	case Ir_SLessThan:
+	case Ir_LessThanOrEquals:
+	case Ir_SLessThanOrEquals: {
 		emit(c, " cmp #, R", inst.binop.lhs, loadTo(c, RAX, inst.binop.rhs));
-		emit(c, " setl al");
-		emit(c, " movzx rsi, al");
-		emit(c, " mov #, R", i, registerSized(RSI, inst.size));
-	} break;
-	case Ir_LessThanOrEquals: {
-		emit(c, " cmp #, R", inst.binop.lhs, loadTo(c, RAX, inst.binop.rhs));
-		emit(c, " setle al");
+		switch (inst.kind) {
+			case Ir_LessThan: emit(c, " setb al"); break;
+			case Ir_SLessThan: emit(c, " setl al"); break;
+			case Ir_LessThanOrEquals: emit(c, " setbe al"); break;
+			case Ir_SLessThanOrEquals: emit(c, " setle al"); break;
+		}
 		emit(c, " movzx rsi, al");
 		emit(c, " mov #, R", i, registerSized(RSI, inst.size));
 	} break;

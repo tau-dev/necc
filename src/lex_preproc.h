@@ -2,6 +2,7 @@
 #include "util.h"
 #include "types.h"
 #include "common.h"
+#include "common.h"
 
 
 typedef enum {
@@ -130,7 +131,17 @@ typedef enum {
 
 	Tok_Equalable_Start = Tok_Equals,
 	Tok_Assignment_Start = Tok_PlusEquals,
+
+	Tok_END = 0x100,
 } TokenKind;
+
+typedef enum {
+	Special___func__,
+	Special_memcpy,
+	Special_malloc,
+
+	Special_COUNT,
+} SpecialIdentifier;
 
 STATIC_ASSERT(Tok_EQUALED > Tok_Tilde && !(Tok_EQUALED & Tok_Tilde),
 		"Tok_EQUALED must follow all other tokens");
@@ -166,17 +177,21 @@ typedef struct {
 typedef LIST(SourceFile*) FileList;
 
 
-// All members allocated with malloc
 typedef struct {
-	FileList files;
-
 	Token *tokens;
 	TokenLocation *positions;
 	u32 count;
 	u32 capacity;
+} TokenList;
+
+// All members allocated with malloc
+typedef struct Tokenization {
+	FileList files;
+
+	TokenList list;
 
 	SymbolList symbols;
-	Symbol *func_sym; // STYLE THIS IS TERRIBLY CRUFTY
+	Symbol *special_identifiers[Special_COUNT];
 } Tokenization;
 
 typedef struct {
@@ -185,6 +200,8 @@ typedef struct {
 
 	StringList command_line_macros;
 	StringList system_macros;
+
+	Options *options;
 } LexParams;
 
 typedef LIST(Token) Token_List;

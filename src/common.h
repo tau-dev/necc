@@ -10,6 +10,8 @@ typedef enum {
 	I128 = 16,
 } PrimitiveSize;
 
+typedef struct Symbol Symbol;
+
 typedef struct Target {
 	Type ptrdiff;
 	Type intptr;
@@ -19,6 +21,7 @@ typedef struct Target {
 	PrimitiveSize valist_size;
 	PrimitiveSize typesizes[Int_unsigned];
 	Version version;
+	bool link_std;
 } Target;
 
 
@@ -44,7 +47,7 @@ typedef struct Macro Macro;
 typedef struct Block Block;
 typedef struct Token Token;
 
-typedef struct Symbol {
+struct Symbol {
 	String name;
 
 	int keyword;
@@ -62,7 +65,7 @@ typedef struct Symbol {
 		Block *block;
 		const Token *def_location;
 	} label;
-} Symbol;
+};
 
 typedef LIST(Symbol) SymbolList;
 
@@ -77,3 +80,6 @@ typedef enum {
 	Intrinsic_Nanf,
 	Intrinsic_Inff,
 } Intrinsic;
+
+typedef struct Tokenization Tokenization;
+bool evalPreprocExpression(Tokenization tokens, Arena *arena, Options *opt);

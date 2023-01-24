@@ -197,6 +197,7 @@ Target target_x64_linux_gcc = {
 	.int_size = I32,
 	.valist_size = I32 + I32 + I64 + I64,
 	.version = Version_GNU,
+	.link_std = true,
 };
 
 static String checkIncludePath(Arena *, const char *path);
@@ -227,7 +228,9 @@ int main (int argc, char **args) {
 	bool opt_arith = false;
 	bool runit = false;
 
-	LexParams paths = {0};
+	LexParams paths = {
+		.options = &options,
+	};
 
 	for (int i = 1; i < argc; i++) {
 		if (args[i][0] == '-') {
@@ -480,8 +483,8 @@ int main (int argc, char **args) {
 	}
 
 	free(tokens.symbols.ptr);
-	free(tokens.tokens);
-	free(tokens.positions);
+	free(tokens.list.tokens);
+	free(tokens.list.positions);
 	free(tokens.files.ptr);
 
 	free(paths.user_include_dirs.ptr);

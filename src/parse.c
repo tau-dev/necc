@@ -28,7 +28,7 @@ static Value no_value = { .inst = IDX_NONE };
 typedef LIST(Symbol*) Scope;
 
 typedef struct {
-	Arena arena;
+	Arena *arena;
 	Arena *code_arena;
 	const Tokenization tokens;
 	const Token *pos;
@@ -67,8 +67,8 @@ typedef struct {
 
 static void vcomperror (Log level, bool crash_on_error, const Tokenization *t, const Token *tok, const Token *parse_pos, const char *msg, va_list args) {
 	(void) parse_pos;
-	u32 idx = tok - t->tokens;
-	TokenLocation pos = t->positions[idx];
+	u32 idx = tok - t->list.tokens;
+	TokenLocation pos = t->list.positions[idx];
 	SourceFile source = *t->files.ptr[pos.source.file_id];
 
     printMsg(level, source, pos.source);
@@ -137,7 +137,7 @@ static inline bool tryEat (Parse *parse, TokenKind kind) {
 }
 
 static inline void setLoc (Parse *parse, const Token *tok) {
-	parse->build.loc = parse->tokens.positions[tok - parse->tokens.tokens].source;
+	parse->build.loc = parse->tokens.list.positions[tok - parse->tokens.list.tokens].source;
 }
 
 typedef enum {
@@ -164,7 +164,7 @@ static Type parseTypeBase(Parse *, u8 *storage);
 static Type parseTypeName(Parse *, u8 *storage);
 static nodiscard bool tryParseTypeBase(Parse *, Type *dest, u8 *storage);
 static nodiscard bool tryParseTypeName(Parse *, Type *dest, u8 *storage);
-static void parseFunction(Parse *, Symbol *name, Symbol *func_sym);
+static void parseFunction(Parse *, Symbol *name);
 static Value rvalue(Value v, Parse *);
 static Value dereference(Parse *, Value v);
 static Value pointerAdd(IrBuild *, Value lhs, Value rhs, Parse *op_parse, const Token *);
@@ -181,16 +181,17 @@ static OrdinaryIdentifier *define(Parse *, Declaration, u8 storage, const Token 
 
 // Parses all top level declarations into a Module.
 void parse (Arena *code_arena, Tokenization tokens, Options *opt, Module *module) {
+	Arena parse_arena = create_arena(256 * 1024L);
 	Parse parse = {
-		.arena = create_arena(256 * 1024L),
+		.arena = &parse_arena,
+		.code_arena = code_arena,
 		// Used only as a scratch buffer for constructing constants at the
 		// top level. Kind of inefficient, but very straightforward.
 		.build = {.block_arena = code_arena},
-		.code_arena = code_arena,
 		.tokens = tokens,
 		.target = opt->target,
 		.opt = opt,
-		.pos = tokens.tokens,
+		.pos = tokens.list.tokens,
 		.module = module,
 	};
 	startNewBlock(&parse.build, zstr("dummy"));
@@ -238,7 +239,7 @@ void parse (Arena *code_arena, Tokenization tokens, Options *opt, Module *module
 
 				IrBuild global_ir = parse.build;
 				parse.current_func_type = decl.type.function;
-				parseFunction(&parse, decl.name, tokens.func_sym);
+				parseFunction(&parse, decl.name);
 				parse.scope_depth = 0;
 
 				StaticValue *val = &parse.module->ptr[ord->static_id];
@@ -274,14 +275,14 @@ void parse (Arena *code_arena, Tokenization tokens, Options *opt, Module *module
 
 	discardIrBuilder(&parse.build);
 	popScope(&parse, (Scope) {0});
-	free_arena(&parse.arena, "parse temporaries");
+	free_arena(parse.arena, "parse temporaries");
 }
 
 
 OrdinaryIdentifier *genOrdSymbol (Parse *parse, Symbol *sym, bool *new) {
 	bool is_new = !sym->ordinary || sym->ordinary->scope_depth < parse->scope_depth;
 	if (is_new) {
-		OrdinaryIdentifier *created = ALLOC(&parse->arena, OrdinaryIdentifier);
+		OrdinaryIdentifier *created = ALLOC(parse->arena, OrdinaryIdentifier);
 		*created = (OrdinaryIdentifier) {
 			.shadowed = sym->ordinary,
 			.scope_depth = parse->scope_depth
@@ -359,7 +360,29 @@ static IrRef coercerval(Value v, Type t, Parse *, const Token *, bool allow_cast
 static Value immediateIntVal(Parse *, Type typ, u64 val);
 static inline void removeEnumness(Type *t);
 
-void parseFunction (Parse *parse, Symbol *symbol, Symbol *func_sym) {
+bool evalPreprocExpression (Tokenization tokens, Arena *arena, Options *opt) {
+	Parse parse = {
+		.arena = arena,
+		.code_arena = arena,
+		.build = {.block_arena = arena},
+
+		.tokens = tokens,
+		.pos = tokens.list.tokens,
+		.opt = opt,
+		.target = opt->target,
+	};
+	Value v = parseExpression(&parse);
+	if (parse.pos->kind != Tok_EOF)
+		parseerror(&parse, parse.pos, "extra tokens after expression");
+
+	u64 val;
+	if (!tryIntConstant(&parse, v, &val))
+		parseerror(&parse, tokens.list.tokens, "preprocessor expression must be constant");
+	return val != 0;
+}
+
+
+void parseFunction (Parse *parse, Symbol *symbol) {
 	FunctionType func_type = parse->current_func_type;
 	u32 param_count = func_type.parameters.len;
 
@@ -376,7 +399,7 @@ void parseFunction (Parse *parse, Symbol *symbol, Symbol *func_sym) {
 	if (is_main) {
 		if (func_type.rettype->kind != Kind_Basic || func_type.rettype->basic != Int_int)
 		{
-			parseerror(parse, parse->pos, "the return type of function main() must be %s", printTypeHighlighted(&parse->arena, BASIC_INT));
+			parseerror(parse, parse->pos, "the return type of function main() must be %s", printTypeHighlighted(parse->arena, BASIC_INT));
 		}
 	}
 
@@ -402,6 +425,7 @@ void parseFunction (Parse *parse, Symbol *symbol, Symbol *func_sym) {
 	}));
 
 	bool is_new;
+	Symbol *func_sym = parse->tokens.special_identifiers[Special___func__];
 	OrdinaryIdentifier *func_name_sym = genOrdSymbol(parse, func_sym, &is_new);
 	assert(is_new);
 	func_name_sym->kind = Sym_Value_Static;
@@ -1112,43 +1136,54 @@ static Value parseExprEquality (Parse *parse) {
 static Value parseExprComparison (Parse *parse) {
 	IrBuild *build = &parse->build;
 	Value lhs = parseExprShift(parse);
-	const Token *primary = parse->pos;
-	switch (primary->kind) {
-	case Tok_Less:
-	case Tok_LessEquals:
-	case Tok_Greater:
-	case Tok_GreaterEquals: {
-		parse->pos++;
-		Value rhs = parseExprShift(parse);
+	while (true) {
+		switch (parse->pos->kind) {
+		case Tok_Less:
+		case Tok_LessEquals:
+		case Tok_Greater:
+		case Tok_GreaterEquals: {
+			const Token *primary = parse->pos;
+			parse->pos++;
+			Value rhs = parseExprShift(parse);
 
-		if (lhs.inst == rhs.inst && lhs.category == rhs.category && parse->opt->warn_compare)
-			parsemsg(Log_Warn, parse, primary, "comparison to self is always %s",
-					primary->kind == Tok_Less || primary->kind == Tok_Greater ? "false" : "true");
-		lhs = rvalue(lhs, parse);
-		rhs = rvalue(rhs, parse);
-
-		if (lhs.typ.kind == Kind_Pointer && rhs.typ.kind == Kind_Pointer) {
+			if (lhs.inst == rhs.inst && lhs.category == rhs.category && parse->opt->warn_compare)
+				parsemsg(Log_Warn, parse, primary, "comparison to self is always %s",
+						primary->kind == Tok_Less || primary->kind == Tok_Greater ? "false" : "true");
 			lhs = rvalue(lhs, parse);
 			rhs = rvalue(rhs, parse);
-		} else if (lhs.typ.kind == Kind_Pointer || rhs.typ.kind == Kind_Pointer) {
-			parseerror(parse, primary, "can not compare types %s and %s",
-					printTypeHighlighted(&parse->arena, lhs.typ), printTypeHighlighted(&parse->arena, rhs.typ));
-		} else {
-			arithmeticConversions(parse, primary, &lhs, &rhs);
+
+			Type common;
+			if (lhs.typ.kind == Kind_Pointer && rhs.typ.kind == Kind_Pointer) {
+				if (!typeCompatible(lhs.typ, rhs.typ)) {
+					parseerror(parse, primary, "cannot compare pointers to incompatible types %s and %s",
+						printTypeHighlighted(parse->arena, lhs.typ),
+						printTypeHighlighted(parse->arena, rhs.typ));
+				}
+				lhs = rvalue(lhs, parse);
+				rhs = rvalue(rhs, parse);
+				common = lhs.typ;
+			} else if (lhs.typ.kind == Kind_Pointer || rhs.typ.kind == Kind_Pointer) {
+				parseerror(parse, primary, "can not compare types %s and %s",
+						printTypeHighlighted(parse->arena, lhs.typ), printTypeHighlighted(parse->arena, rhs.typ));
+			} else {
+				common = arithmeticConversions(parse, primary, &lhs, &rhs);
+			}
+			u16 size = parse->target.int_size;
+			IrRef res;
+			bool is_unsigned = common.kind == Kind_Pointer || (common.basic & Int_unsigned);
+			switch (primary->kind) {
+			case Tok_Less: res = genLessThan(build, lhs.inst, rhs.inst, size, is_unsigned); break;
+			case Tok_LessEquals: res = genLessThanOrEquals(build, lhs.inst, rhs.inst, size, is_unsigned); break;
+			case Tok_Greater: res = genLessThan(build, rhs.inst, lhs.inst, size, is_unsigned); break;
+			case Tok_GreaterEquals: res = genLessThanOrEquals(build, rhs.inst, lhs.inst, size, is_unsigned); break;
+			default: unreachable;
+			}
+
+			lhs = (Value) { BASIC_INT, res };
+		} break;
+		default:
+			return lhs;
 		}
-		u16 size = parse->target.int_size;
-		IrRef res;
-		switch (primary->kind) {
-		case Tok_Less: res = genLessThan(build, lhs.inst, rhs.inst, size); break;
-		case Tok_LessEquals: res = genLessThanOrEquals(build, lhs.inst, rhs.inst, size); break;
-		case Tok_Greater: res = genLessThan(build, rhs.inst, lhs.inst, size); break;
-		case Tok_GreaterEquals: res = genLessThanOrEquals(build, rhs.inst, lhs.inst, size); break;
-		default: unreachable;
-		}
-		return (Value) { BASIC_INT, res };
-	}
-	default:
-		return lhs;
 	}
 }
 
@@ -1235,7 +1270,7 @@ static Value parseExprLeftUnary (Parse *parse) {
 			return v;
 		}
 		if (v.typ.kind != Kind_Pointer)
-			parseerror(parse, primary, "cannot dereference value of type %s; expected a pointer type", printTypeHighlighted(&parse->arena, v.typ));
+			parseerror(parse, primary, "cannot dereference value of type %s; expected a pointer type", printTypeHighlighted(parse->arena, v.typ));
 		return dereference(parse, v);
 	}
 	case Tok_Bang: {
@@ -1335,7 +1370,7 @@ static Value parseExprRightUnary (Parse *parse) {
 		if (tryEat(parse, Tok_OpenParen)) {
 			Value func = rvalue(v, parse);
 			if (func.typ.kind != Kind_FunctionPtr)
-				parseerror(parse, primary, "expected a function type, got an expression of type %s", printTypeHighlighted(&parse->arena, func.typ));
+				parseerror(parse, primary, "expected a function type, got an expression of type %s", printTypeHighlighted(parse->arena, func.typ));
 
 			IrRefList arguments = {0};
 			DeclList params = func.typ.function.parameters;
@@ -1414,7 +1449,7 @@ static Value parseExprRightUnary (Parse *parse) {
 
 			if (typeSize(v.typ, &parse->target) == 0) {
 				parseerror(parse, NULL, "cannot access on a value of incomplete type %s",
-					printTypeHighlighted(&parse->arena, v.typ));
+					printTypeHighlighted(parse->arena, v.typ));
 			}
 
 			Symbol *member_name = expect(parse, Tok_Identifier).val.symbol;
@@ -1427,7 +1462,7 @@ static Value parseExprRightUnary (Parse *parse) {
 						break;
 				}
 				if (i == resolved.members.len)
-					parseerror(parse, NULL, "type %s does not have a member named %.*s", printTypeHighlighted(&parse->arena, v.typ), member_name->name.len, member_name->name.ptr);
+					parseerror(parse, NULL, "type %s does not have a member named %.*s", printTypeHighlighted(parse->arena, v.typ), member_name->name.len, member_name->name.ptr);
 				CompoundMember member = resolved.members.ptr[i];
 				bool is_flex = isFlexibleArrayMember(resolved.members, i);
 
@@ -1447,7 +1482,7 @@ static Value parseExprRightUnary (Parse *parse) {
 				}
 			} else {
 				parseerror(parse, NULL, "member access only works on %sstruct%ss and %sunion%ss, not on %s",
-						BOLD, RESET, BOLD, RESET, printTypeHighlighted(&parse->arena, resolved));
+						BOLD, RESET, BOLD, RESET, printTypeHighlighted(parse->arena, resolved));
 			}
 		} else {
 			break;
@@ -1578,7 +1613,7 @@ static Value parseExprBase (Parse *parse) {
 		}
 		if (!got) {
 			if (!default_case)
-				parseerror(parse, primary, "the controlling expression's type %s matched none of the generic associations, and no default case was provided", printTypeHighlighted(&parse->arena, t));
+				parseerror(parse, primary, "the controlling expression's type %s matched none of the generic associations, and no default case was provided", printTypeHighlighted(parse->arena, t));
 			const Token *end = parse->pos;
 			parse->pos = default_case;
 			result = parseExprAssignment(parse);
@@ -1696,7 +1731,7 @@ static void initializeAutoDefinition (Parse *parse, OrdinaryIdentifier *ord, Typ
 	}
 
 	if (typeSize(type, &parse->target) == 0)
-		parseerror(parse, init_token, "cannot initialize incomplete type %s", printTypeHighlighted(&parse->arena, type));
+		parseerror(parse, init_token, "cannot initialize incomplete type %s", printTypeHighlighted(parse->arena, type));
 
 	// PERFORMANCE This could generate significant load on the memory optimizer.
 	genSetZero(build, dest.address, typeSize(type, &parse->target), false);
@@ -1780,7 +1815,7 @@ static void initializeStaticDefinition (Parse *parse, OrdinaryIdentifier *ord, T
 	}
 
 	if (typeSize(type, &parse->target) == 0)
-		parseerror(parse, init_token, "cannot initialize incomplete type %s", printTypeHighlighted(&parse->arena, type));
+		parseerror(parse, init_token, "cannot initialize incomplete type %s", printTypeHighlighted(parse->arena, type));
 
 	dest.reloc_data = (MutableString) ALLOCN(parse->code_arena, char,
 			typeSize(type, &parse->target));
@@ -1822,7 +1857,7 @@ static Value parseIntrinsic (Parse *parse, Intrinsic i) {
 		if (!isLvalue(v))
 			parseerror(parse, first, "va_start expects an lvalue");
 		if (v.typ.kind != Kind_Array || v.typ.array.inner->kind != Kind_Basic)
-			parseerror(parse, first, "va_start expects a va_list, not a %s", printTypeHighlighted(&parse->arena, v.typ));
+			parseerror(parse, first, "va_start expects a va_list, not a %s", printTypeHighlighted(parse->arena, v.typ));
 		genVaStart(build, v.inst, IDX_NONE /*ignored*/);
 
 		return (Value){ BASIC_VOID };
@@ -1832,7 +1867,7 @@ static Value parseIntrinsic (Parse *parse, Intrinsic i) {
 		if (!isLvalue(v))
 			parseerror(parse, first, "va_arg expects an lvalue");
 		if (v.typ.kind != Kind_Array || v.typ.array.inner->kind != Kind_Basic)
-			parseerror(parse, first, "va_arg expects a va_list, not a %s", printTypeHighlighted(&parse->arena, v.typ));
+			parseerror(parse, first, "va_arg expects a va_list, not a %s", printTypeHighlighted(parse->arena, v.typ));
 		expect(parse, Tok_Comma);
 		Type t = parseTypeName(parse, NULL);
 		expect(parse, Tok_CloseParen);
@@ -2027,7 +2062,7 @@ u32 findDesignatedMemberIdx (Parse *parse, Type type) {
 	assert(id[-1].kind == Tok_Dot);
 	if (type.kind != Kind_Struct && type.kind != Kind_Union) {
 		parseerror(parse, id, "cannot use a member designator for initializing the type %s",
-				printTypeHighlighted(&parse->arena, type));
+				printTypeHighlighted(parse->arena, type));
 	}
 	Members members = type.members;
 	Symbol *sym = expect(parse, Tok_Identifier).val.symbol;
@@ -2036,7 +2071,7 @@ u32 findDesignatedMemberIdx (Parse *parse, Type type) {
 			return idx;
 	}
 	parseerror(parse, id, "%s does not have a member named %.*s",
-			printTypeHighlighted(&parse->arena, type), sym->name.len, sym->name.ptr);
+			printTypeHighlighted(parse->arena, type), sym->name.len, sym->name.ptr);
 }
 
 u64 findDesignatedArrayIdx (Parse *parse, Type type) {
@@ -2044,7 +2079,7 @@ u64 findDesignatedArrayIdx (Parse *parse, Type type) {
 	assert(id[-1].kind == Tok_OpenBracket);
 	if (type.kind != Kind_Array && type.kind != Kind_VLArray) {
 		parseerror(parse, id, "cannot use an array designator for initializing the type %s",
-				printTypeHighlighted(&parse->arena, type));
+				printTypeHighlighted(parse->arena, type));
 	}
 	u64 pos;
 	if (!tryIntConstant(parse, parseExpression(parse), &pos))
@@ -2132,7 +2167,12 @@ static bool tryParseTypeName (Parse *parse, Type *type, u8 *storage_dest) {
 static Type parseTypeBase (Parse *parse, u8 *storage) {
 	Type type;
 	if (!tryParseTypeBase(parse, &type, storage)) {
-		if (parse->pos->kind == Tok_Identifier) {
+		// TODO I don't think default-int is allowed in all contexts;
+		// make this more precise.
+		if (parse->pos[0].kind == Tok_Identifier &&
+			(parse->pos[1].kind == Tok_OpenParen || parse->pos[1].kind == Tok_CloseParen || parse->pos[1].kind == Tok_Semicolon
+			|| parse->pos[1].kind == Tok_Comma || parse->pos[1].kind == Tok_Equals))
+		{
 			requires(parse, "expected a type name; default types of int", Features_DefaultInt);
 			if (storage)
 				*storage = Storage_Unspecified;
@@ -2321,7 +2361,7 @@ static bool tryParseTypeBase (Parse *parse, Type *type, u8 *storage_dest) {
 				const Token *type_token = parse->pos;
 				Type underlying = parseTypeBase(parse, NULL);
 				if (!isIntegerType(underlying))
-					parseerror(parse, type_token, "the underlying type of an enumeration must be an integer type, %s is not permitted", printTypeHighlighted(&parse->arena, underlying));
+					parseerror(parse, type_token, "the underlying type of an enumeration must be an integer type, %s is not permitted", printTypeHighlighted(parse->arena, underlying));
 				base.basic = underlying.basic;
 			}
 
@@ -2542,7 +2582,7 @@ static bool tryParseTypeBase (Parse *parse, Type *type, u8 *storage_dest) {
 
 				Version v = parse->target.version;
 				if (v > Version_C89 && v < Version_GNU)
-					parseerror(parse, begin, "support for implicit %s in declarations was removed in C99", printTypeHighlighted(&parse->arena, BASIC_INT));
+					parseerror(parse, begin, "support for implicit %s in declarations was removed in C99", printTypeHighlighted(parse->arena, BASIC_INT));
 			}
 			return true;
 		} else if (base.basic == Int_char) {
@@ -2622,7 +2662,7 @@ static Type parseStructUnionBody(Parse *parse, bool is_struct) {
 				Type basetype = bare_colon ? base : decl.type;
 				if (!isSignedOrUnsignedIntegerType(basetype))
 					parseerror(parse, colon, "a bit-field must have integer type, %s does not work",
-							printTypeHighlighted(&parse->arena, basetype));
+							printTypeHighlighted(parse->arena, basetype));
 				if (basetype.basic != Int_bool && (basetype.basic & ~Int_unsigned) != Int_int)
 					requires(parse, "bit-fields of types other than int", Features_GNU_Extensions);
 
@@ -2930,8 +2970,8 @@ static void defGlobal (
 
 		if (!typeCompatible(decl.type, existing_type)) {
 			parsemsg(Log_Err, parse, decl_token, "redeclaration of %.*s with incompatible type %s",
-					STRING_PRINTAGE(decl.name->name), printTypeHighlighted(&parse->arena, decl.type));
-    		parsemsg(Log_Info | Log_Fatal, parse, existing_val->decl_location, "previous declaration had type %s", printTypeHighlighted(&parse->arena, existing_type));
+					STRING_PRINTAGE(decl.name->name), printTypeHighlighted(parse->arena, decl.type));
+    		parsemsg(Log_Info | Log_Fatal, parse, existing_val->decl_location, "previous declaration had type %s", printTypeHighlighted(parse->arena, existing_type));
 		}
 		if (tentative && existing_val->def_state == Def_Undefined)
 			existing_val->def_state = Def_Tentative;
@@ -2982,7 +3022,7 @@ static OrdinaryIdentifier *define (
 			parseerror(parse, type_token, "a function at block scope may only be specified extern");
 	}
 
-	OrdinaryIdentifier *new = ALLOC(&parse->arena, OrdinaryIdentifier);
+	OrdinaryIdentifier *new = ALLOC(parse->arena, OrdinaryIdentifier);
 	*new = (OrdinaryIdentifier) {
 		.shadowed = existing,
 		.scope_depth = scope_depth,
@@ -3125,20 +3165,26 @@ static Value arithSub (Parse *parse, const Token *primary, Value lhs, Value rhs)
 
 		if (stride_const == 0) {
 			parseerror(parse, primary, "cannot subtract from a pointer to incomplete type %s",
-				printTypeHighlighted(&parse->arena, *lhs.typ.pointer));
+				printTypeHighlighted(parse->arena, *lhs.typ.pointer));
 		}
 		IrRef stride = genImmediateInt(build, stride_const, parse->target.ptr_size);
 
 		if (rhs.typ.kind == Kind_Pointer) {
+			if (!typeCompatible(*lhs.typ.pointer, *rhs.typ.pointer))
+				parseerror(parse, primary, "cannot subtract pointers to different types %s and %s",
+						printTypeHighlighted(parse->arena, *lhs.typ.pointer),
+						printTypeHighlighted(parse->arena, *rhs.typ.pointer));
 			IrRef diff = genSub(build, lhs.inst, rhs.inst);
 			return (Value) {parse->target.ptrdiff, genDivUnsigned(build, diff, stride, NULL)};
 		} else {
-			IrRef idx = genMulUnsigned(build, coercerval(rhs, parse->target.ptrdiff, parse, primary, false), stride);
+			bool overflow;
+			IrRef idx = genMulSigned(build, coercerval(rhs, parse->target.ptrdiff, parse, primary, false), stride, &overflow);
+			// TODO Handle overflow.
 			return (Value) {lhs.typ, genSub(build, lhs.inst, idx)};
 		}
 	} else {
 		if (rhs.typ.kind == Kind_Pointer)
-			parseerror(parse, primary, "cannot subtract pointer from %s", printType(&parse->arena, rhs.typ));
+			parseerror(parse, primary, "cannot subtract pointer from %s", printType(parse->arena, rhs.typ));
 		Type common = arithmeticConversions(parse, primary, &lhs, &rhs);
 
 		IrRef inst;
@@ -3273,7 +3319,7 @@ static Type arithmeticConversions (Parse *parse, const Token *primary, Value *a,
 			u64 constval;
 			if (!tryIntConstant(parse, *signed_val, &constval) || (i64) constval < 0) {
 				parsemsg(Log_Warn, parse, primary, "wrapping negative value range when converting operands to common type %s",
-						printTypeHighlighted(&parse->arena, common));
+						printTypeHighlighted(parse->arena, common));
 				parsemsg(Log_Info | Log_Noexpand, parse, primary, "explicitly cast operands to an unsigned type to suppress this warning");
 			}
 		}
@@ -3307,7 +3353,7 @@ static Value pointerAdd (IrBuild *ir, Value lhs, Value rhs, Parse *op_parse, con
 	u32 stride_const = typeSize(*ptr.typ.pointer, &op_parse->target);
 	if (stride_const == 0) {
 		parseerror(op_parse, token, "cannot add to a pointer to incomplete type %s",
-			printTypeHighlighted(&op_parse->arena, *ptr.typ.pointer));
+			printTypeHighlighted(op_parse->arena, *ptr.typ.pointer));
 	}
 	IrRef stride = genImmediateInt(ir, stride_const, op_parse->target.ptr_size);
 	IrRef diff = genMulUnsigned(ir, stride, integer);
@@ -3380,7 +3426,7 @@ static void needAssignableLval (Parse *parse, const Token *token, Value v) {
 
 static void needScalar (Parse *p, const Token *token, Type t) {
 	if (!isScalar(t))
-		parseerror(p, token, "expected a scalar type, got %s", printTypeHighlighted(&p->arena, t));
+		parseerror(p, token, "expected a scalar type, got %s", printTypeHighlighted(p->arena, t));
 }
 
 static void discardValue (Parse *parse, const Token *token, Value v) {
@@ -3494,7 +3540,7 @@ static IrRef coercerval (Value v, Type t, Parse *p, const Token *primary, bool a
 	}
 
 	parseerror(p, primary, "could not convert type %s to type %s",
-		printTypeHighlighted(&p->arena, v.typ), printTypeHighlighted(&p->arena, t));
+		printTypeHighlighted(p->arena, v.typ), printTypeHighlighted(p->arena, t));
 }
 
 static Value immediateIntVal (Parse *p, Type typ, u64 val) {

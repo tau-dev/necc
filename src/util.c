@@ -101,6 +101,11 @@ SourceFile *readAllAlloc (String path, String filename) {
 							Location null_loc = {0, 1, 1};
 							printError(source, null_loc, "file should not contain a null byte");
 						} else if (got == (size_t)count) {
+							// Discard BOM.
+							if (count >= 3 && (uchar) content[0] == 0xef && (uchar) content[1] == 0xbb && (uchar) content[2] == 0xbf) {
+								count -= 3;
+								content += 3;
+							}
 							content[count] = 0;
 							free(filename_z);
 							fclose(f);

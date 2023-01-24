@@ -13,7 +13,7 @@ public int main():
   10 /8 = store [1] 9 after 8
   11 /8 = const 0x3 (3)
   12 /8 = store [1] 11 after 10
-  13 /8 = const 0x0 (0)
+  13 /8 = const 0x1 (1)
   14 /8 = store [1] 13 after 12
   15 /8 = const 0x1 (1)
   16 /8 = stack 8

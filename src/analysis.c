@@ -15,7 +15,9 @@ should be moved into a separate file at some point).
 		IrRef *operand_var;	\
 		switch ((InstKind) (inst).kind) {	\
 		case Ir_Copy:	\
-			operand_var = &(inst).binop.lhs; operation;	\
+			if ((inst).binop.lhs != IDX_NONE) /*Copying IDX_NONE means deletion.*/ {	\
+				operand_var = &(inst).binop.lhs; operation;	\
+			} \
 			operand_var = &(inst).binop.rhs; ordering_operation;	\
 			break;	\
 		BINOP_CASES:	\
@@ -329,7 +331,8 @@ static void cleanUpCopyReplacements(IrList ir, Block *blk) {
 
 void resolveCopies (IrList ir, Blocks blocks) {
 	for (u32 i = 0; i < ir.len; i++) {
-		ON_OPERANDS_AND_ORDER(ir, ir.ptr[i], op, decopy(ir, op), decopyOrder(ir, op));
+		ON_OPERANDS_AND_ORDER(ir, ir.ptr[i], op,
+			decopy(ir, op), decopyOrder(ir, op));
 	}
 
 	for (u32 i = 0; i < blocks.len; i++) {
@@ -437,20 +440,25 @@ void innerBlockPropagate (IrList ir, Blocks blocks) {
 
 			if ((inst.kind == Ir_Load || inst.kind == Ir_Store) && !instVolatile(inst)) {
 				while (inst.mem.ordered_after != IDX_NONE) {
-					Inst prev = insts[inst.mem.ordered_after];
-					if (instVolatile(prev))
-						break;
+					IrRef prev_ref = inst.mem.ordered_after;
+					Inst prev = insts[prev_ref];
+
 					Alias a = canAlias(ir, prev, inst.mem.address, inst.size);
 					if (a == Alias_Never) {
 						inst.mem.ordered_after = prev.mem.ordered_after;
 					} else if (a == Alias_AlwaysExact) {
 						if (prev.kind == Ir_Store) {
-							if (inst.kind == Ir_Load)
+							if (inst.kind == Ir_Load) {
+								// Replace the load with a copy of the stored data
 								replaceWithCopy(ir, ref, prev.mem.source, prev.mem.ordered_after);
-							else {
-								// TODO
+								break;
+							} else {
+								if (instVolatile(prev))
+									break;
+								// Remove the previous store.
+								replaceWithCopy(ir, prev_ref, IDX_NONE, prev.mem.ordered_after);
+								inst.mem.ordered_after = prev.mem.ordered_after;
 							}
-							break;
 						} else {
 							assert(prev.kind == Ir_Load);
 							if (inst.kind == Ir_Load)

@@ -1,3 +1,4 @@
+//!necc-dbg @ -ir -O
 #if (-2) != -2
 #error fail
 #endif

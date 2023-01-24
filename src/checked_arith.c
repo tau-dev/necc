@@ -3,6 +3,8 @@
 #include "util.h"
 
 static inline bool sign(u64 x, PrimitiveSize size) {
+	assert(size);
+	assert(size <= I64);
 	return (x & ((u64) 1 << (size * 8 - 1))) != 0;
 }
 

@@ -419,27 +419,33 @@ IrRef genEquals(IrBuild *build, IrRef a, IrRef b, u16 size) {
 	return append(build, i);
 }
 
-IrRef genLessThan(IrBuild *build, IrRef a, IrRef b, u16 size) {
+IrRef genLessThan(IrBuild *build, IrRef a, IrRef b, u16 size, bool is_unsigned) {
 	Inst *inst = build->ir.ptr;
 	assert(inst[a].size == inst[b].size);
-	Inst i = {Ir_LessThan, .size = size, .binop = {a, b}};
+	Inst i = {is_unsigned ? Ir_LessThan : Ir_SLessThan, .size = size, .binop = {a, b}};
 
 	if (inst[a].kind == Ir_Constant && inst[b].kind == Ir_Constant) {
 		i.kind = Ir_Constant;
-		i.constant = inst[a].constant < inst[b].constant;
+		if (is_unsigned)
+			i.constant = inst[a].constant < inst[b].constant;
+		else
+			i.constant = toSigned(inst[a].constant) < toSigned(inst[b].constant);
 	}
 
 	return append(build, i);
 }
 
-IrRef genLessThanOrEquals(IrBuild *build, IrRef a, IrRef b, u16 size) {
+IrRef genLessThanOrEquals(IrBuild *build, IrRef a, IrRef b, u16 size, bool is_unsigned) {
 	Inst *inst = build->ir.ptr;
 	assert(inst[a].size == inst[b].size);
-	Inst i = {Ir_LessThanOrEquals, .size = size, .binop = {a, b}};
+	Inst i = {is_unsigned ? Ir_LessThanOrEquals : Ir_SLessThanOrEquals, .size = size, .binop = {a, b}};
 
 	if (inst[a].kind == Ir_Constant && inst[b].kind == Ir_Constant) {
 		i.kind = Ir_Constant;
-		i.constant = inst[a].constant <= inst[b].constant;
+		if (is_unsigned)
+			i.constant = inst[a].constant <= inst[b].constant;
+		else
+			i.constant = toSigned(inst[a].constant) <= toSigned(inst[b].constant);
 	}
 
 	return append(build, i);
@@ -825,8 +831,10 @@ void printBlock (FILE *dest, Block *blk, IrList ir) {
 		case Ir_BitAnd: fprintf(dest, "and"); break;
 		case Ir_BitOr: fprintf(dest, "or"); break;
 		case Ir_BitXor: fprintf(dest, "xor"); break;
-		case Ir_LessThan: fprintf(dest, "cmp<"); break;
-		case Ir_LessThanOrEquals: fprintf(dest, "cmp<="); break;
+		case Ir_LessThan: fprintf(dest, "cmpu<"); break;
+		case Ir_SLessThan: fprintf(dest, "cmps<"); break;
+		case Ir_LessThanOrEquals: fprintf(dest, "cmpu<="); break;
+		case Ir_SLessThanOrEquals: fprintf(dest, "cmps<="); break;
 		case Ir_Equals: fprintf(dest, "cmp=="); break;
 		case Ir_ShiftLeft: fprintf(dest, "shift<<"); break;
 		case Ir_ShiftRight: fprintf(dest, "shift>>"); break;
