@@ -1,3 +1,4 @@
+//!necc-dbg @ -run
 /*
  * f(2) will expand to 2*g, which will expand to 2*f, and in this
  * moment f will not be expanded because the macro definition is

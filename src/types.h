@@ -20,6 +20,12 @@ typedef enum {
 	Int_unsigned = 8,
 } BasicType;
 
+typedef enum Signedness {
+	Unsigned,
+	Signed,
+} Signedness;
+
+
 typedef enum {
 	Float_Single,
 	Float_Double,
@@ -193,6 +199,12 @@ static inline bool isScalar (Type t) {
 }
 static inline bool isUnknownSizeArray (Type t) {
 	return t.kind == Kind_VLArray && t.array.count == IDX_NONE;
+}
+static inline Signedness typeSign (Type t) {
+	if (t.kind == Kind_Pointer)
+		return Unsigned;
+	assert(t.kind == Kind_Basic);
+	return t.basic & Int_unsigned ? Unsigned : Signed;
 }
 
 static inline u16 floatSize (FloatType f) {

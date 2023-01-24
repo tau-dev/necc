@@ -1,3 +1,4 @@
+//!necc-dbg @ -run
 #if defined(FOO)
 int a;
 #elif !defined(FOO) && defined(BAR)

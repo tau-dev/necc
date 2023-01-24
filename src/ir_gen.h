@@ -3,33 +3,29 @@
 #include "ir.h"
 #include "parse.h"
 
+
 IrRef genParameter(IrBuild *, u32 param_id);
 IrRef genStackAllocVLA(IrBuild *, IrRef size);
 IrRef genStackAllocNamed(IrBuild *, IrRef size, Declaration);
 IrRef genStackAllocFixed(IrBuild *, u32 size);
 // IrRef genReturn(IrBuild *);
-IrRef genAdd(IrBuild *, IrRef, IrRef);
-IrRef genAddSigned(IrBuild *, IrRef, IrRef, bool *overflow);
+IrRef genAdd(IrBuild *, IrRef, IrRef, Signedness);
 IrRef genFAdd(IrBuild *, IrRef, IrRef);
-IrRef genSub(IrBuild *, IrRef, IrRef);
-IrRef genSubSigned(IrBuild *, IrRef, IrRef, bool *overflow);
+IrRef genSub(IrBuild *, IrRef, IrRef, Signedness);
 IrRef genFSub(IrBuild *, IrRef, IrRef);
-IrRef genMulUnsigned(IrBuild *, IrRef, IrRef);
-IrRef genMulSigned(IrBuild *, IrRef, IrRef, bool *overflow);
+IrRef genMul(IrBuild *, IrRef, IrRef, Signedness);
 IrRef genFMul(IrBuild *, IrRef, IrRef);
-IrRef genDivUnsigned(IrBuild *, IrRef, IrRef, bool *overflow_or_div0);
-IrRef genDivSigned(IrBuild *, IrRef, IrRef, bool *overflow_or_div0);
+IrRef genDiv(IrBuild *, IrRef, IrRef, Signedness);
 IrRef genFDiv(IrBuild *, IrRef, IrRef);
-IrRef genModUnsigned(IrBuild *, IrRef, IrRef, bool *overflow_or_div0);
-IrRef genModSigned(IrBuild *, IrRef, IrRef, bool *overflow_or_div0);
+IrRef genMod(IrBuild *, IrRef, IrRef, Signedness);
 IrRef genFMod(IrBuild *, IrRef, IrRef);
 IrRef genOr(IrBuild *, IrRef, IrRef);
 IrRef genXor(IrBuild *, IrRef, IrRef);
 IrRef genAnd(IrBuild *, IrRef, IrRef);
 IrRef genBitNot(IrBuild *, IrRef);
 IrRef genNot(IrBuild *, IrRef);
-IrRef genLessThan(IrBuild *, IrRef, IrRef, u16 size, bool is_unsigned);
-IrRef genLessThanOrEquals(IrBuild *, IrRef, IrRef, u16 size, bool is_unsigned);
+IrRef genLessThan(IrBuild *, IrRef, IrRef, u16 size, Signedness);
+IrRef genLessThanOrEquals(IrBuild *, IrRef, IrRef, u16 size, Signedness);
 IrRef genEquals(IrBuild *, IrRef, IrRef, u16 size);
 IrRef genShiftLeft(IrBuild *, IrRef, IrRef);
 IrRef genShiftRight(IrBuild *, IrRef, IrRef);
@@ -39,8 +35,8 @@ IrRef genTrunc(IrBuild *, IrRef source, u16 target);
 IrRef genSignExt(IrBuild *, IrRef source, u16 target);
 IrRef genZeroExt(IrBuild *, IrRef source, u16 target);
 IrRef genFCast(IrBuild *, IrRef source, u16 target);
-IrRef genFloatToInt(IrBuild *, IrRef source, u16 target, bool is_unsigned);
-IrRef genIntToFloat(IrBuild *, IrRef source, u16 target, bool is_unsigned);
+IrRef genFloatToInt(IrBuild *, IrRef source, u16 target, Signedness);
+IrRef genIntToFloat(IrBuild *, IrRef source, u16 target, Signedness);
 IrRef genCall(IrBuild *, IrRef func, ValuesSpan args, u16 size, bool is_vararg);
 IrRef genGlobal(IrBuild *, u32 id);
 IrRef genLoad(IrBuild *, IrRef ref, u16 size, bool is_volatile);

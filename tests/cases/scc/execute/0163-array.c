@@ -1,3 +1,4 @@
+//!necc-dbg @ -run
 struct S {int a; int b;};
 struct S arr[2] = {[1] = {3, 4}, [0] = {1, 2}};
 

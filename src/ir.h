@@ -104,6 +104,7 @@ enum InstProperties {
 	Prop_Mem_Volatile = 1,
 
 	Prop_Arith_NoSignedOverflow = 1,
+	Prop_Arith_WouldOverflow = 2,
 
 	Prop_Call_Vararg = 1,
 };

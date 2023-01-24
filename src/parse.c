@@ -209,6 +209,9 @@ void parse (Arena *code_arena, Tokenization tokens, Options *opt, Module *module
 		const Token *type_token = parse.pos;
 		Type base_type = parseTypeBase(&parse, &storage);
 
+		if (allowedNoDeclarator(&parse, base_type))
+			continue;
+
 		if (storage == Storage_Typedef) {
 			parseTypedefDecls(&parse, base_type);
 			continue;
@@ -217,8 +220,6 @@ void parse (Arena *code_arena, Tokenization tokens, Options *opt, Module *module
 		if (storage == Storage_Auto || storage == Storage_Register)
 			parseerror(&parse, type_token, "identifier at file scope can not have automatic (stack-allocated) storage duration");
 
-		if (allowedNoDeclarator(&parse, base_type))
-			continue;
 
 		u32 declarators = 0;
 		while (true) {
@@ -445,7 +446,9 @@ void parseFunction (Parse *parse, Symbol *symbol) {
 
 		bool is_new;
 		OrdinaryIdentifier *sym = genOrdSymbol(parse, param.name, &is_new);
+		// TODO This is wrong, emit duplicate parameter error.
 		assert(is_new);
+
 		sym->kind = Sym_Value_Auto;
 		sym->decl_location = sym->def_location = parse->pos;
 		sym->value = (Value) {param.type, slot, Ref_LValue};
@@ -794,13 +797,14 @@ static void parseStatement (Parse *parse, bool *had_non_declaration) {
 		if (labeled)
 			requires(parse, "for arbitrary reasons, labels before declarations", Features_C23);
 
+		if (allowedNoDeclarator(parse, base_type))
+			break;
+
 		if (storage == Storage_Typedef) {
 			parseTypedefDecls(parse, base_type);
 			break;
 		}
 
-		if (allowedNoDeclarator(parse, base_type))
-			break;
 
 		do {
 			const Token *decl_token = parse->pos;
@@ -964,16 +968,16 @@ static Value parseExprElvis (Parse *parse) {
 			common = lhs.typ;
 		else if (comparablePointers(parse, lhs, rhs))
 			// For function-null comparison
-			common = lhs.typ.kind == Kind_Pointer ? rhs.typ : lhs.typ;
+			common = lhs.typ.kind == Kind_Pointer ? lhs.typ : rhs.typ;
 		else // This can only generate an extension instruction, which will be reordered into the right block.
 			common = arithmeticConversions(parse, colon, &rhs, &lhs);
 
-		IrRef src_r = genPhiOut(build, coerce(rhs, common, parse, colon));
+		IrRef src_r = genPhiOut(build, coercerval(rhs, common, parse, colon, true));
 		Block *join = newBlock(&parse->build, STRING_EMPTY);
 		genJump(build, join);
 
 		build->insertion_block = true_branch;
-		IrRef src_l = genPhiOut(build, coerce(lhs, common, parse, colon));
+		IrRef src_l = genPhiOut(build, coercerval(lhs, common, parse, colon, true));
 		genJump(build, join);
 
 		IrRef dest = genPhiIn(build, typeSize(common, &parse->target));
@@ -1118,8 +1122,16 @@ static Value parseExprEquality (Parse *parse) {
 		lhs = rvalue(lhs, parse);
 		rhs = rvalue(rhs, parse);
 
-		// FIXME The zero value may have non-intptr size. Is it important?
-		if (!comparablePointers(parse, lhs, rhs)) {
+		if (comparablePointers(parse, lhs, rhs)) {
+			if (!typeCompatible(lhs.typ, rhs.typ)) {
+				// Fixup size of null pointer constants.
+				if (lhs.typ.kind != Kind_Pointer) {
+					lhs.inst = genZeroExt(build, lhs.inst, parse->target.ptr_size);
+				} else if (rhs.typ.kind != Kind_Pointer) {
+					rhs.inst = genZeroExt(build, rhs.inst, parse->target.ptr_size);
+				}
+			}
+		} else {
 			arithmeticConversions(parse, primary, &lhs, &rhs);
 		}
 
@@ -1170,12 +1182,13 @@ static Value parseExprComparison (Parse *parse) {
 			}
 			u16 size = parse->target.int_size;
 			IrRef res;
-			bool is_unsigned = common.kind == Kind_Pointer || (common.basic & Int_unsigned);
+
+			Signedness sign = typeSign(common);
 			switch (primary->kind) {
-			case Tok_Less: res = genLessThan(build, lhs.inst, rhs.inst, size, is_unsigned); break;
-			case Tok_LessEquals: res = genLessThanOrEquals(build, lhs.inst, rhs.inst, size, is_unsigned); break;
-			case Tok_Greater: res = genLessThan(build, rhs.inst, lhs.inst, size, is_unsigned); break;
-			case Tok_GreaterEquals: res = genLessThanOrEquals(build, rhs.inst, lhs.inst, size, is_unsigned); break;
+			case Tok_Less: res = genLessThan(build, lhs.inst, rhs.inst, size, sign); break;
+			case Tok_LessEquals: res = genLessThanOrEquals(build, lhs.inst, rhs.inst, size, sign); break;
+			case Tok_Greater: res = genLessThan(build, rhs.inst, lhs.inst, size, sign); break;
+			case Tok_GreaterEquals: res = genLessThanOrEquals(build, rhs.inst, lhs.inst, size, sign); break;
 			default: unreachable;
 			}
 
@@ -1326,7 +1339,7 @@ static Value parseExprLeftUnary (Parse *parse) {
 
 		if (primary->kind == Tok_Minus) {
 			u32 zero = genImmediateInt(build, 0, typeSize(v.typ, &parse->target));
-			v.inst = genSub(build, zero, v.inst);
+			v.inst = genSub(build, zero, v.inst, typeSign(v.typ));
 		}
 		return v;
 	}
@@ -1469,7 +1482,7 @@ static Value parseExprRightUnary (Parse *parse) {
 				v.typ = member.type;
 				if (isLvalue(v)) {
 					IrRef offset = genImmediateInt(build, member.offset, typeSize(parse->target.intptr, &parse->target));
-					v.inst = genAdd(build, v.inst, offset);
+					v.inst = genAdd(build, v.inst, offset, Unsigned);
 
 					if (is_flex) {
 						v.typ = (Type) {Kind_Pointer, .pointer = resolved.members.ptr[i].type.array.inner};
@@ -2125,7 +2138,7 @@ static void initializeFromValue (Parse *parse, InitializationDest dest, u32 offs
 		}
 	} else {
 		IrRef offset_inst = genImmediateInt(build, offset, parse->target.ptr_size);
-		IrRef dest_addr = genAdd(build, dest.address, offset_inst);
+		IrRef dest_addr = genAdd(build, dest.address, offset_inst, Unsigned);
 		genStore(build, dest_addr, ref, false);
 	}
 }
@@ -3144,13 +3157,8 @@ static Value arithAdd (Parse *parse, const Token *primary, Value lhs, Value rhs)
 		IrRef inst;
 		if (common.kind == Kind_Float) {
 			inst = genFAdd(&parse->build, lhs.inst, rhs.inst);
-		} else if (common.basic & Int_unsigned) {
-			inst = genAdd(&parse->build, lhs.inst, rhs.inst);
 		} else {
-			bool overflow = false;
-			inst = genAddSigned(&parse->build, lhs.inst, rhs.inst, &overflow);
-			if (overflow)
-				parsemsg(Log_Warn, parse, primary, "signed integer overflow");
+			inst = genAdd(&parse->build, lhs.inst, rhs.inst, typeSign(common));
 		}
 		return (Value) {common, inst};
 	}
@@ -3174,13 +3182,12 @@ static Value arithSub (Parse *parse, const Token *primary, Value lhs, Value rhs)
 				parseerror(parse, primary, "cannot subtract pointers to different types %s and %s",
 						printTypeHighlighted(parse->arena, *lhs.typ.pointer),
 						printTypeHighlighted(parse->arena, *rhs.typ.pointer));
-			IrRef diff = genSub(build, lhs.inst, rhs.inst);
-			return (Value) {parse->target.ptrdiff, genDivUnsigned(build, diff, stride, NULL)};
+			IrRef diff = genSub(build, lhs.inst, rhs.inst, Unsigned);
+			return (Value) {parse->target.ptrdiff, genDiv(build, diff, stride, Unsigned)};
 		} else {
-			bool overflow;
-			IrRef idx = genMulSigned(build, coercerval(rhs, parse->target.ptrdiff, parse, primary, false), stride, &overflow);
+			IrRef idx = genMul(build, coercerval(rhs, parse->target.ptrdiff, parse, primary, false), stride, Signed);
 			// TODO Handle overflow.
-			return (Value) {lhs.typ, genSub(build, lhs.inst, idx)};
+			return (Value) {lhs.typ, genSub(build, lhs.inst, idx, Unsigned)};
 		}
 	} else {
 		if (rhs.typ.kind == Kind_Pointer)
@@ -3190,13 +3197,8 @@ static Value arithSub (Parse *parse, const Token *primary, Value lhs, Value rhs)
 		IrRef inst;
 		if (common.kind == Kind_Float) {
 			inst = genFSub(&parse->build, lhs.inst, rhs.inst);
-		} else if (common.basic & Int_unsigned) {
-			inst = genSub(&parse->build, lhs.inst, rhs.inst);
 		} else {
-			bool overflow = false;
-			inst = genSubSigned(&parse->build, lhs.inst, rhs.inst, &overflow);
-			if (overflow)
-				parsemsg(Log_Warn, parse, primary, "signed integer overflow");
+			inst = genSub(&parse->build, lhs.inst, rhs.inst, typeSign(common));
 		}
 		return (Value) {common, inst};
 	}
@@ -3205,7 +3207,6 @@ static Value arithSub (Parse *parse, const Token *primary, Value lhs, Value rhs)
 static Value arithMultiplicativeOp (Parse *parse, const Token *primary, TokenKind op, Value lhs, Value rhs) {
 	Type common = arithmeticConversions(parse, primary, &lhs, &rhs);
 	IrRef inst;
-	bool overflow_or_div0 = false;
 	assert(op == Tok_Asterisk || op == Tok_Percent || op == Tok_Slash);
 	if (common.kind == Kind_Float) {
 		if (op == Tok_Asterisk)
@@ -3214,23 +3215,15 @@ static Value arithMultiplicativeOp (Parse *parse, const Token *primary, TokenKin
 			inst = genFMod(&parse->build, lhs.inst, rhs.inst);
 		else
 			inst = genFDiv(&parse->build, lhs.inst, rhs.inst);
-	} else if (common.basic & Int_unsigned) {
-		if (op == Tok_Asterisk)
-			inst = genMulUnsigned(&parse->build, lhs.inst, rhs.inst);
-		else if (op == Tok_Percent)
-			inst = genModUnsigned(&parse->build, lhs.inst, rhs.inst, &overflow_or_div0);
-		else
-			inst = genDivUnsigned(&parse->build, lhs.inst, rhs.inst, &overflow_or_div0);
 	} else {
+		Signedness sign = typeSign(common);
 		if (op == Tok_Asterisk)
-			inst = genMulSigned(&parse->build, lhs.inst, rhs.inst, &overflow_or_div0);
+			inst = genMul(&parse->build, lhs.inst, rhs.inst, sign);
 		else if (op == Tok_Percent)
-			inst = genModSigned(&parse->build, lhs.inst, rhs.inst, &overflow_or_div0);
+			inst = genMod(&parse->build, lhs.inst, rhs.inst, sign);
 		else
-			inst = genDivSigned(&parse->build, lhs.inst, rhs.inst, &overflow_or_div0);
+			inst = genDiv(&parse->build, lhs.inst, rhs.inst, sign);
 	}
-	if (overflow_or_div0)
-		parseerror(parse, primary, "signed integer overflow or divide by zero");
 	return (Value) {common, inst};
 }
 
@@ -3248,14 +3241,14 @@ static Type arithmeticConversions (Parse *parse, const Token *primary, Value *a,
 		} else {
 			needScalar(parse, primary, b->typ);
 			removeEnumness(&b->typ);
-			*b = (Value) {a->typ, .inst = genIntToFloat(&parse->build, b->inst, floatSize(a->typ.real), b->typ.basic & Int_unsigned)};
+			*b = (Value) {a->typ, .inst = genIntToFloat(&parse->build, b->inst, floatSize(a->typ.real), typeSign(b->typ))};
 			return a->typ;
 		}
 	}
 	if (b->typ.kind == Kind_Float) {
 		needScalar(parse, primary, a->typ);
 			removeEnumness(&a->typ);
-		*a = (Value) {b->typ, .inst = genIntToFloat(&parse->build, a->inst, floatSize(b->typ.real), a->typ.basic & Int_unsigned)};
+		*a = (Value) {b->typ, .inst = genIntToFloat(&parse->build, a->inst, floatSize(b->typ.real), typeSign(a->typ))};
 		return b->typ;
 	}
 
@@ -3355,9 +3348,10 @@ static Value pointerAdd (IrBuild *ir, Value lhs, Value rhs, Parse *op_parse, con
 		parseerror(op_parse, token, "cannot add to a pointer to incomplete type %s",
 			printTypeHighlighted(op_parse->arena, *ptr.typ.pointer));
 	}
+
 	IrRef stride = genImmediateInt(ir, stride_const, op_parse->target.ptr_size);
-	IrRef diff = genMulUnsigned(ir, stride, integer);
-	return (Value) {ptr.typ, genAdd(ir, ptr.inst, diff)};
+	IrRef diff = genMul(ir, stride, integer, Unsigned);
+	return (Value) {ptr.typ, genAdd(ir, ptr.inst, diff, Unsigned)};
 }
 
 static bool comparablePointers (Parse *parse, Value lhs, Value rhs) {
@@ -3365,22 +3359,26 @@ static bool comparablePointers (Parse *parse, Value lhs, Value rhs) {
 	bool b_zero = isZeroConstant(parse, rhs);
 	Type a = lhs.typ;
 	Type b = rhs.typ;
+
+	if (a_zero && b_zero)
+		return true;
+
 	if (!((a.kind == Kind_Pointer || a.kind == Kind_FunctionPtr || a_zero)
 		&& (b.kind == Kind_Pointer || b.kind == Kind_FunctionPtr || b_zero)))
 			return false;
 
 	if (a.kind == Kind_Pointer) {
-		if (a.pointer->kind == Kind_Void || a_zero)
+		if (a.pointer->kind == Kind_Void || b_zero)
 			return true;
 		a.pointer->qualifiers = 0;
 	}
 	if (b.kind == Kind_Pointer) {
-		if (b.pointer->kind == Kind_Void || b_zero)
+		if (b.pointer->kind == Kind_Void || a_zero)
 			return true;
 		b.pointer->qualifiers = 0;
 	}
 
-	if (!typeCompatible(a, b))
+	if (!typeCompatible(*a.pointer, *b.pointer))
 		parseerror(parse, NULL, "incompatible pointer types");
 
 	return true;
@@ -3510,12 +3508,12 @@ static IrRef coercerval (Value v, Type t, Parse *p, const Token *primary, bool a
 					return genSignExt(build, v.inst, target);
 			}
 		} else if (v.typ.kind == Kind_Float) {
-			return genFloatToInt(build, v.inst, target, t.basic & Int_unsigned);
+			return genFloatToInt(build, v.inst, target, typeSign(t));
 		}
 	} else if (t.kind == Kind_Float) {
 		u16 target = floatSize(t.real);
 		if (v.typ.kind == Kind_Basic) {
-			return genIntToFloat(build, v.inst, target, v.typ.basic & Int_unsigned);
+			return genIntToFloat(build, v.inst, target, typeSign(v.typ));
 		} else if (v.typ.kind == Kind_Float) {
 			return genFCast(build, v.inst, target);
 		}

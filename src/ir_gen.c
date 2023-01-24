@@ -143,10 +143,11 @@ static inline i64 toSigned(u64 i) {
 	return i <= INT64_MAX ? (i64) i : i == UINT64_MAX ? (i64) -1 : -(i64) (i - INT64_MAX);
 }
 
-static IrRef genBinOp (IrBuild *build, InstKind op, u8 properties, IrRef a, IrRef b, bool *overflow) {
+static IrRef genBinOp (IrBuild *build, InstKind op, u8 properties, IrRef a, IrRef b) {
 	Inst *inst = build->ir.ptr;
 	assert(inst[a].size == inst[b].size || op == Ir_ShiftLeft || op == Ir_ShiftRight);
-	Inst i = {op,
+	Inst i = {
+		.kind = op,
 		.properties = properties,
 		.size = inst[a].size,
 		.binop = {a, b}
@@ -154,51 +155,52 @@ static IrRef genBinOp (IrBuild *build, InstKind op, u8 properties, IrRef a, IrRe
 
 	bool commutative = op == Ir_Add || op == Ir_Mul || op == Ir_BitAnd || op == Ir_BitOr || op == Ir_BitXor || op == Ir_Equals;
 	if (inst[a].kind == Ir_Constant && inst[b].kind == Ir_Constant) {
-		i.kind = Ir_Constant;
 		u64 lhs = inst[a].constant;
 		u64 rhs = inst[b].constant;
+
+		bool no_overflow = properties & Prop_Arith_NoSignedOverflow;
+
 		switch (op) {
 		case Ir_Add:
-			if (overflow && addSignedOverflow(toSigned(lhs), toSigned(rhs), i.size))
-				*overflow = true;
+			if (no_overflow && addSignedOverflow(toSigned(lhs), toSigned(rhs), i.size)) {
+				i.properties |= Prop_Arith_WouldOverflow;
+				goto no_fold;
+			}
 			i.constant = lhs + rhs;
 			break;
 		case Ir_Sub:
-			if (overflow && subSignedOverflow(toSigned(lhs), toSigned(rhs), i.size))
-				*overflow = true;
+			if (no_overflow && subSignedOverflow(toSigned(lhs), toSigned(rhs), i.size)) {
+				i.properties |= Prop_Arith_WouldOverflow;
+				goto no_fold;
+			}
+			i.kind = Ir_Constant;
 			i.constant = lhs - rhs; break;
 		case Ir_Mul:
-			if ((properties & Prop_Arith_NoSignedOverflow)
-				&& mulSignedOverflow(toSigned(lhs), toSigned(rhs), i.size))
-			{
-				i.kind = Ir_Mul;
-				*overflow = true;
-				break;
-			} else {
-				i.constant = lhs * rhs;
+			if (no_overflow && mulSignedOverflow(toSigned(lhs), toSigned(rhs), i.size)) {
+				i.properties |= Prop_Arith_WouldOverflow;
+				goto no_fold;
 			}
+			i.constant = lhs * rhs;
 			break;
 		case Ir_Div:
 			if (rhs == 0) {
-				i.kind = Ir_Div;
-				*overflow = true;
-				break;
+				i.properties |= Prop_Arith_WouldOverflow;
+				goto no_fold;
 			}
 			i.constant = lhs / rhs;
 			break;
 		case Ir_SDiv:
-			if (rhs == 0 || (toSigned(lhs) == INT64_MIN &&  toSigned(rhs) == -1)) {
-				i.kind = Ir_SDiv;
-				*overflow = true;
-				break;
+			if (rhs == 0 || (toSigned(lhs) == INT64_MIN && toSigned(rhs) == -1)) {
+				i.properties |= Prop_Arith_WouldOverflow;
+				goto no_fold;
 			}
 			i.constant = toSigned(lhs) / toSigned(rhs);
 			break;
 		case Ir_Mod:
 		case Ir_SMod:
 			if (rhs == 0) {
-				i.kind = Ir_Mod;
-				break;
+				i.properties |= Prop_Arith_WouldOverflow;
+				goto no_fold;
 			}
 			i.constant = lhs % rhs;
 			break;
@@ -215,12 +217,15 @@ static IrRef genBinOp (IrBuild *build, InstKind op, u8 properties, IrRef a, IrRe
 		case Ir_LessThanOrEquals:
 			i.constant = lhs <= rhs; break;
 		case Ir_ShiftLeft:
+			// TODO Check shift exponent range
 			i.constant = lhs << rhs; break;
 		case Ir_ShiftRight:
+			// TODO Check shift exponent range
 			i.constant = lhs >> rhs; break;
 		default:
 			unreachable;
 		}
+		i.kind = Ir_Constant;
 		return append(build, i);
 	} else {
 		if (commutative && inst[a].kind == Ir_Constant) {
@@ -266,96 +271,79 @@ static IrRef genBinOp (IrBuild *build, InstKind op, u8 properties, IrRef a, IrRe
 		i.reloc.id = inst[prev].reloc.id;
 		i.reloc.offset = inst[prev].reloc.offset + delta;
 	}
+
+	no_fold:
 	return append(build, i);
 }
 
-IrRef genAdd (IrBuild *build, IrRef a, IrRef b) {
+IrRef genAdd (IrBuild *build, IrRef a, IrRef b, Signedness sign) {
 	Inst *inst = build->ir.ptr;
 	assert(inst[a].size == inst[b].size);
-	return genBinOp(build, Ir_Add, 0, a, b, NULL);
-}
-IrRef genAddSigned (IrBuild *build, IrRef a, IrRef b, bool *overflow) {
-	Inst *inst = build->ir.ptr;
-	assert(inst[a].size == inst[b].size);
-	return genBinOp(build, Ir_Add, Prop_Arith_NoSignedOverflow, a, b, overflow);
+	return genBinOp(build, Ir_Add, sign ? 0 : Prop_Arith_NoSignedOverflow, a, b);
 }
 IrRef genFAdd (IrBuild *build, IrRef a, IrRef b) {
 	Inst *inst = build->ir.ptr;
 	assert(inst[a].size == inst[b].size);
-	return genBinOp(build, Ir_FAdd, 0, a, b, NULL);
+	return genBinOp(build, Ir_FAdd, 0, a, b);
 }
 
-IrRef genSub (IrBuild *build, IrRef a, IrRef b) {
+IrRef genSub (IrBuild *build, IrRef a, IrRef b, Signedness sign) {
 	Inst *inst = build->ir.ptr;
 	assert(inst[a].size == inst[b].size);
-	return genBinOp(build, Ir_Sub, 0, a, b, NULL);
-}
-IrRef genSubSigned (IrBuild *build, IrRef a, IrRef b, bool *overflow) {
-	Inst *inst = build->ir.ptr;
-	assert(inst[a].size == inst[b].size);
-	return genBinOp(build, Ir_Sub, Prop_Arith_NoSignedOverflow, a, b, overflow);
+	return genBinOp(build, Ir_Sub, sign ? Prop_Arith_NoSignedOverflow : 0, a, b);
 }
 IrRef genFSub (IrBuild *build, IrRef a, IrRef b) {
 	Inst *inst = build->ir.ptr;
 	assert(inst[a].size == inst[b].size);
-	return genBinOp(build, Ir_FSub, 0, a, b, NULL);
+	return genBinOp(build, Ir_FSub, 0, a, b);
 }
 
 
-IrRef genMulUnsigned (IrBuild *build, IrRef a, IrRef b) {
-	return genBinOp(build, Ir_Mul, 0, a, b, NULL);
-}
-IrRef genMulSigned (IrBuild *build, IrRef a, IrRef b, bool *overflow) {
-	return genBinOp(build, Ir_Mul, Prop_Arith_NoSignedOverflow, a, b, overflow);
+IrRef genMul (IrBuild *build, IrRef a, IrRef b, Signedness sign) {
+	return genBinOp(build, Ir_Mul, sign ? Prop_Arith_NoSignedOverflow : 0, a, b);
 }
 IrRef genFMul (IrBuild *build, IrRef a, IrRef b) {
-	return genBinOp(build, Ir_FMul, 0, a, b, NULL);
+	return genBinOp(build, Ir_FMul, 0, a, b);
 }
 
-IrRef genDivUnsigned (IrBuild *build, IrRef a, IrRef b, bool *overflow_or_div0) {
-	return genBinOp(build, Ir_Div, 0, a, b, overflow_or_div0);
-}
-IrRef genDivSigned (IrBuild *build, IrRef a, IrRef b, bool *overflow_or_div0) {
-	return genBinOp(build, Ir_SDiv, Prop_Arith_NoSignedOverflow, a, b, overflow_or_div0);
+IrRef genDiv (IrBuild *build, IrRef a, IrRef b, Signedness sign) {
+	return genBinOp(build, sign ? Ir_SDiv : Ir_Div, sign ? Prop_Arith_NoSignedOverflow : 0, a, b);
 }
 IrRef genFDiv (IrBuild *build, IrRef a, IrRef b) {
-	return genBinOp(build, Ir_FDiv, 0, a, b, NULL);
+	return genBinOp(build, Ir_FDiv, 0, a, b);
 }
 
-IrRef genModUnsigned (IrBuild *build, IrRef a, IrRef b, bool *overflow_or_div0) {
-	return genBinOp(build, Ir_Mod, 0, a, b, overflow_or_div0);
-}
-IrRef genModSigned (IrBuild *build, IrRef a, IrRef b, bool *overflow_or_div0) {
-	return genBinOp(build, Ir_SMod, Prop_Arith_NoSignedOverflow, a, b, overflow_or_div0);
+IrRef genMod (IrBuild *build, IrRef a, IrRef b, Signedness sign) {
+	return genBinOp(build, sign ? Ir_SMod : Ir_Mod, sign ? Prop_Arith_NoSignedOverflow : 0, a, b);
 }
 IrRef genFMod (IrBuild *build, IrRef a, IrRef b) {
-	return genBinOp(build, Ir_FMod, 0, a, b, NULL);
+	return genBinOp(build, Ir_FMod, 0, a, b);
 }
 
 IrRef genOr (IrBuild *build, IrRef a, IrRef b) {
 	Inst *inst = build->ir.ptr;
 	assert(inst[a].size == inst[b].size);
-	return genBinOp(build, Ir_BitOr, 0, a, b, NULL);
+	return genBinOp(build, Ir_BitOr, 0, a, b);
 }
 
 IrRef genXor (IrBuild *build, IrRef a, IrRef b) {
 	Inst *inst = build->ir.ptr;
 	assert(inst[a].size == inst[b].size);
-	return genBinOp(build, Ir_BitXor, 0, a, b, NULL);
+	return genBinOp(build, Ir_BitXor, 0, a, b);
 }
 
 IrRef genAnd (IrBuild *build, IrRef a, IrRef b) {
 	Inst *inst = build->ir.ptr;
 	assert(inst[a].size == inst[b].size);
-	return genBinOp(build, Ir_BitAnd, 0, a, b, NULL);
+	return genBinOp(build, Ir_BitAnd, 0, a, b);
 }
 
 IrRef genShiftLeft (IrBuild *build, IrRef a, IrRef b) {
-	return genBinOp(build, Ir_ShiftLeft, 0, a, b, NULL);
+	return genBinOp(build, Ir_ShiftLeft, 0, a, b);
 }
 
 IrRef genShiftRight (IrBuild *build, IrRef a, IrRef b) {
-	return genBinOp(build, Ir_ShiftRight, 0, a, b, NULL);
+	return genBinOp(build, Ir_ShiftRight, 0, a, b);
 }
 
 
@@ -419,33 +407,33 @@ IrRef genEquals(IrBuild *build, IrRef a, IrRef b, u16 size) {
 	return append(build, i);
 }
 
-IrRef genLessThan(IrBuild *build, IrRef a, IrRef b, u16 size, bool is_unsigned) {
+IrRef genLessThan(IrBuild *build, IrRef a, IrRef b, u16 size, Signedness sign) {
 	Inst *inst = build->ir.ptr;
 	assert(inst[a].size == inst[b].size);
-	Inst i = {is_unsigned ? Ir_LessThan : Ir_SLessThan, .size = size, .binop = {a, b}};
+	Inst i = {sign ? Ir_SLessThan : Ir_LessThan, .size = size, .binop = {a, b}};
 
 	if (inst[a].kind == Ir_Constant && inst[b].kind == Ir_Constant) {
 		i.kind = Ir_Constant;
-		if (is_unsigned)
-			i.constant = inst[a].constant < inst[b].constant;
-		else
+		if (sign)
 			i.constant = toSigned(inst[a].constant) < toSigned(inst[b].constant);
+		else
+			i.constant = inst[a].constant < inst[b].constant;
 	}
 
 	return append(build, i);
 }
 
-IrRef genLessThanOrEquals(IrBuild *build, IrRef a, IrRef b, u16 size, bool is_unsigned) {
+IrRef genLessThanOrEquals(IrBuild *build, IrRef a, IrRef b, u16 size, Signedness sign) {
 	Inst *inst = build->ir.ptr;
 	assert(inst[a].size == inst[b].size);
-	Inst i = {is_unsigned ? Ir_LessThanOrEquals : Ir_SLessThanOrEquals, .size = size, .binop = {a, b}};
+	Inst i = {sign ? Ir_SLessThanOrEquals : Ir_LessThanOrEquals, .size = size, .binop = {a, b}};
 
 	if (inst[a].kind == Ir_Constant && inst[b].kind == Ir_Constant) {
 		i.kind = Ir_Constant;
-		if (is_unsigned)
-			i.constant = inst[a].constant <= inst[b].constant;
-		else
+		if (sign)
 			i.constant = toSigned(inst[a].constant) <= toSigned(inst[b].constant);
+		else
+			i.constant = inst[a].constant <= inst[b].constant;
 	}
 
 	return append(build, i);
@@ -507,12 +495,12 @@ IrRef genFCast (IrBuild *build, IrRef source, u16 target) {
 	return append(build, (Inst) {Ir_FCast, .size = target, .unop = source});
 }
 
-IrRef genIntToFloat (IrBuild *build, IrRef source, u16 target, bool is_unsigned) {
-	return append(build, (Inst) {is_unsigned ? Ir_UIntToFloat : Ir_SIntToFloat, .size = target, .unop = source});
+IrRef genIntToFloat (IrBuild *build, IrRef source, u16 target, Signedness sign) {
+	return append(build, (Inst) {sign ? Ir_SIntToFloat : Ir_UIntToFloat, .size = target, .unop = source});
 }
 
-IrRef genFloatToInt (IrBuild *build, IrRef source, u16 target, bool is_unsigned) {
-	return append(build, (Inst) {is_unsigned ? Ir_FloatToUInt : Ir_FloatToSInt, .size = target, .unop = source});
+IrRef genFloatToInt (IrBuild *build, IrRef source, u16 target, Signedness sign) {
+	return append(build, (Inst) {sign ? Ir_FloatToSInt : Ir_FloatToUInt, .size = target, .unop = source});
 }
 
 IrRef genCall (IrBuild *build, IrRef func, ValuesSpan args, u16 size, bool is_vararg) {
@@ -613,21 +601,21 @@ void genSetZero(IrBuild *build, IrRef address, u32 size, bool is_volatile) {
 	u32 pos = 0;
 	while (pos + 8 <= size) {
 		u32 offset = genImmediateInt(build, pos, I64);
-		u32 dest = genAdd(build, address, offset);
+		u32 dest = genAdd(build, address, offset, Unsigned);
 		genStore(build, dest, zero8, is_volatile);
 		pos += 8;
 	}
 	if (size - pos >= 4) {
 		u32 zero_rest = genImmediateInt(build, 0, 4);
 		u32 offset = genImmediateInt(build, pos, I64);
-		u32 dest = genAdd(build, address, offset);
+		u32 dest = genAdd(build, address, offset, Unsigned);
 		genStore(build, dest, zero_rest, is_volatile);
 		pos += 4;
 	}
 	if (size - pos >= 2) {
 		u32 zero_rest = genImmediateInt(build, 0, 2);
 		u32 offset = genImmediateInt(build, pos, I64);
-		u32 dest = genAdd(build, address, offset);
+		u32 dest = genAdd(build, address, offset, Unsigned);
 		genStore(build, dest, zero_rest, is_volatile);
 		pos += 2;
 	}
@@ -636,7 +624,7 @@ void genSetZero(IrBuild *build, IrRef address, u32 size, bool is_volatile) {
 		assert(size - pos == 1);
 		u32 zero_rest = genImmediateInt(build, 0, 1);
 		u32 offset = genImmediateInt(build, pos, I64);
-		u32 dest = genAdd(build, address, offset);
+		u32 dest = genAdd(build, address, offset, Unsigned);
 		genStore(build, dest, zero_rest, is_volatile);
 	}
 }

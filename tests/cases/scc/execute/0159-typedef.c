@@ -1,3 +1,4 @@
+//!necc-dbg @ -run
 /* Taken from plan9 kernel */
 
 typedef struct Clock0link Clock0link;

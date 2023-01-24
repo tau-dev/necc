@@ -516,7 +516,8 @@ typedef struct {
 
 typedef struct Macro {
 	String name;
-	u16 source_ref;
+	SourceFile *source;
+
 	SPAN(MacroToken) tokens;
 	SPAN(Parameter) parameters;
 	bool is_function_like;
@@ -531,6 +532,7 @@ typedef struct Replacement {
 	// Otherwise, this is an array of the function-like macro's arguments.
 	// STYLE The files field of the Tokenization is not used here.
 	TokenList *toks;
+	Location loc;
 	bool followed_by_concat;
 } Replacement;
 
@@ -539,6 +541,8 @@ typedef LIST(Replacement) MacroStack;
 
 typedef struct ExpansionParams {
 	MacroStack *stack;
+	FileList *files;
+
 	Arena *strings_arena;
 	Tokenization *tok;
 	Options *opt;
@@ -552,7 +556,7 @@ typedef struct ExpansionParams {
 typedef LIST(MacroToken) ExpansionBuffer;
 
 static bool expandInto(ExpansionParams, TokenList *dest, bool is_argument);
-static TokenList *takeArguments(ExpansionParams, Macro *);
+static TokenList *takeArguments(ExpansionParams, Location, Macro *);
 static void ensureCapacity (TokenList *t, u32 required);
 static void appendOneToken(TokenList *t, Token tok, TokenLocation pos);
 static String restOfLine (SourceFile source, Location *, const char **pos);
@@ -563,7 +567,7 @@ static IfClass skipToElseIfOrEnd(SourceFile source, Location *, const char **p);
 static Token getTokenSpaced(Arena *, SourceFile, Location *, SymbolList *, const char **p);
 static bool gobbleSpaceToNewline(const char **p, Location *loc);
 static bool preprocExpression(ExpansionParams, TokenList *buf, Tokenization *main_tokenization);
-static const char *defineMacro(Arena *arena, Arena *generated_strings, SymbolList *, String name, SourceFile, Location *loc, const char *pos);
+static const char *defineMacro(Arena *arena, Arena *generated_strings, SymbolList *, String name, SourceFile *, Location *loc, const char *pos);
 static void predefineMacros(Arena *arena, Arena *genrated_strings, SymbolList *, FileList *, StringList to_define, SourceKind);
 static void resolveSymbolIndicesToPointers(TokenList t, Symbol *syms);
 
@@ -598,9 +602,11 @@ Tokenization lex (Arena *generated_strings, String filename, LexParams params) {
 		getSymbol(&t.symbols, zstr(preproc_directives[i].name))->directive = preproc_directives[i].key;
 
 
+	PUSH(t.files, NULL);
 	SourceFile *initial_source = readAllAlloc(STRING_EMPTY, filename);
 	if (initial_source == NULL)
 		generalFatal("could not open file \"%.*s\"", STRING_PRINTAGE(filename));
+	initial_source->idx = 1;
 
 	PUSH(t.files, initial_source);
 	const char *pos = initial_source->content.ptr;
@@ -617,6 +623,7 @@ Tokenization lex (Arena *generated_strings, String filename, LexParams params) {
 	ExpansionParams expansion = {
 		.stack = &macro_expansion_stack,
 		.strings_arena = generated_strings,
+		.files = &t.files,
 		.tok = &t,
 		.loc = &loc,
 		.src = &pos,
@@ -665,7 +672,7 @@ Tokenization lex (Arena *generated_strings, String filename, LexParams params) {
 // 				if (*entry != NULL)
 // 					fprintf(stderr, "redefining %.*s (TODO Check that definitions are identical)\n", STRING_PRINTAGE(name));
 
-				pos = defineMacro(&macro_arena, generated_strings, &t.symbols, name, source, &loc, pos);
+				pos = defineMacro(&macro_arena, generated_strings, &t.symbols, name, t.files.ptr[source.idx], &loc, pos);
 			} break;
 			case Directive_Undef: {
 				tok = getTokenSpaced(generated_strings, source, &loc, &t.symbols, &pos);
@@ -819,10 +826,14 @@ Tokenization lex (Arena *generated_strings, String filename, LexParams params) {
 						appendOneToken(&t.list, paren, (TokenLocation) {loc});
 						continue;
 					}
-					arguments = takeArguments(expansion, macro); // Freed by expand_into.
+					arguments = takeArguments(expansion, begin, macro); // Freed by expand_into.
 				}
 				macro->being_replaced = true;
-				PUSH(macro_expansion_stack, ((Replacement) {macro, .toks = arguments}));
+				PUSH(macro_expansion_stack, ((Replacement) {
+					macro,
+					.loc = begin,
+					.toks = arguments
+				}));
 				expandInto(expansion, &t.list, false);
 
 				assert(macro_expansion_stack.len == 0);
@@ -873,6 +884,40 @@ Tokenization lex (Arena *generated_strings, String filename, LexParams params) {
 static MacroToken takeToken(ExpansionParams ex, u32 *marker);
 static void collapseMacroStack(MacroStack *stack, u32 *marker);
 
+static void expansionError (const ExpansionParams ex, Location loc, const char *msg) {
+	SourceFile **sources = ex.files->ptr;
+	printErr(*sources[loc.file_id], loc);
+	fprintf(stderr, "%s\n", msg);
+	if (ex.stack->len) {
+		i32 i = ex.stack->len - 1;
+		Replacement repl = ex.stack->ptr[i];
+
+		if (repl.mac) {
+			Location loc = repl.mac->tokens.ptr[repl.pos-1].loc;
+			printInfo(*sources[loc.file_id], loc);
+			fprintf(stderr, "from this definition...\n");
+		} else {
+			Location loc = repl.toks->positions[repl.pos-1].source;
+			printInfo(*sources[loc.file_id], loc);
+			fprintf(stderr, "from this argument...\n");
+		}
+
+
+		if (ex.stack->ptr[i].mac == NULL) {
+			i--;
+		}
+
+		for (; i >= 0; i--) {
+			Replacement repl = ex.stack->ptr[i];
+			Location loc = repl.loc;
+
+			printInfo(*sources[loc.file_id], loc);
+			fprintf(stderr, "in expansion of macro %.*s\n", STRING_PRINTAGE(repl.mac->name));
+		}
+	}
+	exit(1);
+}
+
 // If is_argument is specified, halt after a comma (returning true) or
 // closing parenthesis (returning false)
 static bool expandInto (const ExpansionParams ex, TokenList *dest, bool is_argument) {
@@ -906,16 +951,17 @@ static bool expandInto (const ExpansionParams ex, TokenList *dest, bool is_argum
 						appendOneToken(dest, t.tok, (TokenLocation) {
 							.source = t.loc, .macro = ex.expansion_start,
 						});
-						appendOneToken(dest, paren.tok, (TokenLocation) {
-							.source = paren.loc, .macro = ex.expansion_start,
-						});
-						collapseMacroStack(ex.stack, &level_of_argument_source);
-						continue;
+						t = paren;
+						goto no_macro;
 					}
-					arguments = takeArguments(ex, mac);
+					arguments = takeArguments(ex, t.loc, mac);
 				}
 				mac->being_replaced = true;
-				PUSH(*ex.stack, ((Replacement) {mac, .toks = arguments}));
+				PUSH(*ex.stack, ((Replacement) {
+					mac,
+					.loc = t.loc,
+					.toks = arguments,
+				}));
 				collapseMacroStack(ex.stack, &level_of_argument_source);
 				continue;
 			}
@@ -923,25 +969,29 @@ static bool expandInto (const ExpansionParams ex, TokenList *dest, bool is_argum
 			int keyword = ex.tok->symbols.ptr[t.tok.val.symbol_idx].keyword;
 			if (keyword)
 				t.tok.kind = keyword;
-		} else if (is_argument && level_of_argument_source == ex.stack->len) {
-			switch (t.tok.kind) {
-			case Tok_Comma:
-				if (paren_depth == 0)
-					return false;
-				break;
-			case Tok_OpenParen:
-				paren_depth++;
-				break;
-			case Tok_CloseParen:
-				if (paren_depth == 0)
-					return true;
-				paren_depth--;
-				break;
-			case Tok_EOF:
-				lexerror(ex.source, t.loc,
-						"missing closing parenthesis of macro invocation"); // TODO Better location
-			default:
-				break;
+		} else {
+			no_macro:
+			if (is_argument && level_of_argument_source == ex.stack->len) {
+				switch (t.tok.kind) {
+				case Tok_Comma:
+					if (paren_depth == 0)
+						return false;
+					break;
+				case Tok_OpenParen:
+					paren_depth++;
+					break;
+				case Tok_CloseParen:
+					if (paren_depth == 0)
+						return true;
+					paren_depth--;
+					break;
+				case Tok_EOF:
+					// TODO Use location of the beginning of the invocation.
+					expansionError(ex, t.loc,
+							"missing closing parenthesis of macro invocation");
+				default:
+					break;
+				}
 			}
 		}
 
@@ -959,15 +1009,15 @@ static bool expandInto (const ExpansionParams ex, TokenList *dest, bool is_argum
 // Allocates the argument list.
 // PERFORMANCE A single Tokenization per argument list should be
 // enough if Replacements store offset and length.
-static TokenList *takeArguments(const ExpansionParams ex, Macro *mac) {
+static TokenList *takeArguments (const ExpansionParams ex, Location invocation_loc, Macro *mac) {
 	assert(mac->is_function_like);
 	if (mac->parameters.len == 0) {
 		u32 dummy_mark = 0;
 		collapseMacroStack(ex.stack, &dummy_mark);
 		MacroToken t = takeToken(ex, &dummy_mark);
 		if (t.tok.kind != Tok_CloseParen) {
-			lexerror(ex.source, t.loc,
-					"too many arguments provided"); // TODO Better location
+			expansionError(ex, invocation_loc,
+					"too many arguments provided");
 		}
 
 		return NULL;
@@ -982,7 +1032,7 @@ static TokenList *takeArguments(const ExpansionParams ex, Macro *mac) {
 			if (param_idx + 1 == expected_count || (mac->is_vararg && param_idx + 2 >= expected_count)) {
 				break;
 			} else {
-				lexerror(ex.source, *ex.loc,
+				expansionError(ex, invocation_loc,
 						"too few arguments provided"); // TODO Better location
 			}
 		} else {
@@ -990,10 +1040,11 @@ static TokenList *takeArguments(const ExpansionParams ex, Macro *mac) {
 			if (param_idx == expected_count) {
 				if (mac->is_vararg) {
 					param_idx--;
+
 					// TODO Fill out preceded_by_space etc.
 					appendOneToken(&argument_bufs[param_idx], (Token) {.kind = Tok_Comma, }, (TokenLocation) {0});
 				} else {
-					lexerror(ex.source, *ex.loc,
+					expansionError(ex, invocation_loc,
 							"too many arguments provided"); // TODO Better location
 				}
 			}
@@ -1026,6 +1077,7 @@ static MacroToken takeToken (const ExpansionParams ex, u32 *marker) {
 
 			if (t.parameter) {
 				if (t.tok.kind == Tok_PreprocDirective) {
+					// TODO This should be an expansionError except when calling from preprocExpression.
 					if (followed_by_concat)
 						lexerror(ex.source, *ex.loc, "(TODO location, phrasing) stringified parameter can not followed by concatenation");
 					TokenList arg = repl->toks[t.parameter-1];
@@ -1155,13 +1207,13 @@ static MacroToken concatenate (const ExpansionParams ex, Token first, u32 *marke
 }
 
 static Token stringify (Arena *arena, SymbolList *symbols, TokenList arg) {
-	u32 data_len = 0;
+	u32 data_len = 0; // To account for the trailing \0 emitted by snprintf
 	for (u32 i = 0; i < arg.count; i++)
 		data_len += strPrintTokenLen(arg.tokens[i], symbols->ptr) + arg.tokens[i].preceded_by_space;
 
-	char *start = aalloc(arena, data_len);
+	char *start = aalloc(arena, data_len + 1);
 	char *c = start;
-	char *end = c + data_len;
+	char *end = start + data_len + 1;
 	for (u32 i = 0; i < arg.count; i++) {
 		if (arg.tokens[i].preceded_by_space)
 			printto(&c, end, " ");
@@ -1703,14 +1755,14 @@ static const char *defineMacro (
 	Arena *generated_strings,
 	SymbolList *symbols,
 	String name,
-	SourceFile source,
+	SourceFile *source,
 	Location *loc,
 	const char *pos)
 {
 	static StringMap parameters = {0};
 
 	Macro *mac = ALLOC(arena, Macro);
-	*mac = (Macro) {name, source.idx};
+	*mac = (Macro) {name, source};
 	Symbol *sym = getSymbol(symbols, name);
 	if (sym->macro)
 		free(sym->macro->tokens.ptr);
@@ -1722,22 +1774,22 @@ static const char *defineMacro (
 		loc->column++;
 		const char *p = pos;
 		Location dummy = *loc;
-		Token t = getTokenSpaced(generated_strings, source, &dummy, symbols, &p);
+		Token t = getTokenSpaced(generated_strings, *source, &dummy, symbols, &p);
 		if (t.kind == Tok_CloseParen) {
 			pos = p;
 		} else {
 			while (true) {
 				if (t.kind != Tok_Identifier && t.kind != Tok_TripleDot)
-					lexerror(source, dummy, "the parameters of function-like macros must be valid identifiers");
+					lexerror(*source, dummy, "the parameters of function-like macros must be valid identifiers");
 				param_count++;
-				t = getTokenSpaced(generated_strings, source, &dummy, symbols, &p);
+				t = getTokenSpaced(generated_strings, *source, &dummy, symbols, &p);
 				if (t.kind == Tok_CloseParen)
 					break;
 				else if (t.kind == Tok_EOF)
-					lexerror(source, dummy, "incomplete parameter list");
+					lexerror(*source, dummy, "incomplete parameter list");
 				else if (t.kind != Tok_Comma)
-					lexerror(source, dummy, "the parameters of function-like macros must be valid identifiers");
-				t = getTokenSpaced(generated_strings, source, &dummy, symbols, &p);
+					lexerror(*source, dummy, "the parameters of function-like macros must be valid identifiers");
+				t = getTokenSpaced(generated_strings, *source, &dummy, symbols, &p);
 			}
 		}
 		mac->parameters.ptr = aalloc(arena, sizeof(Parameter) * param_count);
@@ -1748,15 +1800,15 @@ static const char *defineMacro (
 			// STYLE Copypasta
 			gobbleSpaceToNewline(&pos, loc);
 			if (*pos == '\n' || *pos == 0)
-				lexerror(source, *loc, "expected a token before the end of the line");
+				lexerror(*source, *loc, "expected a token before the end of the line");
 			Location begin = *loc;
-			Token t = getToken(generated_strings, source, loc, symbols, &pos);
+			Token t = getToken(generated_strings, *source, loc, symbols, &pos);
 			assert(t.kind == Tok_Identifier || t.kind == Tok_TripleDot);
 
 			String name = symbols->ptr[t.val.symbol_idx].name;
 			if (t.kind == Tok_TripleDot) {
 				if (i + 1 != param_count)
-					lexerror(source, begin, "an ellipsis may only appear as the last parameter to a variadic macro");
+					lexerror(*source, begin, "an ellipsis may only appear as the last parameter to a variadic macro");
 				// TODO Version check for C99
 				name = zstr("__VA_ARGS__");
 				mac->is_vararg = true;
@@ -1765,10 +1817,10 @@ static const char *defineMacro (
 			mac->parameters.ptr[i].name = name;
 			void **entry = mapGetOrCreate(&parameters, name);
 			if (*entry)
-				lexerror(source, begin, "macro parameters may not be duplicated");
+				lexerror(*source, begin, "macro parameters may not be duplicated");
 			*entry = &mac->parameters.ptr[i];
 
-			t = getTokenSpaced(generated_strings, source, loc, symbols, &pos);
+			t = getTokenSpaced(generated_strings, *source, loc, symbols, &pos);
 		}
 	}
 
@@ -1780,7 +1832,7 @@ static const char *defineMacro (
 
 		Location begin = *loc;
 		MacroToken t = {
-			.tok = getToken(generated_strings, source, loc, symbols, &pos),
+			.tok = getToken(generated_strings, *source, loc, symbols, &pos),
 			.loc = begin,
 		};
 		t.tok.preceded_by_space = havespace;
@@ -1798,10 +1850,10 @@ static const char *defineMacro (
 	if (macro_assembly.len) {
 		MacroToken first = macro_assembly.ptr[0];
 		if (first.tok.kind == Tok_PreprocConcatenate)
-			lexerror(source, first.loc, "a %s##%s preprocessing token may not occur at the beginning of a macro definition");
+			lexerror(*source, first.loc, "a %s##%s preprocessing token may not occur at the beginning of a macro definition");
 		MacroToken last = macro_assembly.ptr[macro_assembly.len-1];
 		if (last.tok.kind == Tok_PreprocConcatenate)
-			lexerror(source, last.loc, "a %s##%s preprocessing token may not occur at the end of a macro definition");
+			lexerror(*source, last.loc, "a %s##%s preprocessing token may not occur at the end of a macro definition");
 	}
 	mac->tokens.ptr = macro_assembly.ptr;
 	mac->tokens.len = macro_assembly.len;
@@ -1855,7 +1907,7 @@ static void predefineMacros (
 		}
 
 		Location loc = {source->idx, 1, 1};
-		defineMacro(arena, genrated_strings, symbols, source->name, *source, &loc, source->content.ptr);
+		defineMacro(arena, genrated_strings, symbols, source->name, source, &loc, source->content.ptr);
 	}
 }
 

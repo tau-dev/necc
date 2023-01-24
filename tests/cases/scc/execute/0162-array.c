@@ -1,3 +1,4 @@
+//!necc-dbg @ -run
 int arr[3] = {[2] = 2, [0] = 0, [1] = 1};
 
 int

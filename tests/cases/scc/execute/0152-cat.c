@@ -1,3 +1,4 @@
+//!necc-dbg @ -run
 #define CAT(x,y) x ## y
 #define XCAT(x,y) CAT(x,y)
 #define FOO foo

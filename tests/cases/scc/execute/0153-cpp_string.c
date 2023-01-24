@@ -1,13 +1,17 @@
+//!necc-dbg @ -run
+#include "00-test.h"
+
 #define M1(x,y) "This is a string $ or # or ## " #x y
-#define STR "This is a string $ or # or ## and it is ok!"
+#define STR "This is a string $ or # or ## and it is ok!\n"
 
 int
 main(void)
 {
-        char *s, *t = M1(and, " it is ok!");
+    char *s, *p, *t = M1(and, " it is ok!\n");
+    p = t;
+	for (s = STR; *s && *s == *p; ++s)
+		++p;
 
-	for (s = STR; *s && *s == *t; ++s)
-		++t;
-
-        return *s;
+    printf("%s", t);
+        return *p;
 }

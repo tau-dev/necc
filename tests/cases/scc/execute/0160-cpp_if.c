@@ -1,3 +1,4 @@
+//!necc-dbg @ -run
 #if 0 != (0 && (0/0))
    #error 0 != (0 && (0/0))
 #endif

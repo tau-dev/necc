@@ -1,10 +1,11 @@
-extern struct X x;
+//!necc-dbg @ -run
+struct X x;
 int foo();
 
 int main()
 {
-	extern struct X x;
-	return &x != 0;
+	struct X x;
+	return &x == 0;
 }
 
 struct X {int v;};

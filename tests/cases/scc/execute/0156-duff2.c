@@ -27,9 +27,10 @@ send(to, from, count)
 int
 main()
 {
-	short a, b[40];
+	short a[40], b[40];
+	b[39] = 5;
 
-	send(&a, b, 40);
+	send(a, b, 40);
 
-	return (a == b[39]) ? 0 : 1;
+	return (a[39] == b[39]) ? 0 : 1;
 }

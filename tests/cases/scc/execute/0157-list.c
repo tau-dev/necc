@@ -1,3 +1,4 @@
+//!necc-dbg @ -run
 typedef struct List List;
 struct List {
 	int len;
