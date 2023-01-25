@@ -53,7 +53,7 @@ typedef struct {
 
 
 const char *plxz(const Parse *parse) {
-	return lexz(parse->tokens, parse->pos, NULL, 12);
+	return lexz(parse->tokens.list, parse->pos, NULL, 12);
 }
 
 
@@ -82,7 +82,7 @@ static void vcomperror (Log level, bool crash_on_error, const Tokenization *t, c
 
 	if (level & Log_Fatal) {
 		if (crash_on_error) {
-			puts(lexz(*t, tok, parse_pos, 12));
+			puts(lexz(t->list, tok, parse_pos, 12));
 			puts("");
 			int *c = NULL;
 			*c = 1;
@@ -437,6 +437,10 @@ void parseFunction (Parse *parse, Symbol *symbol) {
 	for (u32 i = 0; i < param_count; i++) {
 		Declaration param = parse->current_func_type.parameters.ptr[i];
 
+		if (param.name == NULL) {
+			requires(parse, "unnamed parameters", Features_C23);
+			continue;
+		}
 		// TODO Omit declaration data if not generating debug info.
 		IrRef slot = genStackAllocNamed(build, typeSize(param.type, &parse->target), param);
 
@@ -2572,6 +2576,7 @@ static bool tryParseTypeBase (Parse *parse, Type *type, u8 *storage_dest) {
 					parseerror(parse, longness[1], "unknown type %slong long double%s", BOLD, RESET);
 				base.real = Float_LongDouble;
 			}
+			*type = base;
 			return true;
 		}
 		assert(base.kind == Kind_Basic);
@@ -2592,6 +2597,7 @@ static bool tryParseTypeBase (Parse *parse, Type *type, u8 *storage_dest) {
 			if (!longness[0] && !shortness && !is_unsigned && bases == 0) {
 				if (!storage)
 					parseerror(parse, begin, "missing type");
+				// TODO Is this ever reachable?
 
 				Version v = parse->target.version;
 				if (v > Version_C89 && v < Version_GNU)
@@ -2647,7 +2653,7 @@ static Type parseStructUnionBody(Parse *parse, bool is_struct) {
 		if (tryEat(parse, Tok_Semicolon)) {
 			Type t = resolveType(base);
 			if (t.kind != Kind_Struct && t.kind != Kind_Union)
-				parseerror(parse, begin, "missing");
+				parseerror(parse, begin, "missing ???");
 			requires(parse, "anonymous members", Features_C11);
 
 			u32 offset = 0;

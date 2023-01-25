@@ -822,9 +822,18 @@ Tokenization lex (Arena *generated_strings, String filename, LexParams params) {
 					Token paren = getTokenSpaced(generated_strings, source, &loc, &t.symbols, &pos);
 
 					if (paren.kind != Tok_OpenParen) {
+						int keyword = t.symbols.ptr[tok.val.symbol_idx].keyword;
+						// FIXME If __FILE__ is overridden by a macro
+						// definition but that definition is not
+						// expanded, is FILE expansion still necessary?
+						if (keyword)
+							tok.kind = keyword;
 						appendOneToken(&t.list, tok, (TokenLocation) {loc});
-						appendOneToken(&t.list, paren, (TokenLocation) {loc});
-						continue;
+						tok = paren;
+						if (paren.kind == Tok_Identifier)
+							goto non_macro_ident;
+						else
+							goto non_macro;
 					}
 					arguments = takeArguments(expansion, begin, macro); // Freed by expand_into.
 				}
@@ -839,6 +848,7 @@ Tokenization lex (Arena *generated_strings, String filename, LexParams params) {
 				assert(macro_expansion_stack.len == 0);
 				continue;
 			}
+			non_macro_ident:;
 
 			int keyword = t.symbols.ptr[tok.val.symbol_idx].keyword;
 			if (keyword) {
@@ -854,6 +864,7 @@ Tokenization lex (Arena *generated_strings, String filename, LexParams params) {
 				}
 			}
 		}
+		non_macro:
 		appendOneToken(&t.list, tok, (TokenLocation) {begin});
 
 		if (tok.kind == Tok_EOF) {
@@ -941,8 +952,12 @@ static bool expandInto (const ExpansionParams ex, TokenList *dest, bool is_argum
 		if (t.tok.kind == Tok_Identifier) {
 			Macro *mac;
 			if ((mac = ex.tok->symbols.ptr[t.tok.val.symbol_idx].macro) != NULL
-				&& !mac->being_replaced)
+				&& !t.tok.painted)
 			{
+				if (mac->being_replaced) {
+					t.tok.painted = 1;
+					goto non_macro_ident;
+				}
 				TokenList *arguments = NULL;
 				if (mac->is_function_like) {
 					collapseMacroStack(ex.stack, &level_of_argument_source);
@@ -952,7 +967,10 @@ static bool expandInto (const ExpansionParams ex, TokenList *dest, bool is_argum
 							.source = t.loc, .macro = ex.expansion_start,
 						});
 						t = paren;
-						goto no_macro;
+						if (paren.tok.kind == Tok_Identifier)
+							goto non_macro_ident;
+						else
+							goto non_macro;
 					}
 					arguments = takeArguments(ex, t.loc, mac);
 				}
@@ -965,12 +983,13 @@ static bool expandInto (const ExpansionParams ex, TokenList *dest, bool is_argum
 				collapseMacroStack(ex.stack, &level_of_argument_source);
 				continue;
 			}
+			non_macro_ident:;
 
 			int keyword = ex.tok->symbols.ptr[t.tok.val.symbol_idx].keyword;
 			if (keyword)
 				t.tok.kind = keyword;
 		} else {
-			no_macro:
+			non_macro:
 			if (is_argument && level_of_argument_source == ex.stack->len) {
 				switch (t.tok.kind) {
 				case Tok_Comma:
@@ -1511,6 +1530,16 @@ static bool gobbleSpaceToNewline (const char **p, Location *loc) {
 				pos++;
 				newLine(loc);
 				line_begin = pos;
+			} else if (pos[0] == '/' && pos[1] == '*') {
+				while (*pos && !(pos[0] == '*' && pos[1] == '/')) {
+					pos++;
+					if (*pos == '\n') {
+						pos++;
+						newLine(loc);
+						line_begin = pos;
+					}
+				}
+				pos++;
 			} else
 				break;
 		}

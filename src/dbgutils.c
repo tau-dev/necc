@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include "dbgutils.h"
 #include "util.h"
 
 #include "lex_preproc.h"

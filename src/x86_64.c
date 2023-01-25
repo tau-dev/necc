@@ -383,6 +383,7 @@ static void emitType (Codegen *c, Type type, u32 id) {
 		}
 		break;
 	case Kind_Basic:
+	case Kind_Float:
 	case Kind_Void:
 	case Kind_Enum:
 		break;
@@ -456,6 +457,13 @@ static void emitType (Codegen *c, Type type, u32 id) {
 		break;
 	case Kind_Void:
 		emitZString("-11"); break;
+	case Kind_Float:
+		switch (type.real) {
+		case Float_Single: emitZString("-12"); break;
+		case Float_Double: emitZString("-13"); break;
+		case Float_LongDouble: emitZString("-14"); break;
+		}
+		break;
 	case Kind_Basic:
 		switch ((int) type.basic) {
 		case Int_bool: emitZString("-5"); break;

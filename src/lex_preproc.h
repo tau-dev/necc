@@ -2,7 +2,6 @@
 #include "util.h"
 #include "types.h"
 #include "common.h"
-#include "common.h"
 
 
 typedef enum {
@@ -156,6 +155,10 @@ typedef struct Token {
 	TokenKind kind;
 	u8 preceded_by_space;
 	u8 literal_type;
+	// Only relevant during macro expansion:
+	// Marks that a token has been encountered within the expansion of
+	// its macro, thereby disabling all future expansion. (6.10.3.4.2)
+	u8 painted;
 
 	union {
 		i64 integer_s;

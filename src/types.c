@@ -126,12 +126,13 @@ bool fnTypeCompatible (FunctionType a, FunctionType b) {
 // PERFORMANCE Probably important.
 bool typeCompatible (Type a, Type b) {
 	if (a.kind != b.kind) {
-		if (b.kind == Kind_Enum) {
+		if (b.kind == Kind_Enum || b.kind == Kind_Enum_Named) {
 			Type tmp = a;
 			a = b;
 			b = tmp;
 		}
-		return a.kind == Kind_Enum && b.kind == Kind_Basic && b.basic == Int_int;
+		return (a.kind == Kind_Enum || a.kind == Kind_Enum_Named)
+				&& b.kind == Kind_Basic && b.basic == Int_int;
 	}
 
 	switch (a.kind) {
@@ -147,11 +148,11 @@ bool typeCompatible (Type a, Type b) {
 	case Kind_Float:
 		return a.real == b.real;
 	case Kind_Enum:
-		// TODO
 		return true;
 	case Kind_Union:
 	case Kind_Struct:
 		return a.members.ptr == b.members.ptr;
+	case Kind_Enum_Named:
 	case Kind_Struct_Named:
 	case Kind_Union_Named:
 		return a.nametagged == b.nametagged;
