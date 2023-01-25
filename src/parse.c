@@ -1119,7 +1119,7 @@ static Value parseExprEquality (Parse *parse) {
 		parse->pos++;
 		Value rhs = parseExprComparison(parse);
 
-		if (lhs.inst == rhs.inst && lhs.category == rhs.category && parse->opt->warn_compare)
+		if (lhs.inst == rhs.inst && lhs.category == rhs.category && parse->opt->warn_compare && lhs.typ.kind != Kind_Float)
 			parsemsg(Log_Warn, parse, primary, "comparison to self is always %s",
 					primary->kind == Tok_BangEquals ? "false" : "true");
 
@@ -1139,7 +1139,7 @@ static Value parseExprEquality (Parse *parse) {
 			arithmeticConversions(parse, primary, &lhs, &rhs);
 		}
 
-		IrRef eql = genEquals(build, lhs.inst, rhs.inst, parse->target.int_size);
+		IrRef eql = genEquals(build, lhs.inst, rhs.inst, parse->target.int_size, lhs.typ.kind == Kind_Float);
 		if (primary->kind == (Tok_BangEquals))
 			eql = genNot(build, eql);
 		return (Value) { BASIC_INT, eql };
@@ -1187,13 +1187,23 @@ static Value parseExprComparison (Parse *parse) {
 			u16 size = parse->target.int_size;
 			IrRef res;
 
-			Signedness sign = typeSign(common);
-			switch (primary->kind) {
-			case Tok_Less: res = genLessThan(build, lhs.inst, rhs.inst, size, sign); break;
-			case Tok_LessEquals: res = genLessThanOrEquals(build, lhs.inst, rhs.inst, size, sign); break;
-			case Tok_Greater: res = genLessThan(build, rhs.inst, lhs.inst, size, sign); break;
-			case Tok_GreaterEquals: res = genLessThanOrEquals(build, rhs.inst, lhs.inst, size, sign); break;
-			default: unreachable;
+			if (common.kind == Kind_Float) {
+				switch (primary->kind) {
+				case Tok_Less: res = genFLessThan(build, lhs.inst, rhs.inst, size); break;
+				case Tok_LessEquals: res = genFLessThanOrEquals(build, lhs.inst, rhs.inst, size); break;
+				case Tok_Greater: res = genFLessThan(build, rhs.inst, lhs.inst, size); break;
+				case Tok_GreaterEquals: res = genFLessThanOrEquals(build, rhs.inst, lhs.inst, size); break;
+				default: unreachable;
+				}
+			} else {
+				Signedness sign = typeSign(common);
+				switch (primary->kind) {
+				case Tok_Less: res = genLessThan(build, lhs.inst, rhs.inst, size, sign); break;
+				case Tok_LessEquals: res = genLessThanOrEquals(build, lhs.inst, rhs.inst, size, sign); break;
+				case Tok_Greater: res = genLessThan(build, rhs.inst, lhs.inst, size, sign); break;
+				case Tok_GreaterEquals: res = genLessThanOrEquals(build, rhs.inst, lhs.inst, size, sign); break;
+				default: unreachable;
+				}
 			}
 
 			lhs = (Value) { BASIC_INT, res };
@@ -1293,7 +1303,7 @@ static Value parseExprLeftUnary (Parse *parse) {
 	case Tok_Bang: {
 		Value v = rvalue(parseExprLeftUnary(parse), parse);
 		IrRef zero = genImmediateInt(build, 0, typeSize(v.typ, &parse->target));
-		return (Value) {BASIC_INT, genEquals(build, v.inst, zero, parse->target.typesizes[Int_int])};
+		return (Value) {BASIC_INT, genEquals(build, v.inst, zero, parse->target.typesizes[Int_int], v.typ.kind == Kind_Float)};
 	}
 	case Tok_Tilde: {
 		Value v = intPromote(parseExprLeftUnary(parse), parse, primary);
@@ -2574,7 +2584,8 @@ static bool tryParseTypeBase (Parse *parse, Type *type, u8 *storage_dest) {
 			if (longness[0]) {
 				if (longness[1])
 					parseerror(parse, longness[1], "unknown type %slong long double%s", BOLD, RESET);
-				base.real = Float_LongDouble;
+// 				parsemsg(Log_Warn, parse, longness[0], "%slong double%s not supported, defaulting to normal %sdouble%s", BOLD, RESET, BOLD, RESET);
+// 				base.real = Float_LongDouble;
 			}
 			*type = base;
 			return true;
@@ -3475,7 +3486,8 @@ static IrRef toBoolean (Parse *p, const Token *primary, Value v) {
 
 	u32 size = typeSize(v.typ, &p->target);
 	IrRef zero = genImmediateInt(build, 0, size);
-	return genNot(build, genEquals(build, rvalue(v, p).inst, zero, p->target.int_size));
+
+	return genNot(build, genEquals(build, rvalue(v, p).inst, zero, p->target.int_size, v.typ.kind == Kind_Float));
 }
 
 // Performs implicit conversions on rvalues.

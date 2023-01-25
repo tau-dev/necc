@@ -821,23 +821,36 @@ static void emitInstForward(Codegen *c, IrRef i) {
 		emit(c, " not R", reg);
 		emit(c, " mov #, R", i, reg);
 	} break;
+	case Ir_Equals:
+	case Ir_FEquals:
 	case Ir_LessThan:
 	case Ir_SLessThan:
+	case Ir_FLessThan:
 	case Ir_LessThanOrEquals:
-	case Ir_SLessThanOrEquals: {
-		emit(c, " cmp #, R", inst.binop.lhs, loadTo(c, RAX, inst.binop.rhs));
-		switch (inst.kind) {
-			case Ir_LessThan: emit(c, " setb al"); break;
-			case Ir_SLessThan: emit(c, " setl al"); break;
-			case Ir_LessThanOrEquals: emit(c, " setbe al"); break;
-			case Ir_SLessThanOrEquals: emit(c, " setle al"); break;
+	case Ir_SLessThanOrEquals:
+	case Ir_FLessThanOrEquals: {
+		if (inst.kind == Ir_FLessThan || inst.kind == Ir_FLessThanOrEquals || inst.kind == Ir_FEquals) {
+			u16 sz = c->ir.ptr[inst.binop.lhs].size;
+			emit(c, " movsZ xmm1, #", sizeFSuffix(sz), inst.binop.lhs);
+			emit(c, " comisZ xmm1, #", sizeFSuffix(sz), inst.binop.rhs);
+		} else {
+			emit(c, " cmp #, R", inst.binop.lhs, loadTo(c, RAX, inst.binop.rhs));
 		}
-		emit(c, " movzx rsi, al");
-		emit(c, " mov #, R", i, registerSized(RSI, inst.size));
-	} break;
-	case Ir_Equals: {
-		emit(c, " cmp #, R", inst.binop.lhs, loadTo(c, RAX, inst.binop.rhs));
-		emit(c, " sete al");
+		switch (inst.kind) {
+			case Ir_LessThan:
+			case Ir_FLessThan:
+				emit(c, " setb al"); break;
+			case Ir_SLessThan:
+				emit(c, " setl al"); break;
+			case Ir_LessThanOrEquals:
+			case Ir_FLessThanOrEquals:
+				emit(c, " setbe al"); break;
+			case Ir_SLessThanOrEquals:
+				emit(c, " setle al"); break;
+			case Ir_Equals:
+			case Ir_FEquals:
+				emit(c, " sete al"); break;
+		}
 		emit(c, " movzx rsi, al");
 		emit(c, " mov #, R", i, registerSized(RSI, inst.size));
 	} break;
@@ -936,8 +949,8 @@ static void emitInstForward(Codegen *c, IrRef i) {
 		emit(c, " movsZ #, xmm1", fsuff, i);
 	} break;
 	case Ir_FloatToUInt:
-		assert(!"TODO codegen float->uint");
-		break;
+// 		assert(!"TODO codegen float->uint");
+// 		break;
 	case Ir_FloatToSInt: {
 		const char *fsuff = sizeFSuffix(c->ir.ptr[inst.unop].size);
 

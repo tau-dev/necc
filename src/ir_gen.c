@@ -1,3 +1,4 @@
+#include <math.h>
 #include "ir_gen.h"
 #include "checked_arith.h"
 #include "emit.h"
@@ -143,6 +144,33 @@ static inline i64 toSigned(u64 i) {
 	return i <= INT64_MAX ? (i64) i : i == UINT64_MAX ? (i64) -1 : -(i64) (i - INT64_MAX);
 }
 
+static inline double doubleFromConst(u64 i, u16 size) {
+	switch (size) {
+	case 4: {
+		float flt;
+		memcpy(&flt, &i, 4);
+		return flt;
+	}
+	case 8: {
+		double flt;
+		memcpy(&flt, &i, 8);
+		return flt;
+	}
+	default: unreachable;
+	}
+}
+
+static inline u64 constFromFloat(float f) {
+	u64 i = 0;
+	memcpy(&i, &f, 4);
+	return i;
+}
+static inline u64 constFromDouble(double f) {
+	u64 i = 0;
+	memcpy(&i, &f, 8);
+	return i;
+}
+
 static IrRef genBinOp (IrBuild *build, InstKind op, u8 properties, IrRef a, IrRef b) {
 	Inst *inst = build->ir.ptr;
 	assert(inst[a].size == inst[b].size || op == Ir_ShiftLeft || op == Ir_ShiftRight);
@@ -157,6 +185,7 @@ static IrRef genBinOp (IrBuild *build, InstKind op, u8 properties, IrRef a, IrRe
 	if (inst[a].kind == Ir_Constant && inst[b].kind == Ir_Constant) {
 		u64 lhs = inst[a].constant;
 		u64 rhs = inst[b].constant;
+		u16 size = inst[a].size;
 
 		bool no_overflow = properties & Prop_Arith_NoSignedOverflow;
 
@@ -168,19 +197,44 @@ static IrRef genBinOp (IrBuild *build, InstKind op, u8 properties, IrRef a, IrRe
 			}
 			i.constant = lhs + rhs;
 			break;
+		case Ir_FAdd:
+			if (size == 4)
+				i.constant = constFromFloat(doubleFromConst(lhs, 4) + doubleFromConst(rhs, 4));
+			else if (size == 8)
+				i.constant = constFromDouble(doubleFromConst(lhs, 8) + doubleFromConst(rhs, 8));
+			else
+				unreachable;
+			break;
 		case Ir_Sub:
 			if (no_overflow && subSignedOverflow(toSigned(lhs), toSigned(rhs), i.size)) {
 				i.properties |= Prop_Arith_WouldOverflow;
 				goto no_fold;
 			}
 			i.kind = Ir_Constant;
-			i.constant = lhs - rhs; break;
+			i.constant = lhs - rhs;
+			break;
+		case Ir_FSub:
+			if (size == 4)
+				i.constant = constFromFloat(doubleFromConst(lhs, 4) - doubleFromConst(rhs, 4));
+			else if (size == 8)
+				i.constant = constFromDouble(doubleFromConst(lhs, 8) - doubleFromConst(rhs, 8));
+			else
+				unreachable;
+			break;
 		case Ir_Mul:
 			if (no_overflow && mulSignedOverflow(toSigned(lhs), toSigned(rhs), i.size)) {
 				i.properties |= Prop_Arith_WouldOverflow;
 				goto no_fold;
 			}
 			i.constant = lhs * rhs;
+			break;
+		case Ir_FMul:
+			if (size == 4)
+				i.constant = constFromFloat(doubleFromConst(lhs, 4) * doubleFromConst(rhs, 4));
+			else if (size == 8)
+				i.constant = constFromDouble(doubleFromConst(lhs, 8) * doubleFromConst(rhs, 8));
+			else
+				unreachable;
 			break;
 		case Ir_Div:
 			if (rhs == 0) {
@@ -196,6 +250,14 @@ static IrRef genBinOp (IrBuild *build, InstKind op, u8 properties, IrRef a, IrRe
 			}
 			i.constant = toSigned(lhs) / toSigned(rhs);
 			break;
+		case Ir_FDiv:
+			if (size == 4)
+				i.constant = constFromFloat(doubleFromConst(lhs, 4) / doubleFromConst(rhs, 4));
+			else if (size == 8)
+				i.constant = constFromDouble(doubleFromConst(lhs, 8) / doubleFromConst(rhs, 8));
+			else
+				unreachable;
+			break;
 		case Ir_Mod:
 		case Ir_SMod:
 			if (rhs == 0) {
@@ -203,6 +265,14 @@ static IrRef genBinOp (IrBuild *build, InstKind op, u8 properties, IrRef a, IrRe
 				goto no_fold;
 			}
 			i.constant = lhs % rhs;
+			break;
+		case Ir_FMod:
+			if (size == 4)
+				i.constant = constFromFloat(fmod(doubleFromConst(lhs, 4), doubleFromConst(rhs, 4)));
+			else if (size == 8)
+				i.constant = constFromDouble(fmod(doubleFromConst(lhs, 8), doubleFromConst(rhs, 8)));
+			else
+				unreachable;
 			break;
 		case Ir_BitAnd:
 			i.constant = lhs & rhs; break;
@@ -359,7 +429,7 @@ IrRef genBitNot (IrBuild *build, IrRef a) {
 	return append(build, i);
 }
 
-IrRef genNot(IrBuild *build, IrRef a) {
+IrRef genNot (IrBuild *build, IrRef a) {
 	Inst *inst = build->ir.ptr;
 	Inst i = {Ir_Equals, .size = inst[a].size};
 
@@ -377,22 +447,25 @@ IrRef genNot(IrBuild *build, IrRef a) {
 	return append(build, i);
 }
 
-IrRef genEquals(IrBuild *build, IrRef a, IrRef b, u16 size) {
+IrRef genEquals (IrBuild *build, IrRef a, IrRef b, u16 size, bool is_float) {
 	Inst *inst = build->ir.ptr;
 	assert(inst[a].size == inst[b].size);
-	Inst i = {Ir_Equals, .size = size, .binop = {a, b}};
+	Inst i = {is_float ? Ir_FEquals : Ir_Equals, .size = size, .binop = {a, b}};
 
 	if (inst[a].kind == Ir_Constant) {
 		if (inst[b].kind == Ir_Constant) {
 			i.kind = Ir_Constant;
-			i.constant = inst[a].constant == inst[b].constant;
+			if (is_float)
+				i.constant = doubleFromConst(inst[a].constant, inst[a].size) == doubleFromConst(inst[b].constant, inst[b].size);
+			else
+				i.constant = inst[a].constant == inst[b].constant;
 		} else {
 			i.binop.lhs = b;
 			i.binop.rhs = a;
 		}
 	}
 
-	if (inst[a].kind == Ir_Reloc) {
+	if (inst[a].kind == Ir_Reloc && !is_float) {
 		if (inst[b].kind == Ir_Reloc) {
 			i.kind = Ir_Constant;
 			i.constant = inst[a].reloc.id == inst[b].reloc.id
@@ -407,7 +480,8 @@ IrRef genEquals(IrBuild *build, IrRef a, IrRef b, u16 size) {
 	return append(build, i);
 }
 
-IrRef genLessThan(IrBuild *build, IrRef a, IrRef b, u16 size, Signedness sign) {
+
+IrRef genLessThan (IrBuild *build, IrRef a, IrRef b, u16 size, Signedness sign) {
 	Inst *inst = build->ir.ptr;
 	assert(inst[a].size == inst[b].size);
 	Inst i = {sign ? Ir_SLessThan : Ir_LessThan, .size = size, .binop = {a, b}};
@@ -422,8 +496,20 @@ IrRef genLessThan(IrBuild *build, IrRef a, IrRef b, u16 size, Signedness sign) {
 
 	return append(build, i);
 }
+IrRef genFLessThan (IrBuild *build, IrRef a, IrRef b, u16 size) {
+	Inst *inst = build->ir.ptr;
+	assert(inst[a].size == inst[b].size);
+	Inst i = {Ir_FLessThan, .size = size, .binop = {a, b}};
 
-IrRef genLessThanOrEquals(IrBuild *build, IrRef a, IrRef b, u16 size, Signedness sign) {
+	if (inst[a].kind == Ir_Constant && inst[b].kind == Ir_Constant) {
+		i.kind = Ir_Constant;
+		i.constant = doubleFromConst(inst[a].constant, inst[a].size) < doubleFromConst(inst[b].constant, inst[b].size);
+	}
+
+	return append(build, i);
+}
+
+IrRef genLessThanOrEquals (IrBuild *build, IrRef a, IrRef b, u16 size, Signedness sign) {
 	Inst *inst = build->ir.ptr;
 	assert(inst[a].size == inst[b].size);
 	Inst i = {sign ? Ir_SLessThanOrEquals : Ir_LessThanOrEquals, .size = size, .binop = {a, b}};
@@ -434,6 +520,19 @@ IrRef genLessThanOrEquals(IrBuild *build, IrRef a, IrRef b, u16 size, Signedness
 			i.constant = toSigned(inst[a].constant) <= toSigned(inst[b].constant);
 		else
 			i.constant = inst[a].constant <= inst[b].constant;
+	}
+
+	return append(build, i);
+}
+
+IrRef genFLessThanOrEquals (IrBuild *build, IrRef a, IrRef b, u16 size) {
+	Inst *inst = build->ir.ptr;
+	assert(inst[a].size == inst[b].size);
+	Inst i = {Ir_FLessThanOrEquals, .size = size, .binop = {a, b}};
+
+	if (inst[a].kind == Ir_Constant && inst[b].kind == Ir_Constant) {
+		i.kind = Ir_Constant;
+		i.constant = doubleFromConst(inst[a].constant, inst[a].size) <= doubleFromConst(inst[b].constant, inst[b].size);
 	}
 
 	return append(build, i);
@@ -488,19 +587,61 @@ IrRef genZeroExt (IrBuild *build, IrRef source, u16 target) {
 }
 
 IrRef genFCast (IrBuild *build, IrRef source, u16 target) {
-	Inst *inst = build->ir.ptr;
-	if (inst[source].size == target)
+	Inst source_inst = build->ir.ptr[source];
+	Inst i = {
+		.kind = Ir_FCast,
+		.size = target,
+		.unop = source
+	};
+	if (source_inst.size == target)
 		return source;
+	if (source_inst.kind == Ir_Constant) {
+		i.kind = Ir_Constant;
+		if (target == 4 && source_inst.size == 8)
+			i.constant = constFromFloat(doubleFromConst(source_inst.constant, 8));
+		else if (target == 8 && source_inst.size == 4)
+			i.constant = constFromDouble(doubleFromConst(source_inst.constant, 4));
+		else
+			unreachable;
+	}
 
-	return append(build, (Inst) {Ir_FCast, .size = target, .unop = source});
+	return append(build, i);
 }
 
 IrRef genIntToFloat (IrBuild *build, IrRef source, u16 target, Signedness sign) {
-	return append(build, (Inst) {sign ? Ir_SIntToFloat : Ir_UIntToFloat, .size = target, .unop = source});
+	Inst source_inst = build->ir.ptr[source];
+	Inst i = {
+		.kind = sign ? Ir_SIntToFloat : Ir_UIntToFloat,
+		.size = target,
+		.unop = source,
+	};
+	if (source_inst.kind == Ir_Constant) {
+		i.kind = Ir_Constant;
+		// TODO Handle negative numbers
+		if (target == 4)
+			i.constant = constFromFloat((float) source_inst.constant);
+		else if (target == 8)
+			i.constant = constFromDouble((double) source_inst.constant);
+		else
+			unreachable;
+	}
+	return append(build, i);
 }
 
 IrRef genFloatToInt (IrBuild *build, IrRef source, u16 target, Signedness sign) {
-	return append(build, (Inst) {sign ? Ir_FloatToSInt : Ir_FloatToUInt, .size = target, .unop = source});
+	Inst source_inst = build->ir.ptr[source];
+	Inst i = {
+		.kind = sign ? Ir_FloatToSInt : Ir_FloatToUInt,
+		.size = target,
+		.unop = source,
+	};
+	if (source_inst.kind == Ir_Constant) {
+		i.kind = Ir_Constant;
+		// TODO Handle negative numbers
+		i.constant = (u64) doubleFromConst(source_inst.constant, source_inst.size);
+	}
+
+	return append(build, i);
 }
 
 IrRef genCall (IrBuild *build, IrRef func, ValuesSpan args, u16 size, bool is_vararg) {
@@ -821,9 +962,12 @@ void printBlock (FILE *dest, Block *blk, IrList ir) {
 		case Ir_BitXor: fprintf(dest, "xor"); break;
 		case Ir_LessThan: fprintf(dest, "cmpu<"); break;
 		case Ir_SLessThan: fprintf(dest, "cmps<"); break;
+		case Ir_FLessThan: fprintf(dest, "cmpf<"); break;
 		case Ir_LessThanOrEquals: fprintf(dest, "cmpu<="); break;
 		case Ir_SLessThanOrEquals: fprintf(dest, "cmps<="); break;
+		case Ir_FLessThanOrEquals: fprintf(dest, "cmpf<="); break;
 		case Ir_Equals: fprintf(dest, "cmp=="); break;
+		case Ir_FEquals: fprintf(dest, "cmpf=="); break;
 		case Ir_ShiftLeft: fprintf(dest, "shift<<"); break;
 		case Ir_ShiftRight: fprintf(dest, "shift>>"); break;
 // 		default: unreachable;
