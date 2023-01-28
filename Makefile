@@ -19,7 +19,7 @@ release: bin/necc
 
 self: selfhost/necc
 
-test: bin/necc-dbg bin/necc tests/runner
+test: bin/necc-dbg bin/necc tests/runner self
 	@./tests/runner
 
 
@@ -40,7 +40,7 @@ selfhost/necc: $(SELFHOST_OBJS)
 	musl-gcc -static $^ -lm -o $@
 
 selfhost/%.o: src/%.c $(C_HDRS) bin/necc-dbg
-	./bin/necc-dbg $< -g -obj=$@ -std gnu -Werror -def MUSL_DIR=\"/home/tau/foreign/lang/musl-1.2.3\"
+	./bin/necc-dbg $< -g -obj=$@ -std gnu -def MUSL_DIR=\"/home/tau/foreign/lang/musl-1.2.3\"
 
 
 

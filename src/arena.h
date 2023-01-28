@@ -12,6 +12,9 @@ typedef struct Arena {
 
 	size_t last_used;
 	size_t block_size;
+
+	u64 block_count;
+	u64 allocs;
 } Arena;
 
 Arena create_arena(size_t block_size);

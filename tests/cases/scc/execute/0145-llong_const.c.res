@@ -32,6 +32,6 @@ public int main():
   29 /8 = store [16] 28 after 27
   30 /4 = const 0x0 (0)
        ret 30
-constant 1 ([anon]):
+constant 1 (__func__):
 "main"
 exit code 0

@@ -116,12 +116,10 @@ typedef struct Type Type;
 
 // typedef SPAN(PhiNode) PhiNodes;
 
-struct f {int (*x)(); int a; int b;};
 
 // TODO Compress the heck out of this data.
 typedef struct Inst {
 	u8 kind;
-	struct f x;
 	u8 properties;
 	u16 size;
 

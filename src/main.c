@@ -432,6 +432,7 @@ int main (int argc, char **args) {
 		.target = &options.target,
 		.files = tokens.files,
 		.emit_debug_info = options.emit_debug,
+		.module_name = input,
 	};
 	// Output
 	if (ir_out) {

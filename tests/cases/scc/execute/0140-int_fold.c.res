@@ -5,6 +5,6 @@ public int main():
    2 /4 = store [1] 0
    3 /4 = const 0x0 (0)
        ret 3
-constant 1 ([anon]):
+constant 1 (__func__):
 "main"
 exit code 0

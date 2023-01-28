@@ -10,6 +10,9 @@ Arithmetic simplifications which require e.g. use-counts happen in the analysis 
 
 */
 
+// TODO Get this down to 16.
+static_assert(sizeof(Inst) == 24, "sizeof(Inst) == 24");
+
 #define HAS_EXITED(ir) ((ir)->insertion_block->exit.kind != Exit_None)
 // TODO Store pointer size in IrBuild
 #define PTR_SIZE I64

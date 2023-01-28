@@ -1,7 +1,7 @@
 void foo():
  entry0: { }
        ret
-constant 1 ([anon]):
+constant 1 (__func__):
 "foo"
 public extern bar
 public int main():
@@ -14,6 +14,6 @@ public int main():
    5 /0 = call 3 (4) after 2
    6 /4 = const 0x0 (0)
        ret 6
-constant 4 ([anon]):
+constant 4 (__func__):
 "main"
 exit code 0

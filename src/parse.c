@@ -149,17 +149,18 @@ typedef enum {
 static Declaration parseDeclarator(Parse *, Type base_type, Namedness);
 static nodiscard bool allowedNoDeclarator(Parse *, Type base_type);
 // static Declaration parseDeclarator (Parse* parse, const Token **tok, Type base_type);
-static void initializeStaticDefinition (Parse *, OrdinaryIdentifier *, Type, const Token *init_token);
-static void initializeAutoDefinition (Parse *, OrdinaryIdentifier *, Type, const Token *init_token);
+static void initializeStaticToZero(Parse *, StaticValue *);
+static void initializeStaticDefinition(Parse *, OrdinaryIdentifier *, Type, const Token *init_token);
+static void initializeAutoDefinition(Parse *, OrdinaryIdentifier *, Type, const Token *init_token);
 static void parseInitializer(Parse *, InitializationDest, u32 offset, Type type);
 static void maybeBracedInitializer(Parse *, InitializationDest, u32 offset, Type type, Value current_value);
-static bool tryIntConstant (Parse *, Value, u64 *result);
+static bool tryIntConstant(Parse *, Value, u64 *result);
 static bool tryEatStaticAssert(Parse *);
 static Value arithAdd(Parse *parse, const Token *primary, Value lhs, Value rhs);
 static Value arithSub(Parse *parse, const Token *primary, Value lhs, Value rhs);
 static Value arithMultiplicativeOp(Parse *parse, const Token *primary, TokenKind op, Value lhs, Value rhs);
-static Type arithmeticConversions (Parse *parse, const Token *primary, Value *lhs, Value *rhs);
-static Type parseValueType (Parse *, Value (*operator)(Parse *));
+static Type arithmeticConversions(Parse *parse, const Token *primary, Value *lhs, Value *rhs);
+static Type parseValueType(Parse *, Value (*operator)(Parse *));
 static Type parseTypeBase(Parse *, u8 *storage);
 static Type parseTypeName(Parse *, u8 *storage);
 static nodiscard bool tryParseTypeBase(Parse *, Type *dest, u8 *storage);
@@ -193,6 +194,7 @@ void parse (Arena *code_arena, Tokenization tokens, Options *opt, Module *module
 		.opt = opt,
 		.pos = tokens.list.tokens,
 		.module = module,
+		.current_func_id = IDX_NONE,
 	};
 	startNewBlock(&parse.build, zstr("dummy"));
 
@@ -240,7 +242,9 @@ void parse (Arena *code_arena, Tokenization tokens, Options *opt, Module *module
 
 				IrBuild global_ir = parse.build;
 				parse.current_func_type = decl.type.function;
+				parse.current_func_id = ord->static_id;
 				parseFunction(&parse, decl.name);
+				parse.current_func_id = IDX_NONE;
 				parse.scope_depth = 0;
 
 				StaticValue *val = &parse.module->ptr[ord->static_id];
@@ -266,10 +270,7 @@ void parse (Arena *code_arena, Tokenization tokens, Options *opt, Module *module
 	for (u32 i = 0; i < module->len; i++) {
 		StaticValue *val = &parse.module->ptr[i];
 		if (val->def_state == Def_Tentative) {
-			u32 amount = typeSize(val->type, &parse.target);
-			char *data = aalloc(parse.code_arena, amount);
-			memset(data, 0, amount);
-			val->value_data = (String) {amount, data};
+			initializeStaticToZero(&parse, val);
 		} else if (val->is_used && val->def_state == Def_Undefined && !val->is_public)
 			parseerror(&parse, val->decl_location, "TODO(phrasing) static identifier was never defined");
 	}
@@ -409,31 +410,6 @@ void parseFunction (Parse *parse, Symbol *symbol) {
 	Scope enclosing = pushScope(parse);
 	setLoc(parse, parse->pos);
 
-	char *terminated = aalloc(parse->code_arena, name.len + 1);
-	memcpy(terminated, name.ptr, name.len);
-	terminated[name.len] = 0;
-	PUSH(*parse->module, ((StaticValue) {
-		.type = {
-			.kind = Kind_Array,
-			.qualifiers = Qualifier_Const,
-			.array = { .inner = &const_chartype, .count = name.len + 1 },
-		},
-		.decl_location = parse->pos,
-		.def_kind = Static_Variable,
-		.def_state = Def_Defined,
-		.value_data = {name.len+1, terminated},
-		.parent_decl = IDX_NONE,
-	}));
-
-	bool is_new;
-	Symbol *func_sym = parse->tokens.special_identifiers[Special___func__];
-	OrdinaryIdentifier *func_name_sym = genOrdSymbol(parse, func_sym, &is_new);
-	assert(is_new);
-	func_name_sym->kind = Sym_Value_Static;
-	func_name_sym->decl_location = func_name_sym->def_location = parse->pos;
-	func_name_sym->static_id = parse->module->len-1;
-
-
 	for (u32 i = 0; i < param_count; i++) {
 		Declaration param = parse->current_func_type.parameters.ptr[i];
 
@@ -457,6 +433,32 @@ void parseFunction (Parse *parse, Symbol *symbol) {
 		sym->decl_location = sym->def_location = parse->pos;
 		sym->value = (Value) {param.type, slot, Ref_LValue};
 	}
+
+	Symbol *func___sym = parse->tokens.special_identifiers[Special___func__];
+	char *terminated = aalloc(parse->code_arena, name.len + 1);
+	memcpy(terminated, name.ptr, name.len);
+	terminated[name.len] = 0;
+	PUSH(*parse->module, ((StaticValue) {
+		.type = {
+			.kind = Kind_Array,
+			.qualifiers = Qualifier_Const,
+			.array = { .inner = &const_chartype, .count = name.len + 1 },
+		},
+		.decl_location = parse->pos,
+		.def_kind = Static_Variable,
+		.def_state = Def_Defined,
+		.value_data = {name.len+1, terminated},
+		.name = func___sym->name,
+		.parent_decl = parse->current_func_id,
+	}));
+
+	bool is_new;
+	OrdinaryIdentifier *func_name_sym = genOrdSymbol(parse, func___sym, &is_new);
+	assert(is_new);
+	func_name_sym->kind = Sym_Value_Static;
+	func_name_sym->decl_location = func_name_sym->def_location = parse->pos;
+	func_name_sym->static_id = parse->module->len-1;
+
 
 	parseCompound(parse);
 
@@ -825,8 +827,15 @@ static void parseStatement (Parse *parse, bool *had_non_declaration) {
 				if (definer)
 					initializeAutoDefinition(parse, ord, decl.type, definer);
 			} else {
-				if (definer)
-					initializeStaticDefinition(parse, ord, decl.type, definer);
+				StaticValue *val = &parse->module->ptr[ord->static_id];
+				if (!val->is_public) {
+					if (definer) {
+						initializeStaticDefinition(parse, ord, decl.type, definer);
+					} else {
+						val->type = decl.type;
+						initializeStaticToZero(parse, val);
+					}
+				}
 			}
 
 			if (!definer && decl.type.kind == Kind_VLArray && decl.type.array.count == IDX_NONE)
@@ -1763,6 +1772,16 @@ static void initializeAutoDefinition (Parse *parse, OrdinaryIdentifier *ord, Typ
 	// PERFORMANCE This could generate significant load on the memory optimizer.
 	genSetZero(build, dest.address, typeSize(type, &parse->target), false);
 	parseInitializer(parse, dest, 0, type);
+}
+
+
+static void initializeStaticToZero (Parse *parse, StaticValue *val) {
+	// TODO May not be an unknown-size array.
+	u32 amount = typeSize(val->type, &parse->target);
+	char *data = aalloc(parse->code_arena, amount);
+	memset(data, 0, amount);
+	val->value_data = (String) {amount, data};
+	val->def_state = Def_Defined;
 }
 
 static void initializeStaticDefinition (Parse *parse, OrdinaryIdentifier *ord, Type type, const Token *init_token) {
@@ -2972,20 +2991,6 @@ its current state. Hopefully it's finally approaching correctness.
 */
 
 
-typedef enum {
-	Link_None,
-	Link_External,
-	Link_Internal,
-} Linkage;
-
-static Linkage linkage(Parse *parse, OrdinaryIdentifier *id) {
-	if (id->kind != Sym_Value_Static)
-		return Link_None;
-	StaticValue *val = &parse->module->ptr[id->static_id];
-	if (val->parent_decl != IDX_NONE)
-		return Link_None;
-	return val->is_public ? Link_External : Link_Internal;
-}
 
 static void defGlobal (
 	Parse *parse,
@@ -3018,6 +3023,21 @@ static void defGlobal (
 			.parent_decl = IDX_NONE,
 		}));
 	}
+}
+
+typedef enum {
+	Link_None,
+	Link_External,
+	Link_Internal,
+} Linkage;
+
+static Linkage linkage (Parse *parse, OrdinaryIdentifier *id) {
+	if (id->kind != Sym_Value_Static)
+		return Link_None;
+	StaticValue *val = &parse->module->ptr[id->static_id];
+	if (val->parent_decl != IDX_NONE)
+		return Link_None;
+	return val->is_public ? Link_External : Link_Internal;
 }
 
 static OrdinaryIdentifier *define (

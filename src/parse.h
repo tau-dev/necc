@@ -32,12 +32,15 @@ typedef enum {
 	// Allocated on the stack
 	Sym_Value_Auto,
 	Sym_Value_Static,
-} SymbolKind;
+} IdentKind;
 
+
+// An identifier designating a function or object or a typedef, as
+// opppsed to a label or a struct/union/enum tag.
 typedef struct OrdinaryIdentifier OrdinaryIdentifier;
 
 struct OrdinaryIdentifier {
-	SymbolKind kind;
+	IdentKind kind;
 	OrdinaryIdentifier *shadowed;
 
 	u32 scope_depth;

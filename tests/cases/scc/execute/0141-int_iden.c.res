@@ -82,6 +82,6 @@ public int main():
    4 /4 = const 0x0 (0)
    5 /4 = out-phi 4 ?  true->6
        jmp 2
-constant 1 ([anon]):
+constant 1 (__func__):
 "main"
 exit code 0

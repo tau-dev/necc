@@ -200,7 +200,7 @@ static void emitDataLine(FILE *, u32 len, const char *data);
 static void emitDataString(u32 len, const char *data);
 static void emitDataRaw(u32 len, const char *data);
 static u32 typeDebugData(Codegen *, Type t);
-static void emitName(Codegen *, Module module, u32 id);
+static void emitName(Module module, u32 id);
 static void emitJump(Codegen *, const char *inst, const Block *dest);
 static void emitFunctionForward(EmitParams, u32);
 static void emitBlockForward(Codegen *, Blocks, u32);
@@ -220,8 +220,14 @@ static void emitZString(const char *);
 static void emitInt(u64 i);
 static void flushit(FILE *f);
 
-int splice_dest_order(const void *a, const void *b) {
+int splice_dest_order (const void *a, const void *b) {
 	return (i32) ((Reference*) a)->splice_pos - (i32) ((Reference*) b)->splice_pos;
+}
+
+static void emitLabel (Module module, u32 i) {
+	emitZString(".align 8\n");
+	emitName(module, i);
+	emitZString(":\n");
 }
 
 void emitX64AsmSimple(EmitParams params) {
@@ -245,16 +251,28 @@ void emitX64AsmSimple(EmitParams params) {
 		}
 		if (reloc.def_state == Def_Undefined)
 			; //fprintf(out, "extrn '%.*s' as _%.*s	; %lu\n", STRING_PRINTAGE(reloc.name), STRING_PRINTAGE(reloc.name), (ulong) i);
-		else if (reloc.is_public)
-			fprintf(params.out, ".global %.*s\n", STRING_PRINTAGE(reloc.name));
+		else if (reloc.is_public) {
+			emitZString("\n.global ");
+			emitName(module, i);
+
+			*insert++ = '\n';
+
+			if (insert > buf + (BUF - MAX_LINE))
+				flushit(globals.out);
+		}
 	}
 
-	emit(&globals, "\n\n"
-		".text");
+	emit(&globals, "\n\n");
+	if (params.emit_debug_info) {
+		emit(&globals, ".stabs \"S\",100,0,0,..text_begin",
+			params.module_name);
+	}
+	emit(&globals, ".text\n"
+		"..text_begin:");
 	for (u32 i = 0; i < module.len; i++) {
 		StaticValue reloc = module.ptr[i];
 		if (reloc.def_kind == Static_Function && reloc.def_state) {
-			emit(&globals, "S:", reloc.name);
+			emitLabel(module, i);
 			assert(reloc.type.kind == Kind_Function);
 			emitFunctionForward(params, i);
 		}
@@ -268,7 +286,7 @@ void emitX64AsmSimple(EmitParams params) {
 			&& !(reloc.type.qualifiers & Qualifier_Const)
 			&& reloc.def_state)
 		{
-			emitName(&globals, module, i);
+			emitLabel(module, i);
 			emitData(&globals, module, reloc.value_data, reloc.value_references);
 		}
 	}
@@ -281,7 +299,7 @@ void emitX64AsmSimple(EmitParams params) {
 			&& (reloc.type.qualifiers & Qualifier_Const)
 			&& reloc.def_state)
 		{
-			emitName(&globals, module, i);
+			emitLabel(module, i);
 			emitData(&globals, module, reloc.value_data, reloc.value_references);
 		}
 	}
@@ -290,13 +308,18 @@ void emitX64AsmSimple(EmitParams params) {
 	flushit(params.out);
 }
 
-static void emitName (Codegen *c, Module module, u32 id) {
+static void emitName (Module module, u32 id) {
 	StaticValue reloc = module.ptr[id];
-	emit(c, ".align 8");
-	if (reloc.name.len)
-		emit(c, "S:", reloc.name);
-	else
-		emit(c, "__I:", id);
+	if (reloc.name.len) {
+		if (reloc.parent_decl != IDX_NONE) {
+			emitName(module , reloc.parent_decl);
+			*insert++ = '.';
+		}
+		emitString(reloc.name);
+	} else {
+		emitZString("__");
+		emitInt(id);
+	}
 }
 
 static void emitData (Codegen *c, Module module, String data, References references) {
@@ -404,6 +427,11 @@ static void emitType (Codegen *c, Type type, u32 id) {
 		break;
 	case Kind_Array:
 	case Kind_VLArray:
+		if (res.kind == Kind_Array && res.array.count == 0) {
+			emitZString("A");
+			emitInt(typeDebugData(c, *type.array.inner));
+			break;
+		}
 		emitZString("ar-1;0;");
 		if (res.kind == Kind_Array)
 			emitInt(type.array.count);
@@ -426,7 +454,12 @@ static void emitType (Codegen *c, Type type, u32 id) {
 			*insert++ = ';';
 			for (u32 i = 0; i < type.function.parameters.len; i++) {
 				Declaration decl = type.function.parameters.ptr[i];
-				emitString(decl.name->name);
+				if (decl.name) {
+					emitString(decl.name->name);
+				} else {
+					emitZString("__param_");
+					emitInt(i);
+				}
 				*insert++ = ':';
 				emitInt(typeDebugData(c, decl.type));
 				emitZString(",1;");
@@ -916,12 +949,11 @@ static void emitInstForward(Codegen *c, IrRef i) {
 		unreachable;
 	case Ir_Reloc:
 		assert(inst.size == 8);
-		String name = c->module.ptr[inst.reloc.id].name;
-		if (name.len)
-			emit(c, " mov rax, offset flat:S~L", name, inst.reloc.offset);
-		else
-			emit(c, " mov rax, offset flat:__I~L", inst.reloc.id, inst.reloc.offset);
-// 		emit(c, " mov rax, qword ptr [rax]");
+
+		emitZString(" mov rax, offset flat:");
+		emitName(c->module, inst.reloc.id);
+		emit(c, "~L", inst.reloc.offset);
+
 		emit(c, " mov #, rax", i);
 		break;
 	case Ir_PhiOut: {
@@ -1061,7 +1093,7 @@ static void emitStabsLoc (Codegen *c, u32 i) {
 	bool labeled = false;
 	if (i == 0 || c->ir.locations[i-1].file_id != loc.file_id) {
 		SourceFile *src = c->files.ptr[loc.file_id];
-		emit(c, ".stabs \"SS\",100,0,0,..IiI",
+		emit(c, ".stabs \"SS\",132,0,0,..IiI",
 			src->path, src->name, c->current_id, i);
 		labeled = true;
 	}

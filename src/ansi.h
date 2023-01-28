@@ -17,5 +17,5 @@ const char *ifTerminal(const char*);
 #define RESET ifTerminal("\x1b[0m")
 #define BOLD ifTerminal("\x1b[1m")
 #define BRIGHT ifTerminal("\x1b[1m")
-#define DIM = ifTerminal("\x1b[2m")
+#define DIM ifTerminal("\x1b[2m")
 

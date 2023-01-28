@@ -36,6 +36,6 @@ public int main():
   33 /4 = store [18] 32 after 31
   34 /4 = const 0x0 (0)
        ret 34
-constant 1 ([anon]):
+constant 1 (__func__):
 "main"
 exit code 0

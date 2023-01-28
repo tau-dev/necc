@@ -25,6 +25,7 @@ static inline int hexToInt(char c);
 static inline bool isDigit(char c);
 static inline bool isAlnum(char c);
 
+static_assert(sizeof(Token) == 16, "sizeof(Token) == 16");
 
 typedef struct {
 	u32 hash;
@@ -557,9 +558,9 @@ typedef LIST(MacroToken) ExpansionBuffer;
 
 static bool expandInto(ExpansionParams, TokenList *dest, bool is_argument);
 static TokenList *takeArguments(ExpansionParams, Location, Macro *);
-static void ensureCapacity (TokenList *t, u32 required);
+static void ensureCapacity(TokenList *t, u32 required);
 static void appendOneToken(TokenList *t, Token tok, TokenLocation pos);
-static String restOfLine (SourceFile source, Location *, const char **pos);
+static String restOfLine(SourceFile source, Location *, const char **pos);
 static SpaceClass tryGobbleSpace(SourceFile source, Location *, const char **p);
 static void skipToValidBranchOrEnd(ExpansionParams, IfClass, u32 *depth, const char **p, TokenList *eval_buf);
 static void skipToEndIf(SourceFile source, Location *, const char **p);

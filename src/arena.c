@@ -29,7 +29,6 @@ Arena create_arena(size_t block_size) {
 #endif
 }
 
-static u64 allocations = 0;
 void *aalloc(Arena* arena, size_t size) {
 	if (size == 0)
 		return NULL;
@@ -49,10 +48,11 @@ void *aalloc(Arena* arena, size_t size) {
 
 		arena->last_block = new;
 		arena->last_used = 0;
-		allocations++;
+		arena->block_count++;
 	}
 	void *res = arena->last_block->data + arena->last_used;
 	arena->last_used += size;
+	arena->allocs++;
 	return res;
 }
 
@@ -66,12 +66,13 @@ char *adupez(Arena *arena, const char *c) {
 	return adupe(arena, (String) {strlen(c)+1, c});
 }
 
-
+typedef unsigned long long ullong;
 void free_arena(Arena* arena, const char *name) {
 	(void) name;
 // #ifndef NDEBUG
-// 	fprintf(stderr, "Arena freeing %llu KiB of %s\n", (unsigned long long) arena->total_used / 1024, name);
-// 	fprintf(stderr, "%llu calls to malloc so far.\n", (unsigned long long) allocations);
+// 	fprintf(stderr, "Arena freeing %llu KiB of %s in %llu blocks from %llu aallocs\n",
+// 		(ullong) arena->total_used / 1024, name,
+// 		(ullong) arena->block_count, (ullong) arena->allocs);
 // #endif
 	while (arena->last_block != NULL) {
 		ArenaBlock *next = arena->last_block->next;
