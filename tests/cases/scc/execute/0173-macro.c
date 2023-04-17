@@ -1,3 +1,4 @@
+//!necc-dbg @ -run
 #define x f
 #define y() f
 

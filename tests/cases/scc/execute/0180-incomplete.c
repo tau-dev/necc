@@ -1,3 +1,4 @@
+//!necc-dbg @ -run
 struct dummy;
 
 void *

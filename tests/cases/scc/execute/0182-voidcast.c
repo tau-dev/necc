@@ -1,3 +1,4 @@
+//!necc-dbg @ -run
 int i;
 char c;
 float f;

@@ -6,6 +6,7 @@
 
 typedef enum {
 	Tok_EOF,
+	Tok_Invalid,
 
 	Tok_Key_If,
 	Tok_Key_Else,
@@ -165,6 +166,7 @@ typedef struct Token {
 		u64 integer_u;
 		double real;
 		Symbol *symbol;
+		char invalid_token;
 		u32 symbol_idx; // Only used by the lexer
 	} val;
 } Token;
@@ -206,7 +208,5 @@ typedef struct {
 
 	Options *options;
 } LexParams;
-
-typedef LIST(Token) Token_List;
 
 Tokenization lex(Arena *generated_strings, String filename, LexParams paths);

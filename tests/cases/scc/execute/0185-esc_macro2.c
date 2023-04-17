@@ -1,3 +1,4 @@
+//!necc-dbg @ -run
 #define EXPECT_VALUE         "{[\"-0123456789tfn"
 
 int

@@ -1,3 +1,4 @@
+//!necc-dbg @ -run
 enum { Bla = 0, Bla2 = 1 };
 
 struct node {

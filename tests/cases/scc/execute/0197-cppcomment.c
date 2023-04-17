@@ -1,3 +1,4 @@
+//!necc-dbg @ -run
 #define TEST1 1 // comment
 #define TEST2 2
 

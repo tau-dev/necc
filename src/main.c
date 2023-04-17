@@ -471,8 +471,8 @@ int main (int argc, char **args) {
 		execve(exe_out, new_argv, NULL);
 	}
 
-#ifndef NDEBUG
 	free_arena(&arena, "code");
+#ifndef NDEBUG
 	for (u32 i = 0; i < tokens.files.len; i++)
 		free(tokens.files.ptr[i]);
 	for (u32 i = 0; i < module.len; i++) {

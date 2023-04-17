@@ -1,3 +1,4 @@
+//!necc-dbg @ -run
 static const char *bla[] = { "a", "b" };
 
 void

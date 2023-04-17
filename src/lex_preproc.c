@@ -157,6 +157,8 @@ enum Directive {
 	Directive_Define,
 	Directive_Undef,
 	Directive_Include,
+
+	Directive_Line,
 };
 
 Keyword preproc_directives[] = {
@@ -175,6 +177,8 @@ Keyword preproc_directives[] = {
 	{"define", Directive_Define},
 	{"undef", Directive_Undef},
 	{"include", Directive_Include},
+
+	{"line", Directive_Line},
 };
 
 
@@ -220,7 +224,8 @@ static void lexwarning (SourceFile source, Location loc, const char *msg, ...) {
     fprintf(stderr, ".\n");
 }
 
-String processStringLiteral(Arena *arena, String src);
+static char lexEscapeCode(SourceFile *source, Location loc, const char **p);
+static String processStringLiteral(SourceFile *file, Location loc, Arena *arena,String src);
 
 // TODO Trigraphs (trivial) and digraphs (annoying)
 static Token getToken (Arena *str_arena, SourceFile source, Location *loc, SymbolList *syms, const char **p) {
@@ -379,7 +384,7 @@ static Token getToken (Arena *str_arena, SourceFile source, Location *loc, Symbo
 		if (*pos == '\0')
 			lexerror(source, *loc, "missing close paren");
 
-		String val = processStringLiteral(str_arena, (String) {pos - begin, begin});
+		String val = processStringLiteral(&source, *loc, str_arena, (String) {pos - begin, begin});
 		tok = (Token) {Tok_String, .val.symbol_idx = getSymbolId(syms, val)};
 	} break;
 	case '\'': {
@@ -387,19 +392,8 @@ static Token getToken (Arena *str_arena, SourceFile source, Location *loc, Symbo
 		pos++;
 		// TODO Get unicode vals.
 		tok = (Token) {Tok_Integer, .literal_type = Int_int, .val.integer_s = pos[0]};
-		if (pos[0] == '\\') {
-			pos++;
-			if (pos[0] == 'x') {
-				assert(isHexDigit(pos[1]));
-				assert(isHexDigit(pos[2]));
-				tok.val.integer_s = hexToInt(pos[1])*16 + hexToInt(pos[2]);
-				if (tok.val.integer_s >= 128)
-					tok.val.integer_s -= 256;
-				pos += 2;
-			} else {
-				tok.val.integer_s = escape_codes[(uchar)pos[0]];
-			}
-		}
+		if (pos[0] == '\\')
+			tok.val.integer_s = lexEscapeCode(&source, *loc, &pos);
 		pos++;
 		// TODO Error reporting
 		if (pos[0] != '\'') unreachable;
@@ -490,7 +484,8 @@ static Token getToken (Arena *str_arena, SourceFile source, Location *loc, Symbo
 
 			pos--;
 		} else {
-			// TODO...
+			tok.kind = Tok_Invalid;
+			tok.val.invalid_token = *pos;
 		}
 	}
 	pos++;
@@ -560,6 +555,7 @@ static bool expandInto(ExpansionParams, TokenList *dest, bool is_argument);
 static TokenList *takeArguments(ExpansionParams, Location, Macro *);
 static void ensureCapacity(TokenList *t, u32 required);
 static void appendOneToken(TokenList *t, Token tok, TokenLocation pos);
+inline static void resolveIdentToKeyword(Tokenization *t, Token *tok, Location loc, String name);
 static String restOfLine(SourceFile source, Location *, const char **pos);
 static SpaceClass tryGobbleSpace(SourceFile source, Location *, const char **p);
 static void skipToValidBranchOrEnd(ExpansionParams, IfClass, u32 *depth, const char **p, TokenList *eval_buf);
@@ -567,7 +563,7 @@ static void skipToEndIf(SourceFile source, Location *, const char **p);
 static IfClass skipToElseIfOrEnd(SourceFile source, Location *, const char **p);
 static Token getTokenSpaced(Arena *, SourceFile, Location *, SymbolList *, const char **p);
 static bool gobbleSpaceToNewline(const char **p, Location *loc);
-static bool preprocExpression(ExpansionParams, TokenList *buf, Tokenization *main_tokenization);
+static u64 preprocExpression(ExpansionParams, TokenList *buf, Tokenization *main_tokenization);
 static const char *defineMacro(Arena *arena, Arena *generated_strings, SymbolList *, String name, SourceFile *, Location *loc, const char *pos);
 static void predefineMacros(Arena *arena, Arena *genrated_strings, SymbolList *, FileList *, StringList to_define, SourceKind);
 static void resolveSymbolIndicesToPointers(TokenList t, Symbol *syms);
@@ -614,6 +610,10 @@ Tokenization lex (Arena *generated_strings, String filename, LexParams params) {
 	SourceFile source = *initial_source;
 	Location loc = {source.idx, 1, 1};
 
+	// Skip over shebang line
+	if (pos[0] == '#' && pos[1] == '!') {
+		while (pos && *pos != '\n') pos++;
+	}
 
 	predefineMacros(&macro_arena, generated_strings, &t.symbols, &t.files,
 			params.command_line_macros, Source_CommandLineMacro);
@@ -637,6 +637,7 @@ Tokenization lex (Arena *generated_strings, String filename, LexParams params) {
 		Token tok;
 		Location begin;
 
+		// Get a new token. While hitting EOFs, pop from the include stack.
 		while (true) {
 			line_begin = tryGobbleSpace(source, &loc, &pos) == Space_Linebreak || file_begin;
 			begin = loc;
@@ -649,6 +650,7 @@ Tokenization lex (Arena *generated_strings, String filename, LexParams params) {
 			loc = inc.loc;
 		}
 
+		// Handle preprocessor directives.
 		if (tok.kind == Tok_PreprocDirective) {
 			if (!line_begin)
 				lexerror(source, begin, "a preprocessor directive must be the first token of a line");
@@ -800,8 +802,16 @@ Tokenization lex (Arena *generated_strings, String filename, LexParams params) {
 				lexwarning(source, start, "%.*s", STRING_PRINTAGE(str));
 
 			} break;
+			case Directive_Line: {
+				expansion.source = source;
+				expansion.expansion_start = begin;
+				u64 lineno = preprocExpression(expansion, &prepreoc_evaluation_buf, expansion.tok);
+				if (lineno > 0) lineno--;
+				loc.line = lineno;
+			} break;
 			default:
-				lexerror(source, begin, "unknown preprocessor directive");
+				if (t.symbols.ptr[tok.val.symbol_idx].name.len != 0)
+					lexerror(source, begin, "unknown preprocessor directive");
 			}
 			first_line_in_file = false;
 			continue;
@@ -823,6 +833,8 @@ Tokenization lex (Arena *generated_strings, String filename, LexParams params) {
 					Token paren = getTokenSpaced(generated_strings, source, &loc, &t.symbols, &pos);
 
 					if (paren.kind != Tok_OpenParen) {
+						// FIXME Why is this here? Should just move back to the previous token amd goto non_macro immediately.
+
 						int keyword = t.symbols.ptr[tok.val.symbol_idx].keyword;
 						// FIXME If __FILE__ is overridden by a macro
 						// definition but that definition is not
@@ -850,20 +862,7 @@ Tokenization lex (Arena *generated_strings, String filename, LexParams params) {
 				continue;
 			}
 			non_macro_ident:;
-
-			int keyword = t.symbols.ptr[tok.val.symbol_idx].keyword;
-			if (keyword) {
-				if (keyword == Tok_Key_File) {
-					tok.kind = Tok_String;
-					tok.val.symbol_idx = getSymbolId(&t.symbols, source.name);
-				} else if (keyword == Tok_Key_Line) {
-					tok.kind = Tok_Integer;
-					tok.literal_type = Int_int;
-					tok.val.integer_s = begin.line;
-				} else {
-					tok.kind = keyword;
-				}
-			}
+			resolveIdentToKeyword(&t, &tok, begin, source.name);
 		}
 		non_macro:
 		appendOneToken(&t.list, tok, (TokenLocation) {begin});
@@ -986,9 +985,7 @@ static bool expandInto (const ExpansionParams ex, TokenList *dest, bool is_argum
 			}
 			non_macro_ident:;
 
-			int keyword = ex.tok->symbols.ptr[t.tok.val.symbol_idx].keyword;
-			if (keyword)
-				t.tok.kind = keyword;
+			resolveIdentToKeyword(ex.tok, &t.tok, ex.expansion_start, ex.source.name);
 		} else {
 			non_macro:
 			if (is_argument && level_of_argument_source == ex.stack->len) {
@@ -1129,22 +1126,8 @@ static MacroToken takeToken (const ExpansionParams ex, u32 *marker) {
 					// PERFORMANCE Are multiple branches in the hot path really necessary?
 					// STYLE Copypasta from the lex loop
 
-					if (t.tok.kind == Tok_Identifier) {
-						// TODO Isn't this redundant with the keywordification in takeArguments?
-						int keyword = ex.tok->symbols.ptr[t.tok.val.symbol_idx].keyword;
-						if (keyword) {
-							if (keyword == Tok_Key_File) {
-								t.tok.kind = Tok_String;
-								t.tok.val.symbol_idx = getSymbolId(&ex.tok->symbols, ex.source.name);
-							} else if (keyword == Tok_Key_Line) {
-								t.tok.kind = Tok_Integer;
-								t.tok.literal_type = Int_int;
-								t.tok.val.integer_s = ex.expansion_start.line;
-							} else {
-								t.tok.kind = keyword;
-							}
-						}
-					}
+					if (t.tok.kind == Tok_Identifier)
+						resolveIdentToKeyword(ex.tok, &t.tok, ex.expansion_start, ex.source.name);
 					return t;
 				}
 			}
@@ -1301,6 +1284,23 @@ static void appendOneToken (TokenList *t, Token tok, TokenLocation pos) {
 	t->tokens[t->count] = tok;
 	t->positions[t->count] = pos;
 	t->count++;
+}
+
+inline static void resolveIdentToKeyword(Tokenization *t, Token *tok, Location loc, String name) {
+	int keyword = t->symbols.ptr[tok->val.symbol_idx].keyword;
+	if (!keyword)
+		return;
+
+	if (keyword == Tok_Key_File) {
+		tok->kind = Tok_String;
+		tok->val.symbol_idx = getSymbolId(&t->symbols, name);
+	} else if (keyword == Tok_Key_Line) {
+		tok->kind = Tok_Integer;
+		tok->literal_type = Int_int;
+		tok->val.integer_s = loc.line;
+	} else {
+		tok->kind = keyword;
+	}
 }
 
 static String restOfLine (SourceFile source, Location *loc, const char **pos) {
@@ -1531,6 +1531,9 @@ static bool gobbleSpaceToNewline (const char **p, Location *loc) {
 				pos++;
 				newLine(loc);
 				line_begin = pos;
+			} else if (pos[0] == '/' && pos[1] == '/') {
+				while (*pos && *pos != '\n') pos++;
+				break;
 			} else if (pos[0] == '/' && pos[1] == '*') {
 				while (*pos && !(pos[0] == '*' && pos[1] == '/')) {
 					pos++;
@@ -1553,7 +1556,7 @@ static bool gobbleSpaceToNewline (const char **p, Location *loc) {
 }
 
 
-static bool preprocExpression (ExpansionParams params, TokenList *buf, Tokenization *main_tokenization) {
+static u64 preprocExpression (ExpansionParams params, TokenList *buf, Tokenization *main_tokenization) {
 	const char *pos = *params.src;
 	Arena *const str_arena = params.strings_arena;
 	buf->count = 0;
@@ -1593,6 +1596,8 @@ static bool preprocExpression (ExpansionParams params, TokenList *buf, Tokenizat
 				tok.kind = Tok_Integer;
 				tok.literal_type = Int_int;
 				tok.val.integer_s = 0;
+				if (sym->keyword == Tok_Key_Line)
+					tok.val.integer_s = begin.line;
 			}
 		}
 		appendOneToken(buf, tok, (TokenLocation) {begin});
@@ -1616,11 +1621,14 @@ static bool preprocExpression (ExpansionParams params, TokenList *buf, Tokenizat
 
 // TODO Come up with a better system for nice highlighting.
 const char *token_names[] = {
+	[Tok_Invalid] = "invalid token",
+
 	[Tok_Identifier] = "identifier",
 	[Tok_Integer] = "int-literal",
 	[Tok_Real] = "floating-point-literal",
 	[Tok_String] = "string-literal",
 	[Tok_PreprocDirective] = "preprocessor-directive",
+	[Tok_PreprocConcatenate] = "##",
 
 	[Tok_OpenParen] = "(",
 	[Tok_CloseParen] = ")",
@@ -1721,6 +1729,10 @@ u32 strPrintTokenLen (Token t, Symbol *syms) {
 
 void strPrintToken (char **dest, const char *end, Symbol *symbols, Token t) {
 	switch (t.kind) {
+	case Tok_Invalid:
+		**dest = t.val.invalid_token;
+		(*dest)++;
+		return;
 	case Tok_PreprocDirective:
 		printto(dest, end, "#");
 		FALLTHROUGH;
@@ -1768,7 +1780,7 @@ static inline int hexToInt (char c) {
 		return c - '0';
 	c |= 32;
 	assert(c >= 'a' && c <= 'f');
-	return c - 'a';
+	return c - 'a' + 10;
 }
 
 static inline bool isDigit (char c) {
@@ -1942,20 +1954,39 @@ static void predefineMacros (
 }
 
 
-String processStringLiteral(Arena *arena, String src) {
-	char *res = aalloc(arena, src.len + 1);
-	u32 len = 0;
-	for (u32 i = 0; i < src.len; i++) {
-		if (src.ptr[i] == '\\') {
-			i++;
-			if (src.ptr[i] == '\n') continue;
-			res[len] = escape_codes[(uchar) src.ptr[i]];
-		} else {
-			res[len] = src.ptr[i];
-		}
-		len++;
+static char lexEscapeCode(SourceFile *source, Location loc, const char **p) {
+	const char *pos = *p;
+	assert(pos[0] == '\\');
+	pos++;
+	int res;
+	if (pos[0] == 'x') {
+		if (!isHexDigit(pos[1]) || !isHexDigit(pos[2]))
+			lexerror(*source, loc, "invalid character");
+		res = hexToInt(pos[1])*16 + hexToInt(pos[2]);
+		if (res >= 128)
+			res -= 256;
+		pos += 2;
+	} else {
+		res = escape_codes[(uchar)pos[0]];
 	}
-	return (String) {len, res};
+	*p = pos;
+	return res;
+}
+
+static String processStringLiteral(SourceFile *file, Location loc, Arena *arena, String src) {
+	char *res = aalloc(arena, src.len + 1);
+	char *dest = res;
+
+	const char *end = src.ptr + src.len;
+	for (const char *p = src.ptr; p < end; p++) {
+		if (*p == '\\') {
+			*dest = lexEscapeCode(file, loc, &p);
+		} else {
+			*dest = *p;
+		}
+		dest++;
+	}
+	return (String) {dest - res, res};
 }
 
 

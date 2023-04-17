@@ -1,3 +1,4 @@
+//!necc-dbg @ -run
 int
 casecmp(char *l2)
 {

@@ -1,12 +1,13 @@
+//!necc-dbg @ -run
 struct ptrs {
 	unsigned char *rp;
 	unsigned char *wp;
 };
 
-struct ptrs iob[2]; 
- 
-int 
-main() 
+struct ptrs iob[2];
+
+int
+main()
 {
 	static unsigned char buf[10];
 

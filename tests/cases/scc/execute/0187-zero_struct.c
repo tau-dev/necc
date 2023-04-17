@@ -1,3 +1,4 @@
+//!necc-dbg @ -run
 struct json_node {
 	int type;
 	char *name;

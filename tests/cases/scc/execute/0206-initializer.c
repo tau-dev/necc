@@ -1,3 +1,4 @@
+//!necc-dbg @ -run
 static int alpha3[][2] = {
 	{ 0x00D6, 0x00D8 },
 	{ 0x00F6, 0x00F8 },

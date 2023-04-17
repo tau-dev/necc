@@ -1,3 +1,4 @@
+//!necc-dbg @ -run
 typedef int (cookie_seek_function_t)(void);
 
 typedef struct _IO_cookie_io_functions_t {

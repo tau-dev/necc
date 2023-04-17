@@ -1,3 +1,4 @@
+//!necc-dbg @ -run
 #ifdef __STDC__
 #define __(proto) proto
 #else

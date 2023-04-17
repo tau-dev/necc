@@ -1,3 +1,4 @@
+//!necc-dbg @ -run
 #define X (2)
 #define L (0)
 #define H (1)

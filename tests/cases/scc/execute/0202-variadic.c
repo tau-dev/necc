@@ -1,3 +1,4 @@
+//!necc-dbg @ -run
 #define debug1(...)    test1(__VA_ARGS__)
 #define debug2(...)    test2(0, #__VA_ARGS__)
 #define debug3(t, ...) ((t==1) ? test1(__VA_ARGS__):test2(__VA_ARGS__))

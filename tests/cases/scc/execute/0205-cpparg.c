@@ -1,3 +1,4 @@
+//!necc-dbg @ -run
 #define TOLOWER(c) ((((unsigned)c) - 'A' < 26) ? ((c) | 32) : (c))
 
 int

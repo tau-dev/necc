@@ -1,3 +1,4 @@
+//!necc-dbg @ -run
 #define VALUE "ab\"c"
 
 int

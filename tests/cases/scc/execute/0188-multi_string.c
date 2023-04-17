@@ -1,3 +1,4 @@
+//!necc-dbg @ -run
 #define STR(x) #x
 #define RES "This is a string!"
 

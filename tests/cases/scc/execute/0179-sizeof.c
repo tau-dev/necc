@@ -1,6 +1,6 @@
+//!necc-dbg @ -run
 int
 main(void)
 {
-	sizeof((int) 1);
-	return 0;
+	return sizeof((int) 1) - 4;
 }

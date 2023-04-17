@@ -362,7 +362,8 @@ static IrRef coercerval(Value v, Type t, Parse *, const Token *, bool allow_cast
 static Value immediateIntVal(Parse *, Type typ, u64 val);
 static inline void removeEnumness(Type *t);
 
-bool evalPreprocExpression (Tokenization tokens, Arena *arena, Options *opt) {
+// TODO May want signed values??
+u64 evalPreprocExpression (Tokenization tokens, Arena *arena, Options *opt) {
 	Parse parse = {
 		.arena = arena,
 		.code_arena = arena,
@@ -380,7 +381,7 @@ bool evalPreprocExpression (Tokenization tokens, Arena *arena, Options *opt) {
 	u64 val;
 	if (!tryIntConstant(&parse, v, &val))
 		parseerror(&parse, tokens.list.tokens, "preprocessor expression must be constant");
-	return val != 0;
+	return val;
 }
 
 

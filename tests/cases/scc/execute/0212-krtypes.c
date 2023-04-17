@@ -1,3 +1,4 @@
+//!necc-dbg @ -run
 int
 f1(int a)
 {

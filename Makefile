@@ -18,6 +18,7 @@ debug: bin/necc-dbg
 release: bin/necc
 
 self: selfhost/necc
+	@echo
 
 test: bin/necc-dbg bin/necc tests/runner self
 	@./tests/runner
@@ -34,7 +35,6 @@ bin/%.o: src/%.c $(C_HDRS)
 
 bin/necc: $(C_SRCS) $(C_HDRS)
 	$(CC) $(C_SRCS) $(C_FLAGS) $(C_REL_FLAGS) -o $@
-
 
 selfhost/necc: $(SELFHOST_OBJS)
 	musl-gcc -static $^ -lm -o $@

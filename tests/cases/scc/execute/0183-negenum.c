@@ -1,3 +1,4 @@
+//!necc-dbg @ -run
 enum JSONError {
 	JSON_ERROR_MEM     = -2,
 	JSON_ERROR_INVALID = -1

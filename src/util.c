@@ -91,7 +91,7 @@ SourceFile *readAllAlloc (String path, String filename) {
 			if (fseek(f, 0, SEEK_END) == 0) {
 				long count = ftell(f);
 				if (count >= 0 && fseek(f, 0, SEEK_SET) == 0) {
-					char *data = malloc(sizeof(SourceFile) + count+1);
+					char *data = malloc(sizeof(SourceFile) + count+2);
 					char *content = data + sizeof(SourceFile);
 					if (data) {
 						size_t got = fread(content, 1, count, f);
@@ -107,6 +107,7 @@ SourceFile *readAllAlloc (String path, String filename) {
 								content += 3;
 							}
 							content[count] = 0;
+							content[count+1] = 0; // The lexer sometimes wants to skip two characters at once.
 							free(filename_z);
 							fclose(f);
 							SourceFile *result = (SourceFile*) data;
