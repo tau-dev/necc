@@ -111,7 +111,7 @@ static void parsemsg (Log level, const Parse *p, const Token *main, const char *
 
 
 
-static void redefinition (const Parse *p, const Token *main, const Token *previous, Symbol *name) {
+static void redefinitionError (const Parse *p, const Token *main, const Token *previous, Symbol *name) {
     parsemsg(Log_Err, p, main, "redefinition of %.*s", name->name);
     parsemsg(Log_Info | Log_Fatal, p, previous, "previous definition was here");
 }
@@ -140,13 +140,26 @@ static inline void setLoc (Parse *parse, const Token *tok) {
 	parse->build.loc = parse->tokens.list.positions[tok - parse->tokens.list.tokens].source;
 }
 
+// Whether an identifier is expected to be on a declarator.
 typedef enum {
-	Decl_Named,
-	Decl_PossiblyAbstract,
-	Decl_Abstract,
+	Decl_Named,            // E.g. variables
+	Decl_PossiblyAbstract, // E.g. parameters
+	Decl_Abstract,         // E.g. type names
 } Namedness;
 
+
+
+typedef enum {
+	DeclKind_Declaration,
+	DeclKind_Definition,
+	DeclKind_Typedef,
+} DeclKind;
+
 static Declaration parseDeclarator(Parse *, Type base_type, Namedness);
+static inline void markDecl(const Parse *, const Token *, Declaration, DeclKind);
+static inline void markDeclScopeBegin(String name);
+static inline void markDeclScopeEnd();
+
 static nodiscard bool allowedNoDeclarator(Parse *, Type base_type);
 // static Declaration parseDeclarator (Parse* parse, const Token **tok, Type base_type);
 static void initializeStaticToZero(Parse *, StaticValue *);
@@ -229,6 +242,7 @@ void parse (Arena *code_arena, Tokenization tokens, Options *opt, Module *module
 			Declaration decl = parseDeclarator(&parse, base_type, Decl_Named);
 			Type first_argument_type;
 
+
 			bool function_def = decl.type.kind == Kind_Function && declarators == 0 &&
 				(parse.pos->kind == Tok_OpenBrace || tryParseTypeBase(&parse, &first_argument_type, NULL));
 			bool object_def = decl.type.kind != Kind_Function && parse.pos->kind == Tok_Equals;
@@ -243,7 +257,11 @@ void parse (Arena *code_arena, Tokenization tokens, Options *opt, Module *module
 				IrBuild global_ir = parse.build;
 				parse.current_func_type = decl.type.function;
 				parse.current_func_id = ord->static_id;
+				markDeclScopeBegin(decl.name->name);
+
 				parseFunction(&parse, decl.name);
+
+				markDeclScopeEnd();
 				parse.current_func_id = IDX_NONE;
 				parse.scope_depth = 0;
 
@@ -556,7 +574,7 @@ static void parseStatement (Parse *parse, bool *had_non_declaration) {
 			if (sym->label.block) {
 				// TODO This does not catch a series two identical labels in a row.
 				if (sym->label.block->exit.kind != Exit_None)
-					redefinition(parse, parse->pos, sym->label.def_location, t.val.symbol);
+					redefinitionError(parse, parse->pos, sym->label.def_location, t.val.symbol);
 			} else {
 				sym->label.def_location = parse->pos;
 				sym->label.block = newBlock(build, t.val.symbol->name);
@@ -1494,14 +1512,14 @@ static Value parseExprRightUnary (Parse *parse) {
 
 			if (resolved.kind == Kind_Struct || resolved.kind == Kind_Union) {
 				u32 i = 0;
-				for (; i < resolved.members.len; i++) {
-					if (resolved.members.ptr[i].name == member_name)
+				for (; i < resolved.compound.members.len; i++) {
+					if (resolved.compound.members.ptr[i].name == member_name)
 						break;
 				}
-				if (i == resolved.members.len)
+				if (i == resolved.compound.members.len)
 					parseerror(parse, NULL, "type %s does not have a member named %.*s", printTypeHighlighted(parse->arena, v.typ), member_name->name.len, member_name->name.ptr);
-				CompoundMember member = resolved.members.ptr[i];
-				bool is_flex = isFlexibleArrayMember(resolved.members, i);
+				CompoundMember member = resolved.compound.members.ptr[i];
+				bool is_flex = isFlexibleArrayMember(resolved.compound.members, i);
 
 				v.typ = member.type;
 				if (isLvalue(v)) {
@@ -1509,7 +1527,7 @@ static Value parseExprRightUnary (Parse *parse) {
 					v.inst = genAdd(build, v.inst, offset, Unsigned);
 
 					if (is_flex) {
-						v.typ = (Type) {Kind_Pointer, .pointer = resolved.members.ptr[i].type.array.inner};
+						v.typ = (Type) {Kind_Pointer, .pointer = resolved.compound.members.ptr[i].type.array.inner};
 						v.category = Ref_RValue;
 					}
 				} else {
@@ -2048,7 +2066,7 @@ static u64 parseSubInitializer (Parse *parse, InitializationDest dest, u32 offse
 				u32 stride = typeSize(inner, &parse->target);
 				parseSubInitializer(parse, dest, offset + member_idx * stride, inner, no_value, true, 0);
 			} else {
-				CompoundMember member = resolved.members.ptr[member_idx];
+				CompoundMember member = resolved.compound.members.ptr[member_idx];
 				parseSubInitializer(parse, dest, offset + member.offset, member.type, no_value, true, 0);
 			}
 			member_idx++;
@@ -2067,7 +2085,7 @@ static u64 parseSubInitializer (Parse *parse, InitializationDest dest, u32 offse
 		if (is_array) {
 			maybeBracedInitializer(parse, dest, offset, *type.array.inner, first_value);
 		} else {
-			CompoundMember member = resolved.members.ptr[0];
+			CompoundMember member = resolved.compound.members.ptr[0];
 			maybeBracedInitializer(parse, dest, offset + member.offset, member.type, first_value);
 		}
 		member_idx++;
@@ -2090,7 +2108,7 @@ static u64 parseSubInitializer (Parse *parse, InitializationDest dest, u32 offse
 				return member_idx;
 		}
 	} else {
-		Members members = resolved.members;
+		Members members = resolved.compound.members;
 		while (true) {
 			CompoundMember m = members.ptr[member_idx];
 
@@ -2111,7 +2129,7 @@ u32 findDesignatedMemberIdx (Parse *parse, Type type) {
 		parseerror(parse, id, "cannot use a member designator for initializing the type %s",
 				printTypeHighlighted(parse->arena, type));
 	}
-	Members members = type.members;
+	Members members = type.compound.members;
 	Symbol *sym = expect(parse, Tok_Identifier).val.symbol;
 	for (u32 idx = 0; idx < members.len; idx++) {
 		if (members.ptr[idx].name == sym)
@@ -2363,21 +2381,21 @@ static bool tryParseTypeBase (Parse *parse, Type *type, u8 *storage_dest) {
 						Type prev = existing->type;
 
 						if (prev.kind == Kind_Struct &&
-							prev.members.len == body_type.members.len)
+							prev.compound.members.len == body_type.compound.members.len)
 						{
 							equal = true;
-							for (u32 i = 0; i < prev.members.len; i++) {
-								if (!typeCompatible(prev.members.ptr[i].type, body_type.members.ptr[i].type)) {
+							for (u32 i = 0; i < prev.compound.members.len; i++) {
+								if (!typeCompatible(prev.compound.members.ptr[i].type, body_type.compound.members.ptr[i].type)) {
 									equal = false;
 									break;
 								}
 							}
 						}
 						if (!equal)
-							redefinition(parse, primary, existing->def_location, named);
+							redefinitionError(parse, primary, existing->def_location, named);
 					}
 				}
-				base.kind = Kind_Struct_Named;
+				base.kind = is_struct ? Kind_Struct_Named : Kind_Union_Named;
 				base.nametagged = named->nametagged;
 			} else {
 				base = body_type;
@@ -2432,7 +2450,7 @@ static bool tryParseTypeBase (Parse *parse, Type *type, u8 *storage_dest) {
 					bool new;
 					OrdinaryIdentifier *ident = genOrdSymbol(parse, name, &new);
 					if (!new)
-						redefinition(parse, NULL, ident->def_location, name);
+						redefinitionError(parse, NULL, ident->def_location, name);
 
 					ident->kind = Sym_EnumConstant;
 					ident->decl_location = ident->def_location = primary;
@@ -2664,13 +2682,17 @@ static bool tryParseTypeBase (Parse *parse, Type *type, u8 *storage_dest) {
 
 static Type parseStructUnionBody(Parse *parse, bool is_struct) {
 	LIST(CompoundMember) members = {0};
+
+	const Tokenization *tok = &parse->tokens;
+	Location loc = tok->list.positions[parse->pos - 2 - tok->list.tokens].source;
+	SourceFile *source = tok->files.ptr[loc.file_id];
+
 	u32 current_offset = 0;
 	while (!tryEat(parse, Tok_CloseBrace)) {
 		// May not be function type, struct or union ending
 		// with an incomplete array, or incomplete type except
 		// that the last item may be an incomplete array.
 		// TODO Check this.
-
 		const Token *begin = parse->pos;
 		if (tryEatStaticAssert(parse))
 			continue;
@@ -2690,9 +2712,9 @@ static Type parseStructUnionBody(Parse *parse, bool is_struct) {
 			u32 offset = 0;
 			if (is_struct)
 				offset = addMemberOffset(&current_offset, t, &parse->target);
-			for (u32 i = 0; i < t.members.len; i++) {
+			for (u32 i = 0; i < t.compound.members.len; i++) {
 				// TODO Check that the last member is not a flexible array.
-				CompoundMember m = t.members.ptr[i];
+				CompoundMember m = t.compound.members.ptr[i];
 				m.offset += offset;
 				PUSH_A(parse->code_arena, members, m);
 			}
@@ -2745,10 +2767,12 @@ static Type parseStructUnionBody(Parse *parse, bool is_struct) {
 		expect(parse, Tok_Semicolon);
 	}
 	return (Type) {
-		.kind = Kind_Struct,
-		.members = {
-			.ptr = members.ptr,
-			.len = members.len,
+		.kind = is_struct ? Kind_Struct : Kind_Union,
+		.compound = {
+			.members = { .ptr = members.ptr, .len = members.len },
+			.line = loc.line,
+			.column = loc.column,
+			.source = source,
 		},
 	};
 }
@@ -2816,7 +2840,7 @@ static Declaration parseDeclarator (Parse *parse, Type base_type, Namedness name
 	Type *enclosing = NULL;
 
 	// For abstract declarators, empty parentheses in a type name are
-	// “interpreted as function with no parameter specification”,
+	// interpreted as “function with no parameter specification”,
 	// rather than redundant parentheses around the omitted identifier.
 	if (parse->pos[0].kind == Tok_OpenParen && parse->pos[1].kind != Tok_CloseParen) {
 		parse->pos++;
@@ -2958,6 +2982,45 @@ static Declaration parseDeclarator (Parse *parse, Type base_type, Namedness name
 	return decl;
 }
 
+
+static StringList decl_scopes = {0};
+static void emitDecl(FILE *dest, Arena *arena, SourceFile *source, Location loc, Declaration decl, DeclKind kind) {
+	char *type_name = printType(arena, decl.type);
+	char *kind_name = kind == DeclKind_Typedef ? "type" :
+			kind == DeclKind_Declaration ? "decl" : "def";
+
+	String name = decl.name->name;
+	fprintf(dest, "%.*s%.*s:%lu:%lu:%s:", STRING_PRINTAGE(source->path), STRING_PRINTAGE(source->name),
+			(unsigned long) loc.line, (unsigned long) loc.column, kind_name);
+	for (u32 i = 0; i < decl_scopes.len; i++)
+		fprintf(dest, "%.*s.", STRING_PRINTAGE(decl_scopes.ptr[i]));
+	fprintf(dest, "%.*s:%s\n", STRING_PRINTAGE(name), type_name);
+}
+
+static inline void markDecl(const Parse *parse, const Token *tok, Declaration decl, DeclKind kind) {
+	Options *opt = parse->opt;
+	if (!opt->any_decl_emit) return;
+
+	u32 idx = tok - parse->tokens.list.tokens;
+	Location loc = parse->tokens.list.positions[idx].source;
+	SourceFile *source = parse->tokens.files.ptr[loc.file_id];
+	bool from_std = source->kind == Source_StandardHeader;
+
+	if (opt->emit_decls && decl_scopes.len == 0 && !from_std)
+		emitDecl(opt->emit_decls, parse->arena, source, loc, decl, kind);
+	if (opt->emit_all_decls && !from_std)
+		emitDecl(opt->emit_all_decls, parse->arena, source, loc, decl, kind);
+	if (opt->emit_std_decls)
+		emitDecl(opt->emit_std_decls, parse->arena, source, loc, decl, kind);
+}
+
+static inline void markDeclScopeBegin(String name) {
+	PUSH(decl_scopes, name);
+}
+static inline void markDeclScopeEnd() {
+	decl_scopes.len--;
+}
+
 static void parseTypedefDecls(Parse *parse, Type base_type) {
 	do {
 		const Token *begin = parse->pos;
@@ -2967,12 +3030,13 @@ static void parseTypedefDecls(Parse *parse, Type base_type) {
 		OrdinaryIdentifier *ident = genOrdSymbol(parse, decl.name, &new);
 		if (!new) {
 			if (ident->kind != Sym_Typedef || !typeCompatible(ident->typedef_type, decl.type))
-				redefinition(parse, begin, ident->def_location, decl.name);
+				redefinitionError(parse, begin, ident->def_location, decl.name);
 		} else {
 			ident->kind = Sym_Typedef;
 			ident->decl_location = ident->def_location = begin;
 			ident->typedef_type = decl.type;
 		}
+		markDecl(parse, begin, decl, DeclKind_Typedef);
 	} while (tryEat(parse, Tok_Comma));
 
 	expect(parse, Tok_Semicolon);
@@ -3129,16 +3193,20 @@ static OrdinaryIdentifier *define (
 		unreachable;
 	}
 
+
 	// If an identifier has no linkage, there shall be no more than one
 	// declaration of the identifier (in a declarator or type specifier)
 	// with the same scope and in the same name space.
 	if (existing && existing->scope_depth == scope_depth) {
 		if (existing_linkage == Link_None || linkage(parse, new) == Link_None)
-			redefinition(parse, decl_token, existing->decl_location, decl.name);
+			redefinitionError(parse, decl_token, existing->decl_location, decl.name);
 		assert(existing->kind == Sym_Value_Static);
 		if (parse->module->ptr[existing->static_id].def_state == Def_Defined && defining_token)
-			redefinition(parse, defining_token, existing->def_location, decl.name);
+			redefinitionError(parse, defining_token, existing->def_location, decl.name);
 	}
+
+	// This is not quite right: the first declaration of a static variable should arguably also be a definition.
+	markDecl(parse, decl_token, decl, defining_token ? DeclKind_Definition : DeclKind_Declaration);
 
 	decl.name->ordinary = new;
 	PUSH(parse->current_scope, decl.name);

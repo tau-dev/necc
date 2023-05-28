@@ -903,8 +903,8 @@ void printBlock (FILE *dest, Block *blk, IrList ir) {
 			fprintf(dest, "discard %lu\n", (ulong) inst.unop);
 			continue;
 		case Ir_Load:
-			fprintf(dest, "load%s i%lu, [%lu]", inst.properties & Prop_Mem_Volatile ? " volatile" : "",
-					(ulong) inst.size * 8, (ulong) inst.mem.address);
+			fprintf(dest, "load%s %lu", inst.properties & Prop_Mem_Volatile ? " volatile" : "",
+					(ulong) inst.mem.address);
 			printOrder(dest, inst.mem.ordered_after);
 			continue;
 		case Ir_Store:
@@ -928,7 +928,7 @@ void printBlock (FILE *dest, Block *blk, IrList ir) {
 			fprintf(dest, "fcast f%lu, %lu\n", (ulong) inst.size * 8, (ulong) inst.unop);
 			break;
 		case Ir_Access:
-			fprintf(dest, "access i%lu, %lu @ %lu\n", (ulong) inst.size * 8, (ulong) inst.unop_const.val, (ulong) inst.unop_const.offset);
+			fprintf(dest, "access /%lu, %lu @ %lu\n", (ulong) inst.size, (ulong) inst.unop_const.val, (ulong) inst.unop_const.offset);
 			continue;
 		case Ir_SIntToFloat:
 			fprintf(dest, "s%lu->float %lu\n", (ulong) inst.size * 8, (ulong) inst.unop);
@@ -943,7 +943,7 @@ void printBlock (FILE *dest, Block *blk, IrList ir) {
 			fprintf(dest, "float->u%lu %lu\n", (ulong) inst.size * 8, (ulong) inst.unop);
 			continue;
 		case Ir_VaArg:
-			fprintf(dest, "va_arg i%lu, %lu\n", (ulong) inst.size * 8, (ulong) inst.unop);
+			fprintf(dest, "va_arg /%lu, %lu\n", (ulong) inst.size, (ulong) inst.unop);
 			continue;
 		case Ir_VaStart:
 			fprintf(dest, "va_start %lu, param %lu\n", (ulong) inst.unop_const.val, (ulong) inst.unop_const.offset);

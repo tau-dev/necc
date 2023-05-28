@@ -37,6 +37,11 @@ typedef struct {
 
 	bool emitted_warnings;
 	bool error_on_warnings;
+
+	bool any_decl_emit;
+	FILE *emit_decls;
+	FILE *emit_all_decls;
+	FILE *emit_std_decls;
 } Options;
 
 

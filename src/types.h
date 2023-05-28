@@ -95,8 +95,15 @@ typedef struct {
 
 // TODO struct and union also have a name tag and storage duration!
 typedef struct CompoundMember CompoundMember;
-
 typedef SPAN(CompoundMember) Members;
+
+typedef struct UnnamedCompound {
+	// TODO Pre-calculate size, do not store these inline.
+	Members members;
+	u32 line;
+	u32 column;
+	SourceFile *source;
+} UnnamedCompound;
 
 typedef struct NameTaggedType NameTaggedType;
 typedef struct Type {
@@ -110,9 +117,7 @@ typedef struct Type {
 		Type *pointer;
 		ArrayType array;
 		NameTaggedType *nametagged;
-
-		// TODO Pre-calculate size, do not store these inline.
-		Members members;
+		UnnamedCompound compound;
 	};
 } Type;
 

@@ -388,8 +388,8 @@ static void emitType (Codegen *c, Type type, u32 id) {
 	switch (res.kind) {
 	case Kind_Union:
 	case Kind_Struct:
-		for (u32 i = 0; i < res.members.len; i++)
-			typeDebugData(c, res.members.ptr[i].type);
+		for (u32 i = 0; i < res.compound.members.len; i++)
+			typeDebugData(c, res.compound.members.ptr[i].type);
 		break;
 	case Kind_Pointer:
 		typeDebugData(c, *type.pointer);
@@ -473,10 +473,11 @@ static void emitType (Codegen *c, Type type, u32 id) {
 		emitInt(typeDebugData(c, *type.pointer));
 		break;
 	case Kind_Struct:
-		emitZString("s");
+	case Kind_Union:
+		emitZString(res.kind == Kind_Struct ? "s" : "u");
 		emitInt(typeSize(res, c->target));
-		for (u32 i = 0; i < res.members.len; i++) {
-			CompoundMember m = res.members.ptr[i];
+		for (u32 i = 0; i < res.compound.members.len; i++) {
+			CompoundMember m = res.compound.members.ptr[i];
 			emitString(m.name->name);
 			emitZString(":");
 			emitInt(typeDebugData(c, m.type));
@@ -615,7 +616,8 @@ static void emitFunctionForward (EmitParams params, u32 id) {
 	if (c.is_memory_return)
 		emit(&c, " mov qword ptr [rsp], rdi");
 
-	u32 mem_params = c.stack_allocated + 8;
+	// rbp and return address
+	u32 mem_params = c.stack_allocated + 16;
 
 	for (u32 i = 0; i < c.param_info.len; i++) {
 		ParamInfo info = c.param_info.ptr[i];

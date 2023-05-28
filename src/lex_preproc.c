@@ -567,6 +567,7 @@ static u64 preprocExpression(ExpansionParams, TokenList *buf, Tokenization *main
 static const char *defineMacro(Arena *arena, Arena *generated_strings, SymbolList *, String name, SourceFile *, Location *loc, const char *pos);
 static void predefineMacros(Arena *arena, Arena *genrated_strings, SymbolList *, FileList *, StringList to_define, SourceKind);
 static void resolveSymbolIndicesToPointers(TokenList t, Symbol *syms);
+static void markMacroDecl(FILE *dest, SourceFile source, Location, String macro_name);
 
 
 Tokenization lex (Arena *generated_strings, String filename, LexParams params) {
@@ -599,6 +600,7 @@ Tokenization lex (Arena *generated_strings, String filename, LexParams params) {
 		getSymbol(&t.symbols, zstr(preproc_directives[i].name))->directive = preproc_directives[i].key;
 
 
+	// Used so that an invalid file index can be discriminated.
 	PUSH(t.files, NULL);
 	SourceFile *initial_source = readAllAlloc(STRING_EMPTY, filename);
 	if (initial_source == NULL)
@@ -669,12 +671,18 @@ Tokenization lex (Arena *generated_strings, String filename, LexParams params) {
 					pos++;
 				}
 
-				// TODO Disallow `defined`
+				// TODO Disallow the macro name `defined`
 				String name = {pos - start, start};
-				loc.column += pos - start;
-// 				if (*entry != NULL)
-// 					fprintf(stderr, "redefining %.*s (TODO Check that definitions are identical)\n", STRING_PRINTAGE(name));
+				if (params.options->any_decl_emit) {
+					if (params.options->emit_decls && source.kind != Source_StandardHeader)
+						markMacroDecl(params.options->emit_decls, source, loc, name);
+					if (params.options->emit_all_decls && source.kind != Source_StandardHeader)
+						markMacroDecl(params.options->emit_all_decls, source, loc, name);
+					if (params.options->emit_std_decls)
+						markMacroDecl(params.options->emit_std_decls, source, loc, name);
+				}
 
+				loc.column += pos - start;
 				pos = defineMacro(&macro_arena, generated_strings, &t.symbols, name, t.files.ptr[source.idx], &loc, pos);
 			} break;
 			case Directive_Undef: {
@@ -719,14 +727,19 @@ Tokenization lex (Arena *generated_strings, String filename, LexParams params) {
 					new_source->included_count++;
 				} else {
 					if (delimiter == '\"') {
-						for (u32 i = 0; i < params.user_include_dirs.len && new_source == NULL; i++) {
+						for (u32 i = 0; i < params.user_include_dirs.len; i++) {
 							new_source = readAllAlloc(params.user_include_dirs.ptr[i], includefilename);
+							if (new_source) break;
 						}
 					}
-					for (u32 i = 0; i < params.sys_include_dirs.len && new_source == NULL; i++) {
-						new_source = readAllAlloc(params.sys_include_dirs.ptr[i], includefilename);
-						if (new_source)
-							new_source->kind = Source_StandardHeader;
+					if (new_source == NULL) {
+						for (u32 i = 0; i < params.sys_include_dirs.len; i++) {
+							new_source = readAllAlloc(params.sys_include_dirs.ptr[i], includefilename);
+							if (new_source) {
+								new_source->kind = Source_StandardHeader;
+								break;
+							}
+						}
 					}
 					if (new_source == NULL)
 						lexerror(source, loc, "could not open include file \"%.*s\"", STRING_PRINTAGE(includefilename));
@@ -1952,6 +1965,12 @@ static void predefineMacros (
 		defineMacro(arena, genrated_strings, symbols, source->name, source, &loc, source->content.ptr);
 	}
 }
+
+static void markMacroDecl(FILE *dest, SourceFile source, Location loc, String macro_name) {
+	fprintf(dest, "%.*s%.*s:%lu:%lu:macro:%.*s:\n", STRING_PRINTAGE(source.path), STRING_PRINTAGE(source.name),
+			(unsigned long) loc.line, (unsigned long) loc.column, STRING_PRINTAGE(macro_name));
+}
+
 
 
 static char lexEscapeCode(SourceFile *source, Location loc, const char **p) {

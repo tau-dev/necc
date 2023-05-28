@@ -19,7 +19,7 @@ typedef struct {
 	Type typ;
 
 	IrRef inst;
-	// ReferenceClass. inst holds the direct value only for
+	// Category. inst holds the direct value only for
 	// Reference_RValue, pointer to the actual value otherwise.
 	u8 category;
 	u8 no_discard;

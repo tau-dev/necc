@@ -39,6 +39,9 @@ typedef enum {
 	F_EmitObj,
 	F_EmitDeps,
 	F_EmitLocalDeps,
+	F_EmitDecls,
+	F_EmitAllDecls,
+	F_EmitStdDecls,
 	F_Run,
 
 	F_OptSimple,
@@ -74,6 +77,9 @@ static Name flags[] = {
 	{"deps", F_EmitDeps},
 	{"MM", F_EmitLocalDeps},
 	{"localdeps", F_EmitLocalDeps},
+	{"decls", F_EmitDecls},
+	{"all-decls", F_EmitAllDecls},
+	{"std-decls", F_EmitStdDecls},
 
 	{"O", F_OptSimple},
 	{"Oarith", F_OptArith},
@@ -94,26 +100,27 @@ const char *help_string = "Usage:\n"
 	" -g/-debug       Emit debug information (TODO).\n"
 	" -std <version>  Select the used version of the C standard. Options:\n"
 	"                   c89, c99, c11/c17, c23/latest, gnu, ms, lax.\n"
-	" -I <path>       Add <path> as an include directory.\n"
-	" -stdinc <path>  Add <path> as a standard library headers include directory.\n"
+	" -I <path>       Add <path> as a normal include directory—these are searched by #include directive with quotes, but not with angle brackets.\n"
+	" -stdinc <path>  Add <path> as a standard-library-headers include directory—searched by either kind of directive, after normal include directories.\n"
+	"                   Each is searched last-to-first.\n"
 	" -D/-def <macro> Define a preprocessor macro. <macro> should be the name of the macro, optionally followed by ‘=’ and the intended replacement list.\n"
 	" -nostdinc       Disable default standard include paths.\n"
 	" -nostdlib       Do not link to the standard library. (TODO)\n"
 	" -simple-types   Print types (in declaration lists or error messages) in an easier-to-parse left-to-right syntax. (TODO)\n"
 	" -Werr/-Werror   Fail the compilation if warnings are generated.\n"
 	"\n"
-	"The following output options write to stdout by default, or may be followed by ‘=<FILENAME>’ to specify an output file. Default: ‘-o=a.out’.\n"
+	"The following output options write to stdout by default, or may be followed by ‘=<FILENAME>’ to specify an output file. Default: ‘-out=a.out’.\n"
 	" -out            Generate an executable.\n"
 	" -obj            Generate an object file.\n"
 	" -lib            Generate an archive. (TODO)\n"
 	" -so/-dll        Generate a shared/dynamically linked library. (TODO)\n"
-	" -as             Generate assembly code in the flat assembler format.\n"
+	" -as             Generate assembly code in the GNU assembler format.\n"
 	" -cpp            Print the preprocessed source. (TODO)\n"
 	" -M/-deps        Print a Makefile-compatible dependency list of all #included files.\n"
 	" -MM/-localdeps  Same as above, but do not mention system header files.\n"
-	" -decls          Print a list of top-level declarations in the code. (TODO)\n"
-	" -all-decls      Print a list of all declarations in the code. (TODO)\n"
-	" -std-decls      Print a list of all declarations in the code, including those from standard library headers. (TODO)\n"
+	" -decls          Print a list of top-level declarations in the code.\n"
+	" -all-decls      Print a list of all declarations in the code.\n"
+	" -std-decls      Print a list of all declarations in the code, including those from standard library headers.\n"
 	"                   Declaration lists are a sequence of lines consisting of ‘<filename>:<line>:<column>:<def-kind>:<name>:<type>’,\n"
 	"                   where a non-top-level <name> is qualified by a ‘.’-separated path of its containers,\n"
 	"                   and <def-kind> is either ‘decl’, ‘def’, ‘type’ or ‘macro’.\n"
@@ -121,12 +128,12 @@ const char *help_string = "Usage:\n"
 	"Optimizations:\n"
 	" -O              Perform optimizations: -Omem1, -Oarith.\n"
 	" -Oarith         Apply some arithmetic simplifications.\n"
-	" -Omem0    Fold simple store-load sequences.\n"
+	" -Omem0          Fold simple store-load sequences.\n"
 	" -Omem1          Perform block-local memory elisions.\n"
 	" -Omem2          Perform whole-function memory elisions.\n"
 	"\n"
 	"Options to assist in fixing compiler errors:\n"
-	" -ir             (Output option) Print the intermediate representation.\n"
+	" -ir             Print the intermediate representation. This is an output option.\n"
 	" -crash          Crash when generating an error.\n"
 	"\n";
 
@@ -143,7 +150,7 @@ static Name versions[] = {
 	{0}
 };
 
-static i32 find(const char *str, const Name *names) {
+static i32 find (const char *str, const Name *names) {
 	while (names->name) {
 		if (strcmp(names->name, str) == 0)
 			return names->flag;
@@ -157,7 +164,7 @@ static i32 find(const char *str, const Name *names) {
 bool had_output = false;
 static const char *stdout_marker = "<stdout>";
 
-static void setOut(const char **dest, char *f) {
+static void setOut (const char **dest, char *f) {
 	static bool had_stdout = false; // TODO Inits!
 	if (f) {
 		*dest = f;
@@ -170,7 +177,7 @@ static void setOut(const char **dest, char *f) {
 	}
 	had_output = true;
 }
-static FILE *openOut(const char *name) {
+static FILE *openOut (const char *name) {
 	if (name == stdout_marker)
 		return stdout;
 	FILE *f = fopen(name, "w");
@@ -221,6 +228,9 @@ int main (int argc, char **args) {
 	const char *exe_out = NULL;
 	const char *deps_out = NULL;
 	const char *localdeps_out = NULL;
+	const char *decls_out = NULL;
+	const char *all_decls_out = NULL;
+	const char *std_decls_out = NULL;
 
 	bool stdinc = true;
 	bool opt_store_load = false;
@@ -258,6 +268,9 @@ int main (int argc, char **args) {
 			case F_EmitExe: setOut(&exe_out, direct_arg); break;
 			case F_EmitDeps: setOut(&deps_out, direct_arg); break;
 			case F_EmitLocalDeps: setOut(&localdeps_out, direct_arg); break;
+			case F_EmitDecls: setOut(&decls_out, direct_arg); break;
+			case F_EmitAllDecls: setOut(&all_decls_out, direct_arg); break;
+			case F_EmitStdDecls: setOut(&std_decls_out, direct_arg); break;
 			case F_Run: runit = true; break;
 			case F_Standard: {
 				const char *arg = direct_arg ? direct_arg : args[++i];
@@ -304,7 +317,6 @@ int main (int argc, char **args) {
 	if (!had_output)
 		exe_out = "./a.out";
 
-
 	i32 i;
 	for (i = input.len - 1; i >= 0; i--) {
 		if (input.ptr[i] == '/')
@@ -326,7 +338,6 @@ int main (int argc, char **args) {
 	}
 
 	char tmp_exe[L_tmpnam] = {0};
-// 	char tmp_obj[L_tmpnam] = {0};
 	char tmp_asm[L_tmpnam] = {0};
 
 	if (runit && !exe_out) {
@@ -378,6 +389,10 @@ int main (int argc, char **args) {
 		PUSH(paths.system_macros, zstr("__LITTLE_ENDIAN__"));
 	}
 
+	if (decls_out) options.emit_decls = openOut(decls_out);
+	if (all_decls_out) options.emit_all_decls = openOut(all_decls_out);
+	if (std_decls_out) options.emit_std_decls = openOut(std_decls_out);
+	options.any_decl_emit = decls_out || all_decls_out || std_decls_out;
 
 
 	// The Real Work happens now.
@@ -389,13 +404,19 @@ int main (int argc, char **args) {
 	if (localdeps_out)
 		emitDeps(localdeps_out, out_name, tokens.files, false);
 
-	if (!ir_out && !assembly_out && !obj_out && !exe_out)
+	if (!ir_out && !assembly_out && !obj_out && !exe_out &&
+		!decls_out && !all_decls_out && !std_decls_out)
+	{
 		return 0;
+	}
 
 	parse(&arena, tokens, &options, &module);
 
 	if (options.emitted_warnings && options.error_on_warnings)
 		generalFatal("generated warnings");
+
+	if (!ir_out && !assembly_out && !obj_out && !exe_out)
+		return 0;
 
 	// Analyses and transformations
 	for (u32 i = 0; i < module.len; i++) {
@@ -539,7 +560,7 @@ static void emitDeps (const char *deps_out, const char *out_name, FileList files
 
 	fprintf(dest, "%s:", out_name);
 	u32 line_length = strlen(out_name) + 1;
-	for (u32 i = 0; i < files.len; i++) {
+	for (u32 i = 1; i < files.len; i++) {
 		SourceFile *f = files.ptr[i];
 		if (f->kind == Source_Regular || (f->kind == Source_StandardHeader && emit_system_files)) {
 			u32 elem_length = f->path.len + f->name.len + 1;

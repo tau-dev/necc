@@ -53,8 +53,8 @@ u32 typeSize (Type t, const Target *target) {
 	case Kind_Struct: {
 		u32 max_alignment = 1;
 		u32 tightsize = 0;
-		for (u32 i = 0; i < t.members.len; i++) {
-			CompoundMember member = t.members.ptr[i];
+		for (u32 i = 0; i < t.compound.members.len; i++) {
+			CompoundMember member = t.compound.members.ptr[i];
 			u32 align = typeAlignment(member.type, target);
 			if (align > max_alignment)
 				max_alignment = align;
@@ -151,7 +151,7 @@ bool typeCompatible (Type a, Type b) {
 		return true;
 	case Kind_Union:
 	case Kind_Struct:
-		return a.members.ptr == b.members.ptr;
+		return a.compound.members.ptr == b.compound.members.ptr;
 	case Kind_Enum_Named:
 	case Kind_Struct_Named:
 	case Kind_Union_Named:
@@ -223,6 +223,11 @@ char *printTypeHighlighted (Arena *arena, Type t) {
 	return string;
 }
 
+void printTypeUnnamed(char **pos, const char *end, UnnamedCompound comp) {
+	printto(pos, end, "[unnamed @ %.*s, line %lu, column %lu]", STRING_PRINTAGE(comp.source->name),
+			(unsigned long) comp.line, (unsigned long) comp.column);
+}
+
 void printTypeBase(Type t, char **pos, const char *end) {
 	switch (t.kind) {
 	case Kind_Pointer:
@@ -273,13 +278,15 @@ void printTypeBase(Type t, char **pos, const char *end) {
 		}
 	} break;
 	case Kind_Union:
-		printto(pos, end, "union [anonymous]");
+		printto(pos, end, "union ");
+		printTypeUnnamed(pos, end, t.compound);
 		break;
 	case Kind_Struct:
-		printto(pos, end, "struct [anonymous]");
+		printto(pos, end, "struct ");
+		printTypeUnnamed(pos, end, t.compound);
 		break;
 	case Kind_Enum:
-		printto(pos, end, "enum [anonymous]");
+		printto(pos, end, "enum unnamed from ???, line ??, column ??");
 		break;
 	case Kind_Struct_Named:
 		printto(pos, end, "struct %.*s", STRING_PRINTAGE(t.nametagged->name));
