@@ -84,6 +84,9 @@ typedef enum {
 
 	Intrinsic_Nanf,
 	Intrinsic_Inff,
+
+	Intrinsic_Expect,
+	Intrinsic_FrameAddress,
 } Intrinsic;
 
 typedef struct Tokenization Tokenization;

@@ -117,6 +117,7 @@ Keyword standard_keywords[] = {
 	{"__restrict", Tok_Key_Restrict},
 	{"__inline", Tok_Key_Inline},
 	{"__alignof__", Tok_Key_Alignof},
+	{"__attribute__", Tok_Key_Attribute},
 
 	{"__FILE__", Tok_Key_File},
 	{"__LINE__", Tok_Key_Line},
@@ -138,6 +139,8 @@ Keyword intrinsics[] = {
 	{"__builtin_nanf", Intrinsic_Nanf},
 	{"__builtin_inff", Intrinsic_Inff},
 
+	{"__builtin_expect", Intrinsic_Expect},
+	{"__builtin_frame_address", Intrinsic_FrameAddress},
 };
 
 enum Directive {
@@ -228,6 +231,7 @@ static char lexEscapeCode(SourceFile *source, Location loc, const char **p);
 static String processStringLiteral(SourceFile *file, Location loc, Arena *arena,String src);
 
 // TODO Trigraphs (trivial) and digraphs (annoying)
+// PERFORMANCE The current SoureFile is passed by-value to most helper functions, because I assumed I want to access it quickly. Turns out a lot of instructions are spent on copying it around
 static Token getToken (Arena *str_arena, SourceFile source, Location *loc, SymbolList *syms, const char **p) {
 	Token tok = {0};
 	const char *pos = *p;
@@ -534,7 +538,7 @@ typedef struct Replacement {
 
 typedef LIST(Replacement) MacroStack;
 
-
+// PERFORMANCE Passed by value, same problem as with SourceFile.
 typedef struct ExpansionParams {
 	MacroStack *stack;
 	FileList *files;
@@ -1485,7 +1489,7 @@ static IfClass skipToElseIfOrEnd (SourceFile source, Location *loc, const char *
 			while (*pos && !isSpace(*pos)) pos++;
 			String directive = {pos - begin, begin};
 			if (eql("if", directive) || eql("ifdef", directive) || eql("ifndef", directive)) {
-				while (*pos && pos[-1] != '\n') pos++;
+				while (*pos && *pos != '\n') pos++;
 				loc->line++;
 				skipToEndIf(source, loc, &pos);
 				line_begin = pos;
@@ -1569,6 +1573,7 @@ static bool gobbleSpaceToNewline (const char **p, Location *loc) {
 }
 
 
+// PERFORMANCE This takes almost 5% of the total compile time! Not cool.
 static u64 preprocExpression (ExpansionParams params, TokenList *buf, Tokenization *main_tokenization) {
 	const char *pos = *params.src;
 	Arena *const str_arena = params.strings_arena;

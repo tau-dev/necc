@@ -32,7 +32,7 @@ typedef enum {
 	Float_LongDouble,
 } FloatType;
 
-typedef enum {
+typedef enum TypeKind {
 	Kind_Void,
 	Kind_Basic,
 	Kind_Float,
@@ -105,6 +105,14 @@ typedef struct UnnamedCompound {
 	SourceFile *source;
 } UnnamedCompound;
 
+typedef struct UnnamedEnum {
+	SPAN(Symbol*) members;
+	BasicType underlying;
+	u32 line;
+	u32 column;
+	SourceFile *source;
+} UnnamedEnum;
+
 typedef struct NameTaggedType NameTaggedType;
 typedef struct Type {
 	u8 kind;
@@ -118,6 +126,7 @@ typedef struct Type {
 		ArrayType array;
 		NameTaggedType *nametagged;
 		UnnamedCompound compound;
+		UnnamedEnum unnamed_enum;
 	};
 } Type;
 

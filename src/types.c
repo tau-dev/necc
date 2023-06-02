@@ -223,9 +223,9 @@ char *printTypeHighlighted (Arena *arena, Type t) {
 	return string;
 }
 
-void printTypeUnnamed(char **pos, const char *end, UnnamedCompound comp) {
-	printto(pos, end, "[unnamed @ %.*s, line %lu, column %lu]", STRING_PRINTAGE(comp.source->name),
-			(unsigned long) comp.line, (unsigned long) comp.column);
+void printTypeUnnamed(char **pos, const char *end, SourceFile *source, unsigned long line, unsigned long column) {
+	printto(pos, end, "[unnamed @ %.*s, line %lu, column %lu]", STRING_PRINTAGE(source->name),
+			(unsigned long) line, (unsigned long) column);
 }
 
 void printTypeBase(Type t, char **pos, const char *end) {
@@ -279,14 +279,15 @@ void printTypeBase(Type t, char **pos, const char *end) {
 	} break;
 	case Kind_Union:
 		printto(pos, end, "union ");
-		printTypeUnnamed(pos, end, t.compound);
+		printTypeUnnamed(pos, end, t.compound.source, t.compound.line, t.compound.column);
 		break;
 	case Kind_Struct:
 		printto(pos, end, "struct ");
-		printTypeUnnamed(pos, end, t.compound);
+		printTypeUnnamed(pos, end, t.compound.source, t.compound.line, t.compound.column);
 		break;
 	case Kind_Enum:
-		printto(pos, end, "enum unnamed from ???, line ??, column ??");
+		printto(pos, end, "enum ");
+		printTypeUnnamed(pos, end, t.unnamed_enum.source, t.unnamed_enum.line, t.unnamed_enum.column);
 		break;
 	case Kind_Struct_Named:
 		printto(pos, end, "struct %.*s", STRING_PRINTAGE(t.nametagged->name));

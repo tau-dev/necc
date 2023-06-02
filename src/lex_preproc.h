@@ -27,6 +27,8 @@ typedef enum {
 	Tok_Key_TypeofUnqual,
 	Tok_Key_Generic,
 
+	Tok_Key_Attribute,
+
 	Tok_Key_Struct,
 	Tok_Key_Enum,
 	Tok_Key_Union,

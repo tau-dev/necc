@@ -3,7 +3,7 @@ public int main():
    0 /4 = const 0x1 (1)
    1 /4 = out-phi 0 ?  true->6
    2 /8 = stack 4
-   3 /4 = load i32, [2]
+   3 /4 = load 2
        branch 3 ? 2 : 1
  2: { mem: 7, ordered: 7, 9, }
    6 /4 = in-phi
@@ -41,12 +41,12 @@ public int main():
        branch 24 ? if_true9 : if_join10
  if_true9: { mem: 46, 48, ordered: 48, }
   45 /4 = const 0x1 (1)
-  46 /4 = load i32, [2]
+  46 /4 = load 2
   47 /4 = sdiv 45 46
   48 /4 = store [2] 47 after 46
        jmp if_join10
  if_join10: { mem: 26, 33, ordered: 33, }
-  26 /4 = load i32, [2]
+  26 /4 = load 2
   27 /4 = const 0xffffffffffffffff (18446744073709551615)
   28 /4 = and 26 27
   29 /4 = const 0xffffffffffffffff (18446744073709551615)
@@ -57,7 +57,7 @@ public int main():
   34 /4 = const 0x0 (0)
        branch 34 ? if_true11 : if_join12
  if_true11: { mem: 41, 44, ordered: 44, }
-  41 /4 = load i32, [2]
+  41 /4 = load 2
   42 /4 = const 0x0 (0)
   43 /4 = sdiv 41 42
   44 /4 = store [2] 43 after 41
@@ -66,7 +66,7 @@ public int main():
   35 /4 = const 0x0 (0)
        branch 35 ? if_true13 : if_join14
  if_true13: { mem: 37, 40, ordered: 40, }
-  37 /4 = load i32, [2]
+  37 /4 = load 2
   38 /4 = const 0x0 (0)
   39 /4 = smod 37 38
   40 /4 = store [2] 39 after 37

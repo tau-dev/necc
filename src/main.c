@@ -520,7 +520,7 @@ int main (int argc, char **args) {
 
 static String checkIncludePath (Arena *arena, const char *path) {
 	if (!isDirectory(path))
-		generalFatal("could not open include path %s", path);
+		generalFatal("could not access include path %s", path);
 	u32 len = strlen(path);
 	if (path[len-1] == '/')
 		return (String) {len, path};

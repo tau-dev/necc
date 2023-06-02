@@ -135,6 +135,23 @@ static inline bool tryEat (Parse *parse, TokenKind kind) {
 	}
 	return false;
 }
+static inline void eatMatchingParens (Parse *parse) {
+	const Token *opening_paren = parse->pos-1;
+	assert(opening_paren->kind == Tok_OpenParen);
+
+	u32 parens = 1;
+	while (parens > 0) {
+		switch (parse->pos->kind) {
+		case Tok_OpenParen: parens++; break;
+		case Tok_CloseParen: parens--; break;
+		case Tok_EOF:
+			parseerror(parse, opening_paren, "missing closing parenthesis");
+			break;
+		default: break;
+		}
+		parse->pos++;
+	}
+}
 
 static inline void setLoc (Parse *parse, const Token *tok) {
 	parse->build.loc = parse->tokens.list.positions[tok - parse->tokens.list.tokens].source;
@@ -1721,6 +1738,11 @@ static u32 parseStringLiteral(Parse *parse) {
 
 static Attributes parseAttributes (Parse *parse) {
 	Attributes result = 0;
+	if (tryEat(parse, Tok_Key_Attribute)) {
+		requires(parse, "attributes", Features_GNU_Extensions);
+		expect(parse, Tok_OpenParen);
+		eatMatchingParens(parse);
+	}
 	while (parse->pos[0].kind == Tok_OpenBracket && parse->pos[1].kind == Tok_OpenBracket) {
 		requires(parse, "attributes", Features_C23);
 		parse->pos += 2;
@@ -1939,14 +1961,21 @@ static Value parseIntrinsic (Parse *parse, Intrinsic i) {
 
 		return (Value){ t, genVaArg(build, v.inst, typeSize(t, &parse->target)) };
 	}
+	case Intrinsic_Expect: {
+		Value a = parseExprAssignment(parse);
+		expect(parse, Tok_Comma);
+		parseExprAssignment(parse);
+		expect(parse, Tok_CloseParen);
+		return a;
+	}
 	case Intrinsic_VaCopy:
+	case Intrinsic_VaEnd:
 	case Intrinsic_Nanf:
 	case Intrinsic_Inff:
-	case Intrinsic_VaEnd:
-		while (parse->pos->kind != Tok_CloseParen)
-			parse->pos++;
-		parse->pos++;
+	case Intrinsic_FrameAddress: {
+		eatMatchingParens(parse);
 		return immediateIntVal(parse, BASIC_INT, 0);
+	}
 	default:
 		unreachable;
 	}
@@ -2410,8 +2439,14 @@ static bool tryParseTypeBase (Parse *parse, Type *type, u8 *storage_dest) {
 			(void) attr;
 
 			base.kind = Kind_Enum;
-			base.basic = parse->target.enum_int;
-			modifiable = false;
+			const Tokenization *tok = &parse->tokens;
+			Location loc = tok->list.positions[parse->pos - 1 - tok->list.tokens].source;
+			base.unnamed_enum = (UnnamedEnum) {
+				.underlying = parse->target.enum_int,
+				.line = loc.line,
+				.column = loc.column,
+				.source = tok->files.ptr[loc.file_id],
+			};
 
 			Symbol *named = NULL;
 			NameTaggedType *tagged = NULL;
@@ -2427,11 +2462,16 @@ static bool tryParseTypeBase (Parse *parse, Type *type, u8 *storage_dest) {
 				Type underlying = parseTypeBase(parse, NULL);
 				if (!isIntegerType(underlying))
 					parseerror(parse, type_token, "the underlying type of an enumeration must be an integer type, %s is not permitted", printTypeHighlighted(parse->arena, underlying));
-				base.basic = underlying.basic;
+				base.unnamed_enum.underlying = underlying.basic;
 			}
 
-			if (!tagged) {
-				expect(parse, Tok_OpenBrace);
+			bool can_declare = parse->pos->kind == Tok_Semicolon
+					|| parse->pos->kind  == Tok_OpenBrace;
+
+			if (tryEat(parse, Tok_OpenBrace)) {
+				// TODO If tagged exists and is not begin shadowed,
+				// check that the new definition matches the previous
+				// one.
 
 				for (i32 value = 0;; value++) {
 					const Token *primary = parse->pos;
@@ -2466,10 +2506,17 @@ static bool tryParseTypeBase (Parse *parse, Type *type, u8 *storage_dest) {
 						break;
 					}
 				}
+			} else {
+				if (!named)
+					parseerror(parse, parse->pos-1, "name or %s required after %s", tokenName(Tok_OpenBrace), tokenName(Tok_Key_Enum));
+				if (!tagged)
+					requires(parse, "enum pre-declarations", Features_GNU_Extensions);
 			}
 
 			if (named) {
-				if (!tagged) {
+				if (!tagged ||
+					(can_declare && tagged->scope_depth < parse->scope_depth))
+				{
 					tagged = ALLOC(parse->code_arena, NameTaggedType);
 					*tagged = (NameTaggedType) {
 						.name = named->name,
@@ -2483,6 +2530,7 @@ static bool tryParseTypeBase (Parse *parse, Type *type, u8 *storage_dest) {
 				base.nametagged = tagged;
 			}
 
+			modifiable = false;
 			parse->pos--;
 		} break;
 		case Tok_Key_Long:
@@ -2612,6 +2660,8 @@ static bool tryParseTypeBase (Parse *parse, Type *type, u8 *storage_dest) {
 				parseerror(parse, parse->pos, "a storage specifier is not allowed in this context");
 		}
 		parse->pos++;
+		Attributes attr = parseAttributes(parse);
+		(void) attr;
 	}
 	if (parse->pos == begin)
 		return false;
@@ -2732,11 +2782,13 @@ static Type parseStructUnionBody(Parse *parse, bool is_struct) {
 			if (bare_colon || tryEat(parse, Tok_Colon)) {
 				const Token *colon = parse->pos - 1;
 				Type basetype = bare_colon ? base : decl.type;
-				if (!isSignedOrUnsignedIntegerType(basetype))
-					parseerror(parse, colon, "a bit-field must have integer type, %s does not work",
-							printTypeHighlighted(parse->arena, basetype));
-				if (basetype.basic != Int_bool && (basetype.basic & ~Int_unsigned) != Int_int)
+				if (basetype.basic != Int_bool && (basetype.basic & ~Int_unsigned) != Int_int) {
 					requires(parse, "bit-fields of types other than int", Features_GNU_Extensions);
+					removeEnumness(&basetype);
+					if (!isSignedOrUnsignedIntegerType(basetype))
+						parseerror(parse, colon, "a bit-field must have integer type, %s does not work",
+								printTypeHighlighted(parse->arena, basetype));
+				}
 
 				u64 bitsize;
 				if (!tryIntConstant(parse, parseExpression(parse), &bitsize))
@@ -2819,7 +2871,15 @@ static bool allowedNoDeclarator (Parse *parse, Type base_type) {
 }
 
 static Declaration parseDeclarator (Parse *parse, Type base_type, Namedness named) {
-	Type base = base_type;
+	Declaration decl = {
+		.type = base_type,
+	};
+
+	if (decl.type.kind == Kind_Function && tryEat(parse, Tok_Asterisk)) {
+		decl.type.kind = Kind_FunctionPtr;
+		parseAttributes(parse);
+		decl.type.qualifiers = parseQualifiers(parse);
+	}
 
 	while (parse->pos->kind == Tok_Asterisk) {
 		parse->pos++;
@@ -2827,119 +2887,94 @@ static Declaration parseDeclarator (Parse *parse, Type base_type, Namedness name
 		(void) attr;
 
 		Type *ptr = ALLOC(parse->code_arena, Type);
-		*ptr = base;
+		*ptr = decl.type;
 
-		base = (Type) {Kind_Pointer,
+		decl.type = (Type) {Kind_Pointer,
 			.qualifiers = parseQualifiers(parse),
 			.pointer = ptr,
 		};
 	}
 
-	Declaration decl = {0};
-	Type *inner = &decl.type;
-	Type *enclosing = NULL;
 
+
+	const Token *begin_inner = NULL;
 	// For abstract declarators, empty parentheses in a type name are
 	// interpreted as “function with no parameter specification”,
 	// rather than redundant parentheses around the omitted identifier.
 	if (parse->pos[0].kind == Tok_OpenParen && parse->pos[1].kind != Tok_CloseParen) {
 		parse->pos++;
-		decl = parseDeclarator(parse, BASIC_VOID, named);
-		expect(parse, Tok_CloseParen);
-
-		// Find the innermost type and insert the base type.
-		while (inner->kind != Kind_Void) {
-			switch (inner->kind) {
-			case Kind_Pointer:
-				enclosing = inner;
-				inner = inner->pointer;
-				break;
-			case Kind_Array:
-			case Kind_VLArray:
-				enclosing = inner;
-				inner = inner->array.inner;
-				break;
-			case Kind_Function:
-			case Kind_FunctionPtr:
-				enclosing = inner;
-				inner = inner->function.rettype;
-				break;
-			case Kind_Void:
-				break;
-			default:
-				unreachable;
-			}
-		}
-		*inner = base;
+		// Mark the inner declarator expression; we'll return to it after parsing the outer stuff.
+		begin_inner = parse->pos;
+		eatMatchingParens(parse);
 	} else {
-		decl.type = base;
-		if (parse->pos->kind == Tok_Identifier && named != Decl_Abstract)
-			decl.name = expect(parse, Tok_Identifier).val.symbol;
-		else if (named == Decl_Named)
+		if (parse->pos->kind == Tok_Identifier && named != Decl_Abstract) {
+			decl.name = parse->pos->val.symbol;
+			parse->pos++;
+		} else if (named == Decl_Named) {
 			parseerror(parse, parse->pos, "expected an identifier");
+		}
 	}
 
-	while (true) {
-		if (tryEat(parse, Tok_OpenParen)) {
-			if (enclosing) {
-				if (enclosing->kind == Kind_Function)
-					parseerror(parse, NULL, "a function cannot return a function. You may want to return a function pointer instead");
-				else if (enclosing->kind == Kind_Array)
-					parseerror(parse, NULL, "an array cannot contain a function. You may want to store function pointers instead");
-			}
 
-			if (enclosing && enclosing->kind == Kind_Pointer) {
-				enclosing->kind = Kind_FunctionPtr;
-				enclosing->function = (FunctionType) { enclosing->pointer };
-				inner = enclosing;
-			} else {
-				Type *rettype = ALLOC(parse->code_arena, Type);
-				*rettype = *inner;
+	const char *func_in_arr = "an array cannot contain a function. You may want to store function pointers instead";
+	const char *func_in_func = "a function cannot return a function. You may want to return a function pointer instead";
+	const char *array_in_func = "a function cannot return an array. You may want to return a pointer to an array instead";
+	if (tryEat(parse, Tok_OpenParen)) {
+		if (decl.type.kind == Kind_Function) parseerror(parse, NULL, func_in_func);
+		else if (decl.type.kind == Kind_Array) parseerror(parse, NULL, array_in_func);
 
-				inner->kind = Kind_Function;
-				inner->function = (FunctionType) { rettype };
-			}
+		Type *inner = ALLOC(parse->code_arena, Type);
+		*inner = decl.type;
+		decl.type = (Type) {Kind_Function};
+		FunctionType *func = &decl.type.function;
+		func->rettype = inner;
 
-			if (parse->pos->kind == Tok_CloseParen) {
-				// TODO C23
-				inner->function.missing_prototype = true;
-			} else if (parse->pos[0].kind == Tok_Key_Void && parse->pos[1].kind == Tok_CloseParen) {
-				parse->pos++;
-			} else {
-				do {
-					if (tryEat(parse, Tok_TripleDot)) {
-						inner->function.is_vararg = true;
-						break;
-					}
-					u8 storage;
-					Type param_type = parseTypeBase(parse, &storage);
-					Declaration param_decl = parseDeclarator(parse, param_type, Decl_PossiblyAbstract);
-					if (param_decl.type.kind == Kind_Array || param_decl.type.kind == Kind_VLArray) {
-						param_decl.type.kind = Kind_Pointer;
-						param_decl.type.pointer = param_decl.type.array.inner;
-					} else if (param_decl.type.kind == Kind_Function) {
-						param_decl.type.kind = Kind_FunctionPtr;
-					}
-					PUSH_A(parse->code_arena, inner->function.parameters, param_decl);
-				} while (tryEat(parse, Tok_Comma));
-			}
+		if (parse->pos->kind == Tok_CloseParen) {
+			if (!(parse->target.version & Features_C23))
+				func->missing_prototype = true;
+		} else if (parse->pos[0].kind == Tok_Key_Void && parse->pos[1].kind == Tok_CloseParen) {
+			parse->pos++;
+		} else {
+			do {
+				if (tryEat(parse, Tok_TripleDot)) {
+					func->is_vararg = true;
+					break;
+				}
+				u8 storage;
+				Type param_type = parseTypeBase(parse, &storage);
+				Declaration param_decl = parseDeclarator(parse, param_type, Decl_PossiblyAbstract);
+				if (param_decl.type.kind == Kind_Array || param_decl.type.kind == Kind_VLArray) {
+					param_decl.type.kind = Kind_Pointer;
+					param_decl.type.pointer = param_decl.type.array.inner;
+				} else if (param_decl.type.kind == Kind_Function) {
+					param_decl.type.kind = Kind_FunctionPtr;
+				}
+				PUSH_A(parse->code_arena, func->parameters, param_decl);
+			} while (tryEat(parse, Tok_Comma));
+		}
 
-			expect(parse, Tok_CloseParen);
+		expect(parse, Tok_CloseParen);
 
-			enclosing = inner;
-			inner = inner->function.rettype;
-		} else if (tryEat(parse, Tok_OpenBracket)) {
-// 			const Token *primary = parse->pos - 1;
-			if (enclosing && enclosing->kind == Kind_Function)
-				parseerror(parse, NULL, "a function cannot return an array. You may want to return a pointer to an array instead");
+		if (tryEat(parse, Tok_OpenParen)) parseerror(parse, NULL, func_in_func);
+		else if (tryEat(parse, Tok_OpenBracket)) parseerror(parse, NULL, array_in_func);
+	} else if (parse->pos->kind == Tok_OpenBracket) {
+		// This will point at the outermost non-array type, where the next array layer is inserted.
+		Type *pointed_type_level = &decl.type;
 
-			Type *content = ALLOC(parse->code_arena, Type);
-			*content = *inner;
+		if (pointed_type_level->kind == Kind_Function)
+			parseerror(parse, NULL, func_in_arr);
+
+		while (tryEat(parse, Tok_OpenBracket)) {
+			Type *inner = ALLOC(parse->code_arena, Type);
+			*inner = *pointed_type_level;
+			*pointed_type_level = (Type) {Kind_Array,
+				.qualifiers = parseQualifiers(parse),
+				.array.inner = inner,
+			};
+			Type *array = pointed_type_level;
+			pointed_type_level = inner;
+
 			bool is_static = tryEat(parse, Tok_Key_Static);
-
-			inner->kind = Kind_Array;
-			inner->array = (ArrayType) { content };
-			inner->qualifiers = parseQualifiers(parse);
 			if (tryEat(parse, Tok_Key_Static)) {
 				if (is_static)
 					parseerror(parse, NULL, "static may not appear twice"); // TODO Nice formatting
@@ -2952,31 +2987,36 @@ static Declaration parseDeclarator (Parse *parse, Type base_type, Namedness name
 
 			if (tryEat(parse, Tok_Asterisk)) {
 				parseerror(parse, NULL, "TODO Support ‘variable length array of unspecified size’, whatever that may be");
-				inner->array.count = 0;
+				array->array.count = 0;
 			} else if (parse->pos->kind == Tok_CloseBracket) {
-				inner->kind = Kind_VLArray;
-				inner->array.count = IDX_NONE;
+				array->kind = Kind_VLArray;
+				array->array.count = IDX_NONE;
 			} else {
 				u64 count;
 				Value count_val = parseExprAssignment(parse);
 				if (tryIntConstant(parse, count_val, &count)) {
 					if (count > 1000000)
 						parseerror(parse, NULL, "%llu items is too big, for now", (unsigned long long) count);
-					inner->array.count = count;
+					array->array.count = count;
 				} else {
 					requires(parse, "variable length arrays", Features_C99);
-					inner->kind = Kind_VLArray;
-					inner->array.count = count_val.inst;
-					parseerror(parse, NULL, "TODO Support VLA");
+					array->kind = Kind_VLArray;
+					array->array.count = count_val.inst;
+					parseerror(parse, NULL, "TODO Support VLAs");
 				}
 			}
 
 			expect(parse, Tok_CloseBracket);
-			enclosing = inner;
-			inner = content;
-		} else {
-			break;
 		}
+
+		if (tryEat(parse, Tok_OpenParen)) parseerror(parse, NULL, func_in_arr);
+	}
+
+	if (begin_inner) {
+		const Token *end = parse->pos;
+		parse->pos = begin_inner;
+		decl = parseDeclarator(parse, decl.type, named);
+		parse->pos = end;
 	}
 
 	return decl;
@@ -3658,9 +3698,10 @@ static inline void removeEnumness(Type *type) {
 	if (type->kind == Kind_Enum_Named) {
 		type->kind = Kind_Basic;
 		// FIXME The enum may not be complete yet
-		type->basic = type->nametagged->type.basic;
+		type->basic = type->nametagged->type.unnamed_enum.underlying;
 	} else if (type->kind == Kind_Enum) {
 		type->kind = Kind_Basic;
+		type->basic = type->unnamed_enum.underlying;
 	}
 }
 static void requires (Parse *parse, const char *desc, Features required) {
