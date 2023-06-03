@@ -85,8 +85,13 @@ typedef enum {
 	Intrinsic_Nanf,
 	Intrinsic_Inff,
 
+	Intrinsic_Clz,
+	Intrinsic_Clzll,
+	Intrinsic_Ctz,
+	Intrinsic_Ctzll,
 	Intrinsic_Expect,
 	Intrinsic_FrameAddress,
+	Intrinsic_Alloca,
 } Intrinsic;
 
 typedef struct Tokenization Tokenization;

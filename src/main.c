@@ -351,8 +351,8 @@ int main (int argc, char **args) {
 	}
 
 	if (stdinc) {
-		PUSH(paths.sys_include_dirs, zstr(MUSL_DIR "/arch/generic/"));
 		PUSH(paths.sys_include_dirs, zstr(MUSL_DIR "/arch/x86_64/"));
+		PUSH(paths.sys_include_dirs, zstr(MUSL_DIR "/arch/generic/"));
 		PUSH(paths.sys_include_dirs, zstr(MUSL_DIR "/obj/include/"));
 		PUSH(paths.sys_include_dirs, zstr(MUSL_DIR "/include/"));
 	}

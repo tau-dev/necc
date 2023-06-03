@@ -81,19 +81,14 @@ u32 typeSize (Type t, const Target *target) {
 		unreachable;
 	case Kind_Array:
 		return t.array.count * typeSize(*t.array.inner, target);
-	case Kind_VLArray:
-		assert(t.array.count == IDX_NONE);
+	case Kind_UnsizedArray:
 		return 0;
+	case Kind_VLArray:
+		unreachable;
 	default: assert(!"TODO Calculate other type sizes.");
 	}
 }
 
-bool isFlexibleArrayMember (Members m, u32 index) {
-	if (index + 1 != m.len)
-		return false;
-	Type t = m.ptr[m.len - 1].type;
-	return t.kind == Kind_VLArray && t.array.count == IDX_NONE;
-}
 
 u32 typeAlignment (Type t, const Target *target) {
 	u32 size = typeSize(t, target);
@@ -224,7 +219,7 @@ char *printTypeHighlighted (Arena *arena, Type t) {
 }
 
 void printTypeUnnamed(char **pos, const char *end, SourceFile *source, unsigned long line, unsigned long column) {
-	printto(pos, end, "[unnamed @ %.*s, line %lu, column %lu]", STRING_PRINTAGE(source->name),
+	printto(pos, end, "[unnamed at %.*s line %lu column %lu]", STRING_PRINTAGE(source->name),
 			(unsigned long) line, (unsigned long) column);
 }
 
@@ -234,6 +229,7 @@ void printTypeBase(Type t, char **pos, const char *end) {
 		printTypeBase(*t.pointer, pos, end); break;
 	case Kind_Array:
 	case Kind_VLArray:
+	case Kind_UnsizedArray:
 		printTypeBase(*t.array.inner, pos, end); break;
 	case Kind_Function:
 	case Kind_FunctionPtr:
@@ -326,6 +322,7 @@ void printTypeHead (Type t, char **pos, const char *end) {
 #endif
 		break;
 	case Kind_Array:
+	case Kind_UnsizedArray:
 	case Kind_VLArray:
 		printTypeHead(*t.array.inner, pos, end);
 		break;
@@ -365,10 +362,11 @@ void printTypeTail (Type t, char **pos, const char *end) {
 		printTypeTail(*t.array.inner, pos, end);
 		break;
 	case Kind_VLArray:
-		if (t.array.count == IDX_NONE)
-			printto(pos, end, "[]");
-		else
-			printto(pos, end, "[val_%llu]", (unsigned long long) t.array.count);
+		printto(pos, end, "[val_%llu]", (unsigned long long) t.array.count);
+		printTypeTail(*t.array.inner, pos, end);
+		break;
+	case Kind_UnsizedArray:
+		printto(pos, end, "[]");
 		printTypeTail(*t.array.inner, pos, end);
 		break;
 	case Kind_Function:

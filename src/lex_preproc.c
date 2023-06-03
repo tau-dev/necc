@@ -139,8 +139,13 @@ Keyword intrinsics[] = {
 	{"__builtin_nanf", Intrinsic_Nanf},
 	{"__builtin_inff", Intrinsic_Inff},
 
+	{"__builtin_clz", Intrinsic_Clz},
+	{"__builtin_clzll", Intrinsic_Clzll},
+	{"__builtin_ctz", Intrinsic_Ctz},
+	{"__builtin_ctzll", Intrinsic_Ctzll},
 	{"__builtin_expect", Intrinsic_Expect},
 	{"__builtin_frame_address", Intrinsic_FrameAddress},
+	{"__builtin_alloca", Intrinsic_Alloca},
 };
 
 enum Directive {

@@ -44,7 +44,11 @@ typedef enum TypeKind {
 	Kind_Enum,
 	Kind_Pointer,
 	Kind_Array,
+	// Variably modified, possibly stack-allocated.
 	Kind_VLArray,
+	// Only used for declarations before initialization or, for
+	// parameters, decay to pointer.
+	Kind_UnsizedArray,
 	// Decays to Kind_FunctionPtr by rvalue() conversion. Handled
 	// specially (for error messages) in lvalue usage.
 	Kind_Function,
@@ -182,7 +186,6 @@ bool fnTypeEqual(FunctionType a, FunctionType b);
 u32 typeSize(Type t, const Target *target);
 u32 typeAlignment(Type t, const Target *target);
 u32 addMemberOffset(u32 *offset, Type t, const Target *target);
-bool isFlexibleArrayMember(Members m, u32 index);
 int rankDiff(BasicType a, BasicType b);
 
 char *printDeclarator(Arena *a, Type t, String name);
@@ -211,8 +214,8 @@ static inline bool isArithmeticType (Type t) {
 static inline bool isScalar (Type t) {
 	return t.kind == Kind_Pointer || t.kind == Kind_Pointer || isArithmeticType(t);
 }
-static inline bool isUnknownSizeArray (Type t) {
-	return t.kind == Kind_VLArray && t.array.count == IDX_NONE;
+static inline bool isAnyArray (Type t) {
+	return t.kind == Kind_Array || t.kind == Kind_VLArray || t.kind == Kind_UnsizedArray;
 }
 static inline Signedness typeSign (Type t) {
 	if (t.kind == Kind_Pointer)

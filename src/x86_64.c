@@ -396,6 +396,7 @@ static void emitType (Codegen *c, Type type, u32 id) {
 		break;
 	case Kind_Array:
 	case Kind_VLArray:
+	case Kind_UnsizedArray:
 		typeDebugData(c, *type.array.inner);
 		break;
 	case Kind_Function:
@@ -427,7 +428,8 @@ static void emitType (Codegen *c, Type type, u32 id) {
 		break;
 	case Kind_Array:
 	case Kind_VLArray:
-		if (res.kind == Kind_Array && res.array.count == 0) {
+	case Kind_UnsizedArray:
+		if (res.kind == Kind_UnsizedArray || (res.kind == Kind_Array && res.array.count == 0)) {
 			emitZString("A");
 			emitInt(typeDebugData(c, *type.array.inner));
 			break;
