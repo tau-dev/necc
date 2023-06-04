@@ -12,5 +12,15 @@ bool addSignedOverflow(i64 a, i64 b, PrimitiveSize size);
 // subUnsignedOverflow is trivial
 bool subSignedOverflow(i64 a, i64 b, PrimitiveSize size);
 bool mulUnsignedOverflow(u64 a, u64 b, PrimitiveSize size);
-bool mulSignedOverflow(u64 a, u64 b, PrimitiveSize size);
+bool mulSignedOverflow(i64 a, i64 b, PrimitiveSize size);
 
+
+static inline bool sign(u64 x, PrimitiveSize size) {
+	assert(size);
+	assert(size <= I64);
+	return (x & ((u64) 1 << (size * 8 - 1))) != 0;
+}
+
+static inline u64 bitsAbove(u16 size) {
+	return size >= 8 ? 0 : ~(((u64) 1 << (size*8)) - 1);
+}

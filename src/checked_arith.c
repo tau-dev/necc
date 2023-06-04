@@ -1,12 +1,7 @@
 #include "types.h"
 #include "common.h"
 #include "util.h"
-
-static inline bool sign(u64 x, PrimitiveSize size) {
-	assert(size);
-	assert(size <= I64);
-	return (x & ((u64) 1 << (size * 8 - 1))) != 0;
-}
+#include "checked_arith.h"
 
 bool addUnsignedOverflow(u64 a, u64 b, PrimitiveSize size) {
 	assert(size <= I64);
@@ -23,13 +18,13 @@ bool addSignedOverflow(i64 a, i64 b, PrimitiveSize size) {
 	return sign(a, size) != sign((u64) a + (u64) b, size);
 }
 
+
 bool subSignedOverflow(i64 a, i64 b, PrimitiveSize size) {
 	assert(size <= I64);
 
-	u64 sign_bits = size >= 8 ? 0 : ~(((u64) 1 << size*8) - 1);
-	// Unused bits should have the correct sign.
-	assert(((u64) a & sign_bits) == sign_bits * sign(a, size));
-	assert(((u64) b & sign_bits) == sign_bits * sign(b, size));
+	u64 sign_bits = bitsAbove(size);
+	a |= sign_bits * sign(a, size);
+	b |= sign_bits * sign(b, size);
 
 	if (sign(a, size) == sign(b, size)) return false;
 
@@ -52,10 +47,14 @@ bool mulSignedOverflow(i64 a, i64 b, PrimitiveSize size) {
 	assert(size <= I64);
 	if (a == 0 || a == 1 || b == 0 || b == 1) return false;
 
-	if (size > I32)
-		return false; // FIXME lul
+	u64 sign_bits = bitsAbove(size);
+	a |= sign_bits * sign(a, size);
+	b |= sign_bits * sign(b, size);
 
-// 	if (a == -1) return b == -((u32) 1 << );
+	if (size > I32)
+		return true; // FIXME lul
+
 	i64 res = a * b;
 	return res >= (i64) 1 << size*8 || res < -((i64) 1 << size*8);
 }
+

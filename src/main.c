@@ -182,7 +182,7 @@ static FILE *openOut (const char *name) {
 		return stdout;
 	FILE *f = fopen(name, "w");
 	if (f == NULL)
-		generalFatal("Could not open output file %s", name);
+		generalFatal("could not open output file %s", name);
 	return f;
 }
 

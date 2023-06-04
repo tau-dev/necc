@@ -94,7 +94,7 @@ typedef enum {
 	Tok_PreprocDirective, // Directive or stringified argument.
 	Tok_PreprocConcatenate,
 
-	Tok_Equals,
+	Tok_Equal,
 	Tok_Less,
 	Tok_Greater,
 	Tok_Bang,
@@ -113,26 +113,26 @@ typedef enum {
 
 	Tok_EQUALED = 0x80,
 
-	Tok_EqualsEquals = Tok_Equals | Tok_EQUALED,
-	Tok_LessEquals = Tok_Less | Tok_EQUALED,
-	Tok_GreaterEquals = Tok_Greater | Tok_EQUALED,
-	Tok_BangEquals = Tok_Bang | Tok_EQUALED,
+	Tok_EqualEqual = Tok_Equal | Tok_EQUALED,
+	Tok_LessEqual = Tok_Less | Tok_EQUALED,
+	Tok_GreaterEqual = Tok_Greater | Tok_EQUALED,
+	Tok_BangEqual = Tok_Bang | Tok_EQUALED,
 
-	Tok_PlusEquals = Tok_Plus | Tok_EQUALED,
-	Tok_MinusEquals = Tok_Minus | Tok_EQUALED,
-	Tok_AsteriskEquals = Tok_Asterisk | Tok_EQUALED,
-	Tok_SlashEquals = Tok_Slash | Tok_EQUALED,
-	Tok_PercentEquals = Tok_Percent | Tok_EQUALED,
-	Tok_DoubleLessEquals = Tok_DoubleLess | Tok_EQUALED,
-	Tok_DoubleGreaterEquals = Tok_DoubleGreater | Tok_EQUALED,
-	Tok_AmpersandEquals = Tok_Ampersand | Tok_EQUALED,
-	Tok_PipeEquals = Tok_Pipe | Tok_EQUALED,
-	Tok_HatEquals = Tok_Hat | Tok_EQUALED,
-	Tok_TildeEquals = Tok_Tilde | Tok_EQUALED,
+	Tok_PlusEqual = Tok_Plus | Tok_EQUALED,
+	Tok_MinusEqual = Tok_Minus | Tok_EQUALED,
+	Tok_AsteriskEqual = Tok_Asterisk | Tok_EQUALED,
+	Tok_SlashEqual = Tok_Slash | Tok_EQUALED,
+	Tok_PercentEqual = Tok_Percent | Tok_EQUALED,
+	Tok_DoubleLessEqual = Tok_DoubleLess | Tok_EQUALED,
+	Tok_DoubleGreaterEqual = Tok_DoubleGreater | Tok_EQUALED,
+	Tok_AmpersandEqual = Tok_Ampersand | Tok_EQUALED,
+	Tok_PipeEqual = Tok_Pipe | Tok_EQUALED,
+	Tok_HatEqual = Tok_Hat | Tok_EQUALED,
+	Tok_TildeEqual = Tok_Tilde | Tok_EQUALED,
 
 
-	Tok_Equalable_Start = Tok_Equals,
-	Tok_Assignment_Start = Tok_PlusEquals,
+	Tok_Equalable_Start = Tok_Equal,
+	Tok_Assignment_Start = Tok_PlusEqual,
 
 	Tok_END = 0x100,
 } TokenKind;

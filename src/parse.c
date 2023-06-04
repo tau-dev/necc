@@ -262,7 +262,7 @@ void parse (Arena *code_arena, Tokenization tokens, Options *opt, Module *module
 
 			bool function_def = decl.type.kind == Kind_Function && declarators == 0 &&
 				(parse.pos->kind == Tok_OpenBrace || tryParseTypeBase(&parse, &first_argument_type, NULL));
-			bool object_def = decl.type.kind != Kind_Function && parse.pos->kind == Tok_Equals;
+			bool object_def = decl.type.kind != Kind_Function && parse.pos->kind == Tok_Equal;
 
 			OrdinaryIdentifier *ord = define(&parse, decl, storage, type_token, primary,
 					function_def || object_def ? parse.pos : NULL, IDX_NONE);
@@ -854,7 +854,7 @@ static void parseStatement (Parse *parse, bool *had_non_declaration) {
 			Declaration decl = parseDeclarator(parse, base_type, Decl_Named);
 
 			const Token *definer = NULL;
-			if (parse->pos->kind == Tok_Equals)
+			if (parse->pos->kind == Tok_Equal)
 				definer = parse->pos++;
 			OrdinaryIdentifier *ord = define(parse, decl, storage, primary, decl_token,
 					definer, parse->current_func_id);
@@ -907,7 +907,7 @@ static Value parseExprAssignment (Parse *parse) {
 	Value v = parseExprElvis(parse);
 	const Token *primary = parse->pos;
 
-	if (!(primary->kind == Tok_Equals || primary->kind >= Tok_Assignment_Start))
+	if (!(primary->kind == Tok_Equal || primary->kind >= Tok_Assignment_Start))
 		return v;
 
 	needAssignableLval(parse, primary, v);
@@ -917,40 +917,40 @@ static Value parseExprAssignment (Parse *parse) {
 
 	Value assigned = parseExprAssignment(parse);
 
-	if (primary->kind != Tok_Equals) {
+	if (primary->kind != Tok_Equal) {
 		Value loaded = {v.typ, genLoad(&parse->build, v.inst, typeSize(v.typ, &parse->target), is_volatile)};
 		assigned = rvalue(assigned, parse);
 
 		switch (primary->kind) {
-		case Tok_PlusEquals:
+		case Tok_PlusEqual:
 			assigned = arithAdd(parse, primary, loaded, assigned);
 			break;
-		case Tok_MinusEquals:
+		case Tok_MinusEqual:
 			assigned = arithSub(parse, primary, loaded, assigned);
 			break;
-		case Tok_AsteriskEquals:
-		case Tok_PercentEquals:
-		case Tok_SlashEquals: {
+		case Tok_AsteriskEqual:
+		case Tok_PercentEqual:
+		case Tok_SlashEqual: {
 			assigned = arithMultiplicativeOp(parse, primary, primary->kind - Tok_EQUALED, loaded, assigned);
 		} break;
-		case Tok_AmpersandEquals: {
+		case Tok_AmpersandEqual: {
 			Type common = arithmeticConversions(parse, primary, &loaded, &assigned);
 			assigned = (Value) {common, genAnd(&parse->build, loaded.inst, assigned.inst)};
 		} break;
-		case Tok_PipeEquals: {
+		case Tok_PipeEqual: {
 			Type common = arithmeticConversions(parse, primary, &loaded, &assigned);
 			assigned = (Value) {common, genOr(&parse->build, loaded.inst, assigned.inst)};
 		} break;
-		case Tok_HatEquals: {
+		case Tok_HatEqual: {
 			Type common = arithmeticConversions(parse, primary, &loaded, &assigned);
 			assigned = (Value) {common, genXor(&parse->build, loaded.inst, assigned.inst)};
 		} break;
-		case Tok_DoubleLessEquals:
-		case Tok_DoubleGreaterEquals: {
+		case Tok_DoubleLessEqual:
+		case Tok_DoubleGreaterEqual: {
 			loaded = intPromote(loaded, parse, primary);
 			assigned = intPromote(assigned, parse, primary);
 
-			if (primary->kind == (Tok_DoubleLessEquals))
+			if (primary->kind == (Tok_DoubleLessEqual))
 				assigned = (Value) {loaded.typ, genShiftLeft(&parse->build, loaded.inst, assigned.inst)};
 			else
 				assigned = (Value) {loaded.typ, genShiftRight(&parse->build, loaded.inst, assigned.inst)};
@@ -1159,15 +1159,15 @@ static Value parseExprEquality (Parse *parse) {
 	Value lhs = parseExprComparison(parse);
 
 	switch ((int) parse->pos->kind) {
-	case Tok_EqualsEquals:
-	case Tok_BangEquals: {
+	case Tok_EqualEqual:
+	case Tok_BangEqual: {
 		const Token *primary = parse->pos;
 		parse->pos++;
 		Value rhs = parseExprComparison(parse);
 
 		if (lhs.inst == rhs.inst && lhs.category == rhs.category && parse->opt->warn_compare && lhs.typ.kind != Kind_Float)
 			parsemsg(Log_Warn, parse, primary, "comparison to self is always %s",
-					primary->kind == Tok_BangEquals ? "false" : "true");
+					primary->kind == Tok_BangEqual ? "false" : "true");
 
 		lhs = rvalue(lhs, parse);
 		rhs = rvalue(rhs, parse);
@@ -1186,7 +1186,7 @@ static Value parseExprEquality (Parse *parse) {
 		}
 
 		IrRef eql = genEquals(build, lhs.inst, rhs.inst, parse->target.int_size, lhs.typ.kind == Kind_Float);
-		if (primary->kind == (Tok_BangEquals))
+		if (primary->kind == (Tok_BangEqual))
 			eql = genNot(build, eql);
 		return (Value) { BASIC_INT, eql };
 	}
@@ -1201,9 +1201,9 @@ static Value parseExprComparison (Parse *parse) {
 	while (true) {
 		switch (parse->pos->kind) {
 		case Tok_Less:
-		case Tok_LessEquals:
+		case Tok_LessEqual:
 		case Tok_Greater:
-		case Tok_GreaterEquals: {
+		case Tok_GreaterEqual: {
 			const Token *primary = parse->pos;
 			parse->pos++;
 			Value rhs = parseExprShift(parse);
@@ -1236,18 +1236,18 @@ static Value parseExprComparison (Parse *parse) {
 			if (common.kind == Kind_Float) {
 				switch (primary->kind) {
 				case Tok_Less: res = genFLessThan(build, lhs.inst, rhs.inst, size); break;
-				case Tok_LessEquals: res = genFLessThanOrEquals(build, lhs.inst, rhs.inst, size); break;
+				case Tok_LessEqual: res = genFLessThanOrEquals(build, lhs.inst, rhs.inst, size); break;
 				case Tok_Greater: res = genFLessThan(build, rhs.inst, lhs.inst, size); break;
-				case Tok_GreaterEquals: res = genFLessThanOrEquals(build, rhs.inst, lhs.inst, size); break;
+				case Tok_GreaterEqual: res = genFLessThanOrEquals(build, rhs.inst, lhs.inst, size); break;
 				default: unreachable;
 				}
 			} else {
 				Signedness sign = typeSign(common);
 				switch (primary->kind) {
 				case Tok_Less: res = genLessThan(build, lhs.inst, rhs.inst, size, sign); break;
-				case Tok_LessEquals: res = genLessThanOrEquals(build, lhs.inst, rhs.inst, size, sign); break;
+				case Tok_LessEqual: res = genLessThanOrEquals(build, lhs.inst, rhs.inst, size, sign); break;
 				case Tok_Greater: res = genLessThan(build, rhs.inst, lhs.inst, size, sign); break;
-				case Tok_GreaterEquals: res = genLessThanOrEquals(build, rhs.inst, lhs.inst, size, sign); break;
+				case Tok_GreaterEqual: res = genLessThanOrEquals(build, rhs.inst, lhs.inst, size, sign); break;
 				default: unreachable;
 				}
 			}
@@ -1394,14 +1394,22 @@ static Value parseExprLeftUnary (Parse *parse) {
 	}
 	case Tok_Plus:
 	case Tok_Minus: {
-		// TODO Promote
-		Value v = intPromote(parseExprLeftUnary(parse), parse, primary);
+		// TODO Floats
+		Value val = parseExprLeftUnary(parse);
+		if (val.typ.kind == Kind_Float) {
+			if (primary->kind == Tok_Minus) {
+				u32 zero = genImmediateInt(build, 0, typeSize(val.typ, &parse->target));
+				val.inst = genFSub(build, zero, val.inst);
+			}
+		} else {
+			val = intPromote(val, parse, primary);
 
-		if (primary->kind == Tok_Minus) {
-			u32 zero = genImmediateInt(build, 0, typeSize(v.typ, &parse->target));
-			v.inst = genSub(build, zero, v.inst, typeSign(v.typ));
+			if (primary->kind == Tok_Minus) {
+				u32 zero = genImmediateInt(build, 0, typeSize(val.typ, &parse->target));
+				val.inst = genSub(build, zero, val.inst, typeSign(val.typ));
+			}
 		}
-		return v;
+		return val;
 	}
 	case Tok_OpenParen: {
 		Type cast_target;
@@ -1440,6 +1448,7 @@ static Value parseExprRightUnary (Parse *parse) {
 
 	while (true) {
 		const Token *const primary = parse->pos;
+
 		if (tryEat(parse, Tok_OpenParen)) {
 			Value func = rvalue(v, parse);
 			if (func.typ.kind != Kind_FunctionPtr)
@@ -1866,7 +1875,7 @@ static void initializeStaticDefinition (Parse *parse, OrdinaryIdentifier *ord, T
 				// TODO REMOVE THIS HACK!
 				Value v = parseExpression(parse);
 				expect(parse, Tok_CloseBracket);
-				expect(parse, Tok_Equals);
+				expect(parse, Tok_Equal);
 				u64 idx;
 				if (!tryIntConstant(parse, v, &idx))
 					parseerror(parse, NULL, "whatever");
@@ -1900,7 +1909,7 @@ static void initializeStaticDefinition (Parse *parse, OrdinaryIdentifier *ord, T
 		static_val->value_references = (References) {refs.len, refs.ptr};
 		return;
 	}
-	
+
 	if (type.kind == Kind_VLArray) {
 		unreachable;
 		return;
@@ -2115,7 +2124,7 @@ static u64 parseSubInitializer (Parse *parse, InitializationDest dest, u32 offse
 			if (subInitializerEnded(parse))
 				return member_idx;
 		} else {
-			expect(parse, Tok_Equals);
+			expect(parse, Tok_Equal);
 		}
 	}
 
@@ -2276,7 +2285,7 @@ static Type parseTypeBase (Parse *parse, u8 *storage) {
 		// make this more precise.
 		if (parse->pos[0].kind == Tok_Identifier &&
 			(parse->pos[1].kind == Tok_OpenParen || parse->pos[1].kind == Tok_CloseParen || parse->pos[1].kind == Tok_Semicolon
-			|| parse->pos[1].kind == Tok_Comma || parse->pos[1].kind == Tok_Equals))
+			|| parse->pos[1].kind == Tok_Comma || parse->pos[1].kind == Tok_Equal))
 		{
 			requires(parse, "expected a type name; default types of int", Features_DefaultInt);
 			if (storage)
@@ -2483,7 +2492,7 @@ static bool tryParseTypeBase (Parse *parse, Type *type, u8 *storage_dest) {
 					const Token *primary = parse->pos;
 					Symbol *name = expect(parse, Tok_Identifier).val.symbol;
 
-					if (tryEat(parse, Tok_Equals)) {
+					if (tryEat(parse, Tok_Equal)) {
 						const Token *expr_token = parse->pos;
 						Value val = parseExprAssignment(parse);
 
@@ -3408,7 +3417,7 @@ static Type arithmeticConversions (Parse *parse, const Token *primary, Value *a,
 	if (a->typ.kind == Kind_Float) {
 		if (b->typ.kind == Kind_Float) {
 			if (b->typ.real > a->typ.real) {
-				*a = (Value) {b->typ, .inst = genFCast(&parse->build, a->inst, floatSize(a->typ.real))};
+				*a = (Value) {b->typ, .inst = genFCast(&parse->build, a->inst, floatSize(b->typ.real))};
 				return b->typ;
 			} else {
 				*b = (Value) {a->typ, .inst = genFCast(&parse->build, b->inst, floatSize(a->typ.real))};
@@ -3575,7 +3584,10 @@ static Value intPromote (Value val, Parse *p, const Token *primary) {
 	val = rvalue(val, p);
 	removeEnumness(p, &val.typ);
 
-	needScalar(p, primary, val.typ);
+	if (!isIntegerType(val.typ)) {
+		parseerror(p, primary, "requires an integer type, but %s was given",
+				printTypeHighlighted(p->arena, val.typ));
+	}
 
 	if (rankDiff(val.typ.basic, Int_int) >= 0)
 		return val;
@@ -3679,7 +3691,7 @@ static IrRef coercerval (Value v, Type t, Parse *p, const Token *primary, bool a
 			} else if (target == source) {
 				return v.inst;
 			} else {
-				if (t.basic & Int_unsigned)
+				if (v.typ.basic & Int_unsigned)
 					return genZeroExt(build, v.inst, target);
 				else
 					return genSignExt(build, v.inst, target);
@@ -3724,7 +3736,7 @@ static Value immediateIntVal (Parse *p, Type typ, u64 val) {
 	};
 }
 
-static inline void removeEnumness(Parse *parse, Type *type) {
+static inline void removeEnumness (Parse *parse, Type *type) {
 	if (type->kind == Kind_Enum_Named) {
 		if (type->nametagged->type.kind == Kind_Void)
 			parseerror(parse, parse->pos, "cannot use incomplete type %s",
@@ -3737,6 +3749,7 @@ static inline void removeEnumness(Parse *parse, Type *type) {
 		type->basic = type->unnamed_enum.underlying;
 	}
 }
+
 static void requires (Parse *parse, const char *desc, Features required) {
 	if (!(parse->target.version & required)) {
 		parseerror(parse, parse->pos, "%s are not supported under the current target (%s)",

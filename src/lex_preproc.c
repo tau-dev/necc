@@ -117,6 +117,7 @@ Keyword standard_keywords[] = {
 	{"__restrict", Tok_Key_Restrict},
 	{"__inline", Tok_Key_Inline},
 	{"__alignof__", Tok_Key_Alignof},
+	{"__attribute", Tok_Key_Attribute},
 	{"__attribute__", Tok_Key_Attribute},
 
 	{"__FILE__", Tok_Key_File},
@@ -261,6 +262,8 @@ static Token getToken (Arena *str_arena, SourceFile source, Location *loc, Symbo
 		if (pos[1] == '.' && pos[2] == '.') {
 			pos += 2;
 			tok.kind = Tok_TripleDot;
+		} else if (isDigit(pos[1])) {
+			goto start_number;
 		} else {
 			tok.kind = Tok_Dot;
 		}
@@ -314,7 +317,7 @@ static Token getToken (Arena *str_arena, SourceFile source, Location *loc, Symbo
 		// TODO Digraphs
 		break;
 	case '=':
-		tok.kind = Tok_Equals;
+		tok.kind = Tok_Equal;
 		break;
 	case '&':
 		if (pos[1] == '&') {
@@ -421,7 +424,7 @@ static Token getToken (Arena *str_arena, SourceFile source, Location *loc, Symbo
 			tok = (Token) {Tok_Identifier, .val.symbol_idx = getSymbolId(syms, word)};
 
 			pos--;
-		} else if (isDigit(pos[0]) || pos[0] == '.') {
+		} else if (isDigit(pos[0])) start_number: {
 			// Could just use strtod/strtol for number parsing, but the
 			// standard library functions have a pretty inefficient
 			// interface and I will have to manually handle C23 stuff
@@ -437,7 +440,7 @@ static Token getToken (Arena *str_arena, SourceFile source, Location *loc, Symbo
 			while (isDigit(*pos) || (is_hex && isHexDigit(*pos)))
 				pos++;
 
-			if (*pos == '.' || *pos == 'f' || *pos == 'F') {
+			if (*pos == '.' || *pos == 'e' || *pos == 'E' || *pos == 'f' || *pos == 'F') {
 				pos++;
 				while (isDigit(*pos))
 					pos++;
@@ -1495,7 +1498,6 @@ static IfClass skipToElseIfOrEnd (SourceFile source, Location *loc, const char *
 			String directive = {pos - begin, begin};
 			if (eql("if", directive) || eql("ifdef", directive) || eql("ifndef", directive)) {
 				while (*pos && *pos != '\n') pos++;
-				loc->line++;
 				skipToEndIf(source, loc, &pos);
 				line_begin = pos;
 			} else if (eql("elif", directive)) {
@@ -1612,6 +1614,7 @@ static u64 preprocExpression (ExpansionParams params, TokenList *buf, Tokenizati
 			} else if (sym->macro) {
 				if (sym->macro->parameters.len > 0)
 					lexerror(params.source, *params.loc, "TODO Expand function-like macros in preprocessor constant expressions");
+
 				PUSH(*params.stack, ((Replacement) {sym->macro}));
 				expandInto(params, buf, false);
 				continue;
@@ -1670,8 +1673,8 @@ const char *token_names[] = {
 	[Tok_Question] = "?",
 	[Tok_Bang] = "!",
 	[Tok_Bang | Tok_EQUALED] = "!=",
-	[Tok_Equals] = "=",
-	[Tok_Equals | Tok_EQUALED] = "==",
+	[Tok_Equal] = "=",
+	[Tok_Equal | Tok_EQUALED] = "==",
 	[Tok_Plus] = "+",
 	[Tok_DoublePlus] = "++",
 	[Tok_Plus | Tok_EQUALED] = "+=",

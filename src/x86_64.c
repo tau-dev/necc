@@ -985,8 +985,6 @@ static void emitInstForward(Codegen *c, IrRef i) {
 		emit(c, " movsZ #, xmm1", fsuff, i);
 	} break;
 	case Ir_FloatToUInt:
-// 		assert(!"TODO codegen float->uint");
-// 		break;
 	case Ir_FloatToSInt: {
 		const char *fsuff = sizeFSuffix(c->ir.ptr[inst.unop].size);
 

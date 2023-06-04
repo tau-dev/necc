@@ -12,6 +12,7 @@ Arithmetic simplifications which require e.g. use-counts happen in the analysis 
 
 // TODO Get this down to 16.
 static_assert(sizeof(Inst) == 24, "sizeof(Inst) == 24");
+static inline u64 truncate(u64 constant, u16 size);
 
 #define HAS_EXITED(ir) ((ir)->insertion_block->exit.kind != Exit_None)
 // TODO Store pointer size in IrBuild
@@ -176,11 +177,13 @@ static inline u64 constFromDouble(double f) {
 
 static IrRef genBinOp (IrBuild *build, InstKind op, u8 properties, IrRef a, IrRef b) {
 	Inst *inst = build->ir.ptr;
-	assert(inst[a].size == inst[b].size || op == Ir_ShiftLeft || op == Ir_ShiftRight);
+	u16 size = inst[a].size;
+
+	assert(size == inst[b].size || op == Ir_ShiftLeft || op == Ir_ShiftRight);
 	Inst i = {
 		.kind = op,
 		.properties = properties,
-		.size = inst[a].size,
+		.size = size,
 		.binop = {a, b}
 	};
 
@@ -188,7 +191,6 @@ static IrRef genBinOp (IrBuild *build, InstKind op, u8 properties, IrRef a, IrRe
 	if (inst[a].kind == Ir_Constant && inst[b].kind == Ir_Constant) {
 		u64 lhs = inst[a].constant;
 		u64 rhs = inst[b].constant;
-		u16 size = inst[a].size;
 
 		bool no_overflow = properties & Prop_Arith_NoSignedOverflow;
 
@@ -198,7 +200,7 @@ static IrRef genBinOp (IrBuild *build, InstKind op, u8 properties, IrRef a, IrRe
 				i.properties |= Prop_Arith_WouldOverflow;
 				goto no_fold;
 			}
-			i.constant = lhs + rhs;
+			i.constant = truncate(lhs + rhs, size);
 			break;
 		case Ir_FAdd:
 			if (size == 4)
@@ -213,7 +215,6 @@ static IrRef genBinOp (IrBuild *build, InstKind op, u8 properties, IrRef a, IrRe
 				i.properties |= Prop_Arith_WouldOverflow;
 				goto no_fold;
 			}
-			i.kind = Ir_Constant;
 			i.constant = lhs - rhs;
 			break;
 		case Ir_FSub:
@@ -307,10 +308,23 @@ static IrRef genBinOp (IrBuild *build, InstKind op, u8 properties, IrRef a, IrRe
 		}
 		if (inst[i.binop.rhs].kind == Ir_Constant) {
 			u64 constant = inst[i.binop.rhs].constant;
+			double fconstant = doubleFromConst(constant, size);
+
 			switch (op) {
+			case Ir_FAdd:
+			case Ir_FSub:
+				if (fconstant == 0)
+					return i.binop.lhs;
+				break;
 			case Ir_Add:
 			case Ir_Sub:
 				if (constant == 0)
+					return i.binop.lhs;
+				break;
+			case Ir_FMul:
+				if (fconstant == 0)
+					return i.binop.rhs;
+				if (fconstant == 1)
 					return i.binop.lhs;
 				break;
 			case Ir_Mul:
@@ -553,25 +567,39 @@ IrRef genImmediateReal (IrBuild *build, double r, u16 size) {
 	return append(build, inst);
 }
 
+static inline u64 truncate (u64 constant, u16 size) {
+	if (size == 8) return constant;
+	return constant & (((u64) 1 << size*8) - 1);
+}
+static inline i64 signExtend (u64 constant, u16 src, u16 target) {
+	u64 fully_extended = constant | bitsAbove(src) * sign(constant, src);
+	// Wrapping unsigned->signed casts are strictly speaking illegal.
+	// They happen everywhere in the constant folding though and my
+	// compilers don't seem to mess with them, so I'll worry about that
+	// later.
+	return fully_extended & ~bitsAbove(target);
+}
+
 IrRef genTrunc (IrBuild *build, IrRef source, u16 target) {
 	Inst *inst = build->ir.ptr;
 	assert(inst[source].size >= target);
 	if (inst[source].size == target)
 		return source;
 	if (inst[source].kind == Ir_Constant)
-		return genImmediateInt(build, inst[source].constant & (((u64) 1 << target*8) - 1), target);
+		return genImmediateInt(build, truncate(inst[source].constant, target), target);
 
 	return append(build, (Inst) {Ir_Truncate, .size = target, .unop = source});
 }
 
 IrRef genSignExt (IrBuild *build, IrRef source, u16 target) {
 	Inst *inst = build->ir.ptr;
-	assert(inst[source].size <= target);
-	if (inst[source].size == target)
+	u16 src_size = inst[source].size;
+	assert(src_size <= target);
+	if (src_size == target)
 		return source;
 	if (inst[source].kind == Ir_Constant) {
-		// TODO Actually sign extend the constant
-		return genImmediateInt(build, inst[source].constant, target);
+		u64 c = inst[source].constant;
+		return genImmediateInt(build, signExtend(c, src_size, target), target);
 	}
 
 
@@ -584,7 +612,7 @@ IrRef genZeroExt (IrBuild *build, IrRef source, u16 target) {
 	if (inst[source].size == target)
 		return source;
 	if (inst[source].kind == Ir_Constant)
-		return genImmediateInt(build, inst[source].constant, target);
+		return genImmediateInt(build, truncate(inst[source].constant, target), target);
 
 	return append(build, (Inst) {Ir_ZeroExtend, .size = target, .unop = source});
 }
@@ -638,10 +666,25 @@ IrRef genFloatToInt (IrBuild *build, IrRef source, u16 target, Signedness sign) 
 		.size = target,
 		.unop = source,
 	};
+
 	if (source_inst.kind == Ir_Constant) {
-		i.kind = Ir_Constant;
-		// TODO Handle negative numbers
-		i.constant = (u64) doubleFromConst(source_inst.constant, source_inst.size);
+		double flt = doubleFromConst(source_inst.constant, source_inst.size);
+
+		if (sign) {
+			if (flt >= INT64_MIN && flt <= INT64_MAX) {
+				i.kind = Ir_Constant;
+				i.constant = truncate((i64) flt, target);
+			} else {
+				i.properties |= Prop_Arith_WouldOverflow;
+			}
+		} else {
+			if (flt >= 0 && flt <= UINT64_MAX) {
+				i.kind = Ir_Constant;
+				i.constant = truncate((u64) flt, target);
+			} else {
+				i.properties |= Prop_Arith_WouldOverflow;
+			}
+		}
 	}
 
 	return append(build, i);
