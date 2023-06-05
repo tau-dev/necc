@@ -1,3 +1,4 @@
+//!necc-dbg @ -run
 int
 main(int argc, char *argv[])
 {
@@ -6,7 +7,7 @@ main(int argc, char *argv[])
         int (*f1)(int ,char *[]);
         int (*f2)(int ,char *[]);
 
-        v[0] = 0;
+        v[0] = 3;
         p = &v;
         f1 = &main;
         f2 = main;
@@ -18,7 +19,7 @@ main(int argc, char *argv[])
                 return 3;
         if ((****f2)(0, 0))
                 return 4;
-        if (!(*p)[0])
+        if ((*p)[0] == 3)
                 return 0;
         return 1;
 }

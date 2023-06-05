@@ -1364,10 +1364,7 @@ static Value parseExprLeftUnary (Parse *parse) {
 			v.typ.kind = Kind_FunctionPtr;
 		} else {
 			Type *pointee = ALLOC(parse->code_arena, Type);
-			if (isAnyArray(v.typ))
-				*pointee = *v.typ.array.inner;
-			else
-				*pointee = v.typ;
+			*pointee = v.typ;
 			if (v.category == Ref_LValue_Register)
 				parseerror(parse, primary, "cannot take the address of a value declared %sregister%s", BOLD, RESET);
 			if (v.category != Ref_LValue)
@@ -2070,8 +2067,13 @@ static void parseInitializer (Parse *parse, InitializationDest dest, u32 offset,
 		maybeBracedInitializer(parse, dest, offset, type, no_value);
 	} else {
 		const Token *primary = parse->pos;
-		IrRef val = coerce(parseExprAssignment(parse), type, parse, primary);
-		initializeFromValue(parse, dest, offset, val);
+		Value val = parseExprAssignment(parse);
+		if (val.typ.kind == Kind_Array && type.kind == Kind_Array) {
+			parseerror(parse, primary, "TODO Str->Array");
+		} else {
+			IrRef res = coerce(val, type, parse, primary);
+			initializeFromValue(parse, dest, offset, res);
+		}
 	}
 }
 
@@ -3216,6 +3218,8 @@ static OrdinaryIdentifier *define (
 					printTypeHighlighted(parse->arena, decl.type));
 		}
 	}
+
+	// TODO If linked with existing definition, modify the type to composite type.
 
 	OrdinaryIdentifier *new = ALLOC(parse->arena, OrdinaryIdentifier);
 	*new = (OrdinaryIdentifier) {

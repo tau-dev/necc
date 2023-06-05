@@ -118,16 +118,25 @@ bool fnTypeCompatible (FunctionType a, FunctionType b) {
 	return true;
 }
 
-// PERFORMANCE Probably important.
 bool typeCompatible (Type a, Type b) {
 	if (a.kind != b.kind) {
+		// Clang and GCC behave like this, but I have not yet found the
+		// relevant spec paragraph and there may be more nuance.
+		if (isAnyArray(a) && isAnyArray(b)) {
+			if (a.kind == Kind_Array && b.kind == Kind_Array)
+				return a.array.count == b.array.count;
+			return true;
+		}
 		if (b.kind == Kind_Enum || b.kind == Kind_Enum_Named) {
 			Type tmp = a;
 			a = b;
 			b = tmp;
 		}
-		return (a.kind == Kind_Enum || a.kind == Kind_Enum_Named)
-				&& b.kind == Kind_Basic && b.basic == Int_int;
+		if (a.kind == Kind_Enum || a.kind == Kind_Enum_Named) {
+			if (a.kind == Kind_Enum_Named) a = a.nametagged->type;
+			return b.kind == Kind_Basic && b.basic == a.unnamed_enum.underlying;
+		}
+		return false;
 	}
 
 	switch (a.kind) {

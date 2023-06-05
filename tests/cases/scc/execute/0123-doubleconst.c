@@ -1,3 +1,4 @@
+//!necc-dbg @ -run
 double x = 100;
 
 int
