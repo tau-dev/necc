@@ -127,6 +127,9 @@ typedef struct {
 
 	String content; // non-owning, possibly co-allocated
 
+	// Index in the owning Tokenization's FileList. 0 is invalid, the
+	// root file is 1, predefined macros come after that, then inclulded
+	// files.
 	u32 idx;
 
 	u32 included_count;
@@ -137,7 +140,7 @@ typedef struct {
 	u8 *headers;
 
 	// Array of pointers to structs whose first item must be the
-	// key String. (Upcast allowed by 6.7.2.1-13)
+	// key String. (Upcast allowed by 6.7.2.1-17)
 	void **content;
 	u32 used;
 	u32 capacity;

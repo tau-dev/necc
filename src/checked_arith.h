@@ -21,6 +21,10 @@ static inline bool sign(u64 x, PrimitiveSize size) {
 	return (x & ((u64) 1 << (size * 8 - 1))) != 0;
 }
 
+static inline u64 bitsBelow(u16 size) {
+	return size >= 8 ? ~(u64) 0 : ((u64) 1 << (size*8)) - 1;
+}
+
 static inline u64 bitsAbove(u16 size) {
 	return size >= 8 ? 0 : ~(((u64) 1 << (size*8)) - 1);
 }

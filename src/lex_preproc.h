@@ -70,6 +70,7 @@ typedef enum {
 	Tok_String,
 	Tok_Real,
 	Tok_Integer,
+	Tok_Char,
 
 	Tok_OpenParen,
 	Tok_CloseParen,
@@ -177,7 +178,7 @@ typedef struct Token {
 
 typedef struct {
 	Location source;
-	// Macro this was expanded from, or zero.
+	// Invocation location if this was expanded from a macro, zero otherwise.
 	Location macro;
 } TokenLocation;
 
@@ -212,3 +213,4 @@ typedef struct {
 } LexParams;
 
 Tokenization lex(Arena *generated_strings, String filename, LexParams paths);
+void emitPreprocessed(Tokenization *tok, FILE *dest);

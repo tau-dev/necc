@@ -1,3 +1,4 @@
+//!necc-dbg @ -run
 /* taken from ISO/IEC 9899:1999 Section 6.10.3.5 p5 */
 
 int z[3] = {1, 0, 0};

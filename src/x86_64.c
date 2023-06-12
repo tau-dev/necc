@@ -1367,6 +1367,7 @@ static void flushit (FILE *f) {
 	insert = buf;
 }
 
+// PERFORMANCE This consumes an obscene 7% of execution time.
 static void emitInt (u64 i) {
 	if (i < 9) {
 		*insert++ = '0' + i;

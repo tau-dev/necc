@@ -34,6 +34,7 @@ typedef enum {
 	F_StdInc,
 	F_NoStdInc,
 	F_EmitIr,
+	F_EmitPreproc,
 	F_EmitAssembly,
 	F_EmitExe,
 	F_EmitObj,
@@ -70,6 +71,7 @@ static Name flags[] = {
 
 	{"run", F_Run},
 	{"ir", F_EmitIr},
+	{"pp", F_EmitPreproc},
 	{"as", F_EmitAssembly},
 	{"out", F_EmitExe},
 	{"obj", F_EmitObj},
@@ -115,7 +117,7 @@ const char *help_string = "Usage:\n"
 	" -lib            Generate an archive. (TODO)\n"
 	" -so/-dll        Generate a shared/dynamically linked library. (TODO)\n"
 	" -as             Generate assembly code in the GNU assembler format.\n"
-	" -cpp            Print the preprocessed source. (TODO)\n"
+	" -pp             Print the preprocessed source.\n"
 	" -M/-deps        Print a Makefile-compatible dependency list of all #included files.\n"
 	" -MM/-localdeps  Same as above, but do not mention system header files.\n"
 	" -decls          Print a list of top-level declarations in the code.\n"
@@ -223,6 +225,7 @@ int main (int argc, char **args) {
 	};
 
 	const char *ir_out = NULL;
+	const char *preproc_out = NULL;
 	const char *assembly_out = NULL;
 	const char *obj_out = NULL;
 	const char *exe_out = NULL;
@@ -244,6 +247,14 @@ int main (int argc, char **args) {
 
 	for (int i = 1; i < argc; i++) {
 		if (args[i][0] == '-') {
+			if (args[i][1] == '-' && args[i][2] == 0) {
+				if (i + 2 < argc)
+					generalFatal("Cannot more than one input file at a time.");
+				if (i + 1 < argc)
+					input = zstr(args[i + 1]);
+				break;
+			}
+
 			char *direct_arg = NULL;
 			for (char *c = args[i]; *c; c++) {
 				if (*c == '=') {
@@ -263,6 +274,7 @@ int main (int argc, char **args) {
 			case F_Crashing: options.crash_on_error = true; break;
 			case F_Debug: options.emit_debug = true; break;
 			case F_EmitIr: setOut(&ir_out, direct_arg); break;
+			case F_EmitPreproc: setOut(&preproc_out, direct_arg); break;
 			case F_EmitAssembly: setOut(&assembly_out, direct_arg); break;
 			case F_EmitObj: setOut(&obj_out, direct_arg); break;
 			case F_EmitExe: setOut(&exe_out, direct_arg); break;
@@ -307,6 +319,8 @@ int main (int argc, char **args) {
 				fprintf(stderr, "%swarning: %sIgnoring unknown flag %s\n", YELLOW, RESET, args[i]);
 			}
 		} else {
+			if (input.len)
+				generalFatal("Cannot more than one input file at a time.");
 			input = zstr(args[i]);
 		}
 	}
@@ -403,6 +417,11 @@ int main (int argc, char **args) {
 		emitDeps(deps_out, out_name, tokens.files, true);
 	if (localdeps_out)
 		emitDeps(localdeps_out, out_name, tokens.files, false);
+	if (preproc_out) {
+		FILE *dest = openOut(preproc_out);
+		emitPreprocessed(&tokens, dest);
+		fclose(dest);
+	}
 
 	if (!ir_out && !assembly_out && !obj_out && !exe_out &&
 		!decls_out && !all_decls_out && !std_decls_out)

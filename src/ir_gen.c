@@ -439,7 +439,7 @@ IrRef genBitNot (IrBuild *build, IrRef a) {
 	Inst i = {Ir_BitNot, .size = inst[a].size, .unop = a};
 	if (inst[a].kind == Ir_Constant) {
 		i.kind = Ir_Constant;
-		i.constant = ~inst[a].constant;
+		i.constant = ~inst[a].constant & bitsBelow(i.size);
 	} else if (inst[a].kind == Ir_BitNot) {
 		return inst[a].unop;
 	}

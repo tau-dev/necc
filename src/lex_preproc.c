@@ -18,6 +18,10 @@ Combined lexer and preprocessor.
 #endif
 #define ARRSIZE(x) sizeof(x)/sizeof(x[0])
 
+typedef unsigned long long ullong;
+typedef long long llong;
+
+
 static inline bool isSpace(char);
 static inline bool isAlpha(char c);
 static inline bool isHexDigit(char c);
@@ -166,6 +170,7 @@ enum Directive {
 	Directive_Define,
 	Directive_Undef,
 	Directive_Include,
+	Directive_Embed,
 
 	Directive_Line,
 };
@@ -186,6 +191,7 @@ Keyword preproc_directives[] = {
 	{"define", Directive_Define},
 	{"undef", Directive_Undef},
 	{"include", Directive_Include},
+	{"embed", Directive_Embed},
 
 	{"line", Directive_Line},
 };
@@ -293,6 +299,7 @@ static Token getToken (Arena *str_arena, SourceFile source, Location *loc, Symbo
 		}
 		break;
 	case '-':
+		// TODO A minus sign should combine with a following number into a single token.
 		if (pos[1] == '>') {
 			pos++;
 			tok.kind = Tok_Arrow;
@@ -403,7 +410,7 @@ static Token getToken (Arena *str_arena, SourceFile source, Location *loc, Symbo
 	char_literal:
 		pos++;
 		// TODO Get unicode vals.
-		tok = (Token) {Tok_Integer, .literal_type = Int_int, .val.integer_s = pos[0]};
+		tok = (Token) {Tok_Char, .literal_type = Int_int, .val.integer_s = pos[0]};
 		if (pos[0] == '\\')
 			tok.val.integer_s = lexEscapeCode(&source, *loc, &pos);
 		pos++;
@@ -570,6 +577,7 @@ static void appendOneToken(TokenList *t, Token tok, TokenLocation pos);
 inline static void resolveIdentToKeyword(Tokenization *t, Token *tok, Location loc, String name);
 static String restOfLine(SourceFile source, Location *, const char **pos);
 static SpaceClass tryGobbleSpace(SourceFile source, Location *, const char **p);
+static bool followedByOpenParen(const char *p);
 static void skipToValidBranchOrEnd(ExpansionParams, IfClass, u32 *depth, const char **p, TokenList *eval_buf);
 static void skipToEndIf(SourceFile source, Location *, const char **p);
 static IfClass skipToElseIfOrEnd(SourceFile source, Location *, const char **p);
@@ -770,6 +778,9 @@ Tokenization lex (Arena *generated_strings, String filename, LexParams params) {
 				first_line_in_file = true;
 				continue;
 			}
+			case Directive_Embed: {
+				lexerror(source, begin, "TODO #embed");
+			} break;
 			case Directive_Pragma: {
 				String pragma = restOfLine(source, &loc, &pos);
 // 				pos--;
@@ -830,8 +841,11 @@ Tokenization lex (Arena *generated_strings, String filename, LexParams params) {
 			case Directive_Line: {
 				expansion.source = source;
 				expansion.expansion_start = begin;
+				// TODO May be followed by a file name.
 				u64 lineno = preprocExpression(expansion, &prepreoc_evaluation_buf, expansion.tok);
-				if (lineno > 0) lineno--;
+				if (lineno > INT32_MAX)
+					lexerror(source, begin, "line number out of range");
+				lineno--;
 				loc.line = lineno;
 			} break;
 			default:
@@ -855,23 +869,13 @@ Tokenization lex (Arena *generated_strings, String filename, LexParams params) {
 				expansion.expansion_start = begin;
 
 				if (macro->is_function_like) {
-					Token paren = getTokenSpaced(generated_strings, source, &loc, &t.symbols, &pos);
-
-					if (paren.kind != Tok_OpenParen) {
-						// FIXME Why is this here? Should just move back to the previous token amd goto non_macro immediately.
-
-						int keyword = t.symbols.ptr[tok.val.symbol_idx].keyword;
-						// FIXME If __FILE__ is overridden by a macro
-						// definition but that definition is not
-						// expanded, is FILE expansion still necessary?
-						if (keyword)
-							tok.kind = keyword;
-						appendOneToken(&t.list, tok, (TokenLocation) {loc});
-						tok = paren;
-						if (paren.kind == Tok_Identifier)
-							goto non_macro_ident;
-						else
-							goto non_macro;
+					if (followedByOpenParen(pos)) {
+						tryGobbleSpace(expansion.source, expansion.loc, expansion.src);
+						assert(pos[0] == '(');
+						pos++;
+						expansion.loc->column++;
+					} else {
+						goto non_macro_ident;
 					}
 					arguments = takeArguments(expansion, begin, macro); // Freed by expand_into.
 				}
@@ -889,7 +893,6 @@ Tokenization lex (Arena *generated_strings, String filename, LexParams params) {
 			non_macro_ident:;
 			resolveIdentToKeyword(&t, &tok, begin, source.name);
 		}
-		non_macro:
 		appendOneToken(&t.list, tok, (TokenLocation) {begin});
 
 		if (tok.kind == Tok_EOF) {
@@ -1013,6 +1016,15 @@ static bool expandInto (const ExpansionParams ex, TokenList *dest, bool is_argum
 			resolveIdentToKeyword(ex.tok, &t.tok, ex.expansion_start, ex.source.name);
 		} else {
 			non_macro:
+			if (t.tok.kind == Tok_EOF) {
+				if (is_argument) {
+					// TODO Use location of the beginning of the invocation.
+					expansionError(ex, t.loc,
+							"missing closing parenthesis of macro invocation");
+				} else {
+					return false;
+				}
+			}
 			if (is_argument && level_of_argument_source == ex.stack->len) {
 				switch (t.tok.kind) {
 				case Tok_Comma:
@@ -1027,10 +1039,6 @@ static bool expandInto (const ExpansionParams ex, TokenList *dest, bool is_argum
 						return true;
 					paren_depth--;
 					break;
-				case Tok_EOF:
-					// TODO Use location of the beginning of the invocation.
-					expansionError(ex, t.loc,
-							"missing closing parenthesis of macro invocation");
 				default:
 					break;
 				}
@@ -1135,13 +1143,8 @@ static MacroToken takeToken (const ExpansionParams ex, u32 *marker) {
 						(*marker)++;
 					PUSH(*stack, arg);
 				} else {
-					if (followed_by_concat) {
+					if (followed_by_concat)
 						repl->pos++;
-						t = macro->tokens.ptr[repl->pos];
-						repl->pos++;
-						if (!t.parameter || repl->toks[t.parameter-1].count)
-							return t;
-					}
 					// Argument was empty, retry.
 				}
 			} else {
@@ -1383,6 +1386,27 @@ static SpaceClass tryGobbleSpace (SourceFile source, Location *loc, const char *
 	loc->column += pos - line_begin;
 	*p = pos;
 	return spacing;
+}
+
+static bool followedByOpenParen(const char *p) {
+	while (*p) {
+		if (p[0] == '\\' && p[1] == '\n') {
+			p += 2;
+		} else if (p[0] == '/' && p[1] == '/') {
+			// TODO Check for C99
+			while (*p && *p != '\n')
+				p++;
+		} else if (p[0] == '/' && p[1] == '*') {
+			while (*p && !(p[0] == '*' && p[1] == '/'))
+				p++;
+			p += 2;
+		} else {
+			if (!isSpace(*p))
+				return *p == '(';
+			p++;
+		}
+	}
+	return false;
 }
 
 // PERFORMANCE This function is potentially a very hot path. Optimize!
@@ -1650,9 +1674,11 @@ const char *token_names[] = {
 	[Tok_Invalid] = "invalid token",
 
 	[Tok_Identifier] = "identifier",
-	[Tok_Integer] = "int-literal",
-	[Tok_Real] = "floating-point-literal",
 	[Tok_String] = "string-literal",
+	[Tok_Real] = "floating-point-literal",
+	[Tok_Integer] = "int-literal",
+	[Tok_Char] = "char-literal",
+
 	[Tok_PreprocDirective] = "preprocessor-directive",
 	[Tok_PreprocConcatenate] = "##",
 
@@ -1715,8 +1741,9 @@ static const char *const name_end = name + 256;
 const char *tokenNameHighlighted (TokenKind kind) {
 	switch (kind) {
 	case Tok_Identifier: return "identifier";
-	case Tok_Integer: return "integer-literal";
 	case Tok_Real: return "floating-point-literal";
+	case Tok_Integer: return "integer-literal";
+	case Tok_Char: return "character-literal";
 	case Tok_String: return "string-literal";
 	case Tok_PreprocDirective: return "preprocessor-directive";
 	default:;
@@ -1747,6 +1774,8 @@ u32 strPrintTokenLen (Token t, Symbol *syms) {
 	case Tok_PreprocDirective: return syms[t.val.symbol_idx].name.len + 1;
 	case Tok_String: return syms[t.val.symbol_idx].name.len * 2 + 2;
 	case Tok_Integer: return 30;
+	case Tok_Char: return 10;
+	case Tok_Real: return 40;
 	default:
 		assert(tokenName(t.kind));
 		return strlen(tokenName(t.kind));
@@ -1768,8 +1797,15 @@ void strPrintToken (char **dest, const char *end, Symbol *symbols, Token t) {
 	case Tok_String:
 		printto(dest, end, "\"%.*s\"", STRING_PRINTAGE(symbols[t.val.symbol_idx].name));
 		return;
+	case Tok_Real:
+		printto(dest, end, "%f", t.val.real);
+		return;
 	case Tok_Integer:
-		printto(dest, end, "%lld", t.val.integer_s);
+		printto(dest, end, "%lld", (llong) t.val.integer_s);
+		return;
+	case Tok_Char:
+		// TODO Handle multibyte characters.
+		printto(dest, end, "'%c'", (int) t.val.integer_s);
 		return;
 	default:
 		printto(dest, end, "%s", tokenName(t.kind));
@@ -2137,3 +2173,83 @@ static void growSymbols (void) {
 	map = new_map;
 }
 
+static Location sourceOf (TokenLocation loc) {
+	if (loc.macro.file_id)
+		return loc.macro;
+	else
+		return loc.source;
+}
+
+static void escapeTo(FILE *dest, u32 c) {
+	char de_escaped = de_escape_codes[c];
+	// TODO Handle multibyte characters.
+	// PERFORMANCE Buffer this output.
+	if (de_escaped) {
+		fputc('\\', dest);
+		fputc(de_escaped, dest);
+	} else {
+		fputc(c, dest);
+	}
+}
+
+// STYLE PERFORMANCE This is mostly a duplicate of strPrintToken. The
+// only significant difference is the form of symbol references;
+// dispatching on that level seems very wasteful though. OTOH, this is
+// probably not performance-sensitive.
+void emitPreprocessed (Tokenization *tok, FILE *dest) {
+	TokenList list = tok->list;
+	Location prev = {0};
+
+	for (u32 i = 0; i < list.count-1; i++) {
+		Location loc = sourceOf(list.positions[i]);
+		if (loc.file_id != prev.file_id) {
+			String newfile = tok->files.ptr[loc.file_id]->name;
+			fprintf(dest, "\n#line %llu \"%.*s\"\n", (ullong) loc.line, STRING_PRINTAGE(newfile));
+			prev = loc;
+		} else if (loc.line != prev.line) {
+			if (loc.line > prev.line && loc.line < prev.line + 6) { // Arbitrary.
+				for (u32 i = prev.line; i < loc.line; i++)
+					fprintf(dest, "\n");
+			} else {
+				fprintf(dest, "\n#line %llu\n", (ullong) loc.line);
+			}
+			prev = loc;
+		} else {
+			// TODO Try to hit the correct column.
+			fprintf(dest, " ");
+		}
+
+		Token t = list.tokens[i];
+
+		switch (t.kind) {
+		case Tok_PreprocDirective:
+			fprintf(dest, "#");
+			FALLTHROUGH;
+		case Tok_Identifier:
+			fprintf(dest, "%.*s", STRING_PRINTAGE(t.val.symbol->name));
+			break;
+		case Tok_String: {
+			fputc('\"', dest);
+			String str = t.val.symbol->name;
+			for (u32 i = 0; i < str.len; i++)
+				escapeTo(dest, str.ptr[i]);
+			fputc('\"', dest);
+		} break;
+		case Tok_Real:
+			fprintf(dest, "%f", t.val.real);
+			break;
+		case Tok_Integer:
+			fprintf(dest, "%lld", (llong) t.val.integer_s);
+			break;
+		case Tok_Char:
+			fputc('\'', dest);
+			escapeTo(dest, t.val.integer_s);
+			fputc('\'', dest);
+			break;
+		default:
+			fprintf(dest, "%s", tokenName(t.kind));
+			break;
+		}
+	}
+	fprintf(dest, "\n");
+}

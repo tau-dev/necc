@@ -1611,6 +1611,7 @@ static Value parseExprBase (Parse *parse) {
 		return v;
 	}
 	case Tok_Integer:
+	case Tok_Char:
 		return immediateIntVal(parse, (Type) {Kind_Basic, .basic = t.literal_type}, t.val.integer_u);
 	case Tok_Real: {
 		IrRef inst = genImmediateReal(build, t.val.real, 8);
