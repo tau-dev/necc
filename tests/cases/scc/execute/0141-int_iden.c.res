@@ -47,9 +47,9 @@ public int main():
        jmp if_join10
  if_join10: { mem: 26, 33, ordered: 33, }
   26 /4 = load 2
-  27 /4 = const 0xffffffffffffffff (18446744073709551615)
+  27 /4 = const 0xffffffff (4294967295)
   28 /4 = and 26 27
-  29 /4 = const 0xffffffffffffffff (18446744073709551615)
+  29 /4 = const 0xffffffff (4294967295)
   30 /4 = and 28 29
   31 /4 = const 0x1 (1)
   32 /4 = smod 30 31

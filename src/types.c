@@ -161,7 +161,8 @@ bool typeCompatible (Type a, Type b) {
 	case Kind_Union_Named:
 		return a.nametagged == b.nametagged;
 	case Kind_Array:
-		return a.array.count == b.array.count;
+		return a.array.count == b.array.count &&
+				typeCompatible(*a.array.inner, *b.array.inner);
 	default:
 		unreachable;
 	}

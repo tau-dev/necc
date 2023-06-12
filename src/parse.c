@@ -1535,8 +1535,10 @@ static Value parseExprRightUnary (Parse *parse) {
 					parseerror(parse, NULL, "cannot access a member on a value of incomplete type %s",
 							printTypeHighlighted(parse->arena, v.typ));
 				} else {
-					parseerror(parse, NULL, "member access only works on %sstruct%ss and %sunion%ss, not on %s",
+					Log l = Log_Err | (resolved.kind == Kind_Pointer ? Log_Fatal : 0);
+					parsemsg(l, parse, NULL, "member access only works on %sstruct%ss and %sunion%ss, not on %s",
 							BOLD, RESET, BOLD, RESET, printTypeHighlighted(parse->arena, resolved));
+					parsemsg(Log_Info | Log_Fatal, parse, NULL, "use the %s->%s operator to access a member through a pointer", BOLD, RESET);
 				}
 			}
 
@@ -2004,7 +2006,21 @@ static Value parseIntrinsic (Parse *parse, Intrinsic i) {
 
 #define MEMBERS_FULL UINT64_MAX
 static u64 parseSubInitializer(Parse *parse, InitializationDest dest, u32 offset, Type type, Value current_value, bool designator_started, u64 member_idx);
-static void initializeFromValue(Parse *parse, InitializationDest dest, u32 offset, IrRef ref);
+static void initializeFromValue(Parse *parse, InitializationDest dest, u32 offset, Type dest_type, Value val);
+
+static bool isString(Type typ) {
+	if (!isAnyArray(typ)) return false;
+	Type inner = *typ.array.inner;
+	return inner.kind == Kind_Basic && inner.basic == Int_char;
+}
+
+static bool assignmentCompatible(Type src, Type dest) {
+	if (src.kind == Kind_Array && dest.kind == Kind_Array) {
+		return typeCompatible(*src.array.inner, *dest.array.inner);
+	}
+	return typeCompatible(src, dest);
+}
+
 
 // maybeBracedInitializer and parseSubInitializer may be called with a
 // current_value from the initializer list (and its following comma)
@@ -2025,7 +2041,7 @@ static void maybeBracedInitializer (Parse *parse, InitializationDest dest, u32 o
 				return;
 			}
 
-			if (is_scalar) {
+			if (is_scalar || (parse->pos->kind == Tok_String && isString(type))) {
 				parsemsg(Log_Warn, parse, parse->pos-1, "unnecessary braces around scalar initializer");
 				maybeBracedInitializer(parse, dest, offset, type, no_value);
 				expect(parse, Tok_CloseBrace);
@@ -2049,12 +2065,10 @@ static void maybeBracedInitializer (Parse *parse, InitializationDest dest, u32 o
 			}
 			return;
 		}
-		current_value = rvalue(parseExprAssignment(parse), parse);
+		current_value = parseExprAssignment(parse);
 	}
-	if (is_scalar) {
-		initializeFromValue(parse, dest, offset, coercerval(current_value, type, parse, NULL, false));
-	} else if (typeCompatible(current_value.typ, type)) {
-		initializeFromValue(parse, dest, offset, current_value.inst);
+	if (is_scalar || assignmentCompatible(current_value.typ, type)) {
+		initializeFromValue(parse, dest, offset, type, current_value);
 	} else {
 		parseSubInitializer(parse, dest, offset, type, current_value, false, 0);
 	}
@@ -2067,14 +2081,7 @@ static void parseInitializer (Parse *parse, InitializationDest dest, u32 offset,
 	if (parse->pos->kind == Tok_OpenBrace) {
 		maybeBracedInitializer(parse, dest, offset, type, no_value);
 	} else {
-		const Token *primary = parse->pos;
-		Value val = parseExprAssignment(parse);
-		if (val.typ.kind == Kind_Array && type.kind == Kind_Array) {
-			parseerror(parse, primary, "TODO Str->Array");
-		} else {
-			IrRef res = coerce(val, type, parse, primary);
-			initializeFromValue(parse, dest, offset, res);
-		}
+		initializeFromValue(parse, dest, offset, type, parseExprAssignment(parse));
 	}
 }
 
@@ -2208,8 +2215,19 @@ u64 findDesignatedArrayIdx (Parse *parse, Type type) {
 	return pos;
 }
 
-static void initializeFromValue (Parse *parse, InitializationDest dest, u32 offset, IrRef ref) {
+static void initializeFromValue (Parse *parse, InitializationDest dest, u32 offset, Type type, Value val) {
+	IrRef ref;
 	IrBuild *build = &parse->build;
+	if (val.typ.kind == Kind_Array && type.kind == Kind_Array) {
+		// Generate a load that will be elided in the next step again.
+		// Ewww.
+		// TODO Warn when truncating
+		u32 src_size = typeSize(val.typ, &parse->target);
+		u32 dest_size = typeSize(type, &parse->target);
+		ref = genLoad(build, val.inst, src_size > dest_size ? dest_size : src_size, val.typ.qualifiers & Qualifier_Volatile);
+	} else {
+		ref = coerce(val, type, parse, NULL);
+	}
 	Inst inst = build->ir.ptr[ref];
 	if (inst.kind != Ir_Constant && inst.kind != Ir_Reloc)
 		requires(parse, "non-constant initializers", Features_C99);
@@ -3247,7 +3265,6 @@ static OrdinaryIdentifier *define (
 	case Storage_Constexpr:
 	static_storage: {
 		if (file_scope) {
-			// (6.7.1.9)
 			bool tentative = decl.type.kind != Kind_Function && !defining_token;
 			defGlobal(parse, decl, decl_token, tentative, false);
 			new->static_id = decl.name->global_val_id;
