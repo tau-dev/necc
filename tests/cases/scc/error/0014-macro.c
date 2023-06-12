@@ -1,3 +1,4 @@
+//!necc-dbg @ -as
 /*
 PATTERN:
 0014-macro.c:9: error: macro "X" received 1 arguments, but it takes 0
