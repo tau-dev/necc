@@ -583,7 +583,10 @@ static void skipToEndIf(SourceFile source, Location *, const char **p);
 static IfClass skipToElseIfOrEnd(SourceFile source, Location *, const char **p);
 static Token getTokenSpaced(Arena *, SourceFile, Location *, SymbolList *, const char **p);
 static bool gobbleSpaceToNewline(const char **p, Location *loc);
-static u64 preprocExpression(ExpansionParams, TokenList *buf, Tokenization *main_tokenization);
+
+static void preprocExpandLine(ExpansionParams params, TokenList *buf);
+static String includeFilename(ExpansionParams params, TokenList *buf, bool *quoted);
+static u64 preprocExpression(ExpansionParams params, TokenList *buf, const Token **end);
 static const char *defineMacro(Arena *arena, Arena *generated_strings, SymbolList *, String name, SourceFile *, Location *loc, const char *pos);
 static void predefineMacros(Arena *arena, Arena *genrated_strings, SymbolList *, FileList *, StringList to_define, SourceKind);
 static void resolveSymbolIndicesToPointers(TokenList t, Symbol *syms);
@@ -601,7 +604,7 @@ Tokenization lex (Arena *generated_strings, String filename, LexParams params) {
 
 	StringMap sources = {0};
 	LIST(Inclusion) includes_stack = {0};
-	TokenList prepreoc_evaluation_buf = {0};
+	TokenList preproc_evaluation_buf = {0};
 	MacroStack macro_expansion_stack = {0};
 	u32 if_depth = 0;
 
@@ -718,27 +721,11 @@ Tokenization lex (Arena *generated_strings, String filename, LexParams params) {
 					free(prev->tokens.ptr);
 			} break;
 			case Directive_Include: {
-				// TODO Preprocessor replacements on the arguments to #include (6.10.2.4)
-				char delimiter;
-				if (pos[0] == '\"')
-					delimiter = '\"';
-				else if (pos[0] == '<')
-					delimiter = '>';
-				else
-					lexerror(source, begin, "#include expects <FILENAME> or \"FILENAME\"");
+				expansion.source = source;
+				expansion.expansion_start = begin;
 
-				pos++;
-				const char *start = pos;
-				while (*pos != delimiter) {
-					if (*pos == '\0') {
-						lexerror(source, begin, "#include expects <FILENAME> or \"FILENAME\"");
-					}
-					pos++;
-				}
-				if (pos == start)
-					lexerror(source, begin, "#include expects <FILENAME> or \"FILENAME\"");
-
-				String includefilename = {pos - start, start};
+				bool quoted;
+				String includefilename = includeFilename(expansion, &preproc_evaluation_buf, &quoted);
 
 				SourceFile *new_source = NULL;
 				void **already_loaded = mapGetOrCreate(&sources, includefilename);
@@ -746,7 +733,7 @@ Tokenization lex (Arena *generated_strings, String filename, LexParams params) {
 					new_source = *already_loaded;
 					new_source->included_count++;
 				} else {
-					if (delimiter == '\"') {
+					if (quoted) {
 						for (u32 i = 0; i < params.user_include_dirs.len; i++) {
 							new_source = readAllAlloc(params.user_include_dirs.ptr[i], includefilename);
 							if (new_source) break;
@@ -762,12 +749,11 @@ Tokenization lex (Arena *generated_strings, String filename, LexParams params) {
 						}
 					}
 					if (new_source == NULL)
-						lexerror(source, loc, "could not open include file \"%.*s\"", STRING_PRINTAGE(includefilename));
+						lexerror(source, begin, "could not open include file \"%.*s\"", STRING_PRINTAGE(includefilename));
 					new_source->idx = t.files.len;
 					PUSH(t.files, new_source);
 					*already_loaded = new_source;
 				}
-				pos++;
 				if (includes_stack.len >= MAX_INCLUDES)
 					lexerror(source, begin, "exceeded maximum #include depth of %d", MAX_INCLUDES);
 				PUSH(includes_stack, ((Inclusion) {loc, pos}));
@@ -802,7 +788,7 @@ Tokenization lex (Arena *generated_strings, String filename, LexParams params) {
 				expansion.source = source;
 				expansion.expansion_start = begin;
 
-				skipToValidBranchOrEnd(expansion, If_If, &if_depth, &pos, &prepreoc_evaluation_buf);
+				skipToValidBranchOrEnd(expansion, If_If, &if_depth, &pos, &preproc_evaluation_buf);
 			} break;
 			case Directive_Ifdef:
 			case Directive_Ifndef: {
@@ -810,7 +796,7 @@ Tokenization lex (Arena *generated_strings, String filename, LexParams params) {
 				expansion.expansion_start = begin;
 
 				IfClass class = dir == Directive_Ifdef ? If_IfDef : If_IfnDef;
-				skipToValidBranchOrEnd(expansion, class, &if_depth, &pos, &prepreoc_evaluation_buf);
+				skipToValidBranchOrEnd(expansion, class, &if_depth, &pos, &preproc_evaluation_buf);
 			} break;
 			case Directive_Else:
 			case Directive_Elifdef:
@@ -842,7 +828,11 @@ Tokenization lex (Arena *generated_strings, String filename, LexParams params) {
 				expansion.source = source;
 				expansion.expansion_start = begin;
 				// TODO May be followed by a file name.
-				u64 lineno = preprocExpression(expansion, &prepreoc_evaluation_buf, expansion.tok);
+
+				const Token *end;
+				preprocExpandLine(expansion, &preproc_evaluation_buf);
+				u64 lineno = preprocExpression(expansion, &preproc_evaluation_buf, &end);
+
 				if (lineno > INT32_MAX)
 					lexerror(source, begin, "line number out of range");
 				lineno--;
@@ -906,8 +896,8 @@ Tokenization lex (Arena *generated_strings, String filename, LexParams params) {
 	for (u32 i = 0; i < ARRSIZE(t.special_identifiers); i++)
 		t.special_identifiers[i] = &t.symbols.ptr[special_identifiers_idx[i]];
 
-	free(prepreoc_evaluation_buf.tokens);
-	free(prepreoc_evaluation_buf.positions);
+	free(preproc_evaluation_buf.tokens);
+	free(preproc_evaluation_buf.positions);
 	free(includes_stack.ptr);
 	free(macro_expansion_stack.ptr);
 	for (u32 i = 0; i < t.symbols.len; i++) {
@@ -1466,7 +1456,8 @@ static void skipToValidBranchOrEnd (
 	while (true) {
 		switch (class) {
 		case If_If:
-			if (preprocExpression(ex, eval_buf, ex.tok))
+			preprocExpandLine(ex, eval_buf);
+			if (preprocExpression(ex, eval_buf, NULL))
 				return;
 			break;
 		case If_IfDef: {
@@ -1604,8 +1595,7 @@ static bool gobbleSpaceToNewline (const char **p, Location *loc) {
 }
 
 
-// PERFORMANCE This takes almost 5% of the total compile time! Not cool.
-static u64 preprocExpression (ExpansionParams params, TokenList *buf, Tokenization *main_tokenization) {
+static void preprocExpandLine (ExpansionParams params, TokenList *buf) {
 	const char *pos = *params.src;
 	Arena *const str_arena = params.strings_arena;
 	buf->count = 0;
@@ -1618,6 +1608,7 @@ static u64 preprocExpression (ExpansionParams params, TokenList *buf, Tokenizati
 		Token tok = getToken(str_arena, params.source, params.loc, &params.tok->symbols, &pos);
 		if (tok.kind == Tok_Identifier) {
 			Symbol *sym = &params.tok->symbols.ptr[tok.val.symbol_idx];
+			// TODO Implement __has_include, __has_embed, __has_c_attribute.
 			if (eql("defined", sym->name)) {
 				tok = getTokenSpaced(str_arena, params.source, params.loc, &params.tok->symbols, &pos);
 				bool parenthesized = tok.kind == Tok_OpenParen;
@@ -1646,23 +1637,79 @@ static u64 preprocExpression (ExpansionParams params, TokenList *buf, Tokenizati
 				tok.kind = Tok_Integer;
 				tok.literal_type = Int_int;
 				tok.val.integer_s = 0;
-				if (sym->keyword == Tok_Key_Line)
+				if ((params.opt->target.version & Features_C23) && eql("true", sym->name))
+					tok.val.integer_s = 1;
+				else if (sym->keyword == Tok_Key_Line)
 					tok.val.integer_s = begin.line;
 			}
 		}
 		appendOneToken(buf, tok, (TokenLocation) {begin});
 	}
+	*params.src = pos;
+	appendOneToken(buf, (Token) {Tok_EOF}, (TokenLocation) {*params.loc});
+}
 
 
+static String includeFilename (ExpansionParams params, TokenList *buf, bool *quoted) {
+	char delimiter;
+	const char *pos = *params.src;
+
+	SourceFile source = params.source;
+	Location begin = params.expansion_start;
+
+	if (pos[0] == '\"') {
+		delimiter = '\"';
+		*quoted = true;
+	} else if (pos[0] == '<') {
+		delimiter = '>';
+		*quoted = false;
+	} else {
+		preprocExpandLine(params, buf);
+		if (buf->count != 2 || buf->tokens[0].kind != Tok_String)
+			lexerror(source, begin, "#include expects <FILENAME> or \"FILENAME\"");
+		*quoted = true;
+		return params.tok->symbols.ptr[buf->tokens[0].val.symbol_idx].name;
+	}
+
+	pos++;
+	const char *start = pos;
+	while (*pos != delimiter) {
+		if (*pos == '\0') {
+			lexerror(source, begin, "#include expects <FILENAME> or \"FILENAME\"");
+		}
+		pos++;
+	}
+	if (pos == start)
+		lexerror(source, begin, "#include expects <FILENAME> or \"FILENAME\"");
+	String res = {pos - start, start};
+	pos++;
+	params.loc->column += pos - start + 1;
+
+	gobbleSpaceToNewline(&pos, params.loc);
 	*params.src = pos;
 
-	appendOneToken(buf, (Token) {Tok_EOF}, (TokenLocation) {*params.loc});
-	resolveSymbolIndicesToPointers(*buf, params.tok->symbols.ptr);
-	Tokenization tok = *main_tokenization;
+	if (pos[0] && pos[0] != '\n')
+		lexerror(source, *params.loc, "extra text after file name");
+	return res;
+}
+
+// If the end argument is NULL, expect the expression to cover the
+// entire line; otherwise, write the end of the line to *end.
+static u64 preprocExpression (ExpansionParams params, TokenList *buf, const Token **end) {
+	Tokenization tok = *params.tok;
 	tok.list = *buf;
 
+	const Token *pos = tok.list.tokens;
 	// TODO Is the strings_arena appropriate here?
-	return evalPreprocExpression(tok, params.strings_arena, params.opt);
+	u64 res = evalPreprocExpression(tok, params.strings_arena, params.opt, &pos);
+	if (end) {
+		*end = pos;
+	} else if (pos->kind != Tok_EOF) {
+		u32 off = pos - tok.list.tokens;
+		Location loc = buf->positions[off].source;
+		lexerror(*params.tok->files.ptr[loc.file_id], loc, "extra tokens after expression");
+	}
+	return res;
 }
 
 

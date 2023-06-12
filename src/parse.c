@@ -197,6 +197,7 @@ static nodiscard bool tryParseTypeBase(Parse *, Type *dest, u8 *storage);
 static nodiscard bool tryParseTypeName(Parse *, Type *dest, u8 *storage);
 static void parseFunction(Parse *, Symbol *name);
 static Value rvalue(Value v, Parse *);
+static bool isStringType(Type typ);
 static Value dereference(Parse *, Value v);
 static Value pointerAdd(IrBuild *, Value lhs, Value rhs, Parse *op_parse, const Token *);
 static bool comparablePointers(Parse *, Value a, Value b);
@@ -398,20 +399,19 @@ static Value immediateIntVal(Parse *, Type typ, u64 val);
 static inline void removeEnumness(Parse *, Type *t);
 
 // TODO May want signed values??
-u64 evalPreprocExpression (Tokenization tokens, Arena *arena, Options *opt) {
+u64 evalPreprocExpression (Tokenization tokens, Arena *arena, Options *opt, const Token **pos) {
 	Parse parse = {
 		.arena = arena,
 		.code_arena = arena,
 		.build = {.block_arena = arena},
 
 		.tokens = tokens,
-		.pos = tokens.list.tokens,
+		.pos = *pos,
 		.opt = opt,
 		.target = opt->target,
 	};
 	Value v = parseExpression(&parse);
-	if (parse.pos->kind != Tok_EOF)
-		parseerror(&parse, parse.pos, "extra tokens after expression");
+	*pos = parse.pos;
 
 	u64 val;
 	if (!tryIntConstant(&parse, v, &val))
@@ -1777,12 +1777,14 @@ static void initializeAutoDefinition (Parse *parse, OrdinaryIdentifier *ord, Typ
 	if (type.kind == Kind_UnsizedArray) {
 		// TODO Zero-initialize non-covered members.
 		u32 *size_constant = &build->ir.ptr[dest.address].alloc.size;
-		type = *type.array.inner;
 
-		if (parse->pos->kind == Tok_String && type.kind == Kind_Basic && type.basic == Int_char) {
+		if (isStringType(type) && (parse->pos->kind == Tok_String || (parse->pos[0].kind == Tok_OpenBrace && parse->pos[1].kind == Tok_String))) {
+			bool open = tryEat(parse, Tok_OpenBrace);
 			// TODO Big constants
 			u32 id = parseStringLiteral(parse);
+			if (open) expect(parse, Tok_CloseBrace);
 			StaticValue *val = &parse->module->ptr[id];
+
 			u32 count = val->value_data.len;
 			*size_constant = count;
 			ord->value.typ.kind = Kind_Array;
@@ -1792,6 +1794,8 @@ static void initializeAutoDefinition (Parse *parse, OrdinaryIdentifier *ord, Typ
 			genStore(build, dest.address, loaded, false);
 			return;
 		}
+
+		type = *type.array.inner;
 		expect(parse, Tok_OpenBrace);
 
 		u32 member_size = typeSize(type, &parse->target);
@@ -1851,17 +1855,18 @@ static void initializeStaticDefinition (Parse *parse, OrdinaryIdentifier *ord, T
 	InitializationDest dest = { .reloc_references = &refs };
 
 	if (type.kind == Kind_UnsizedArray) {
-		type = *type.array.inner;
-
 		static_val->type.kind = Kind_Array;
-		if (parse->pos->kind == Tok_String) {
-			assert(type.kind == Kind_Basic && type.basic == Int_char && "TODO Type checking");
+		if (isStringType(type) && (parse->pos->kind == Tok_String || (parse->pos[0].kind == Tok_OpenBrace && parse->pos[1].kind == Tok_String))) {
+			bool open = tryEat(parse, Tok_OpenBrace);
 			String data = concatenatedStrings(parse);
+			if (open) expect(parse, Tok_CloseBrace);
 
 			static_val->type.array.count = data.len;
 			static_val->value_data = (String) {data.len, data.ptr};
 			return;
 		}
+
+		type = *type.array.inner;
 		expect(parse, Tok_OpenBrace);
 
 		u32 member_size = typeSize(type, &parse->target);
@@ -2008,13 +2013,13 @@ static Value parseIntrinsic (Parse *parse, Intrinsic i) {
 static u64 parseSubInitializer(Parse *parse, InitializationDest dest, u32 offset, Type type, Value current_value, bool designator_started, u64 member_idx);
 static void initializeFromValue(Parse *parse, InitializationDest dest, u32 offset, Type dest_type, Value val);
 
-static bool isString(Type typ) {
+static bool isStringType (Type typ) {
 	if (!isAnyArray(typ)) return false;
 	Type inner = *typ.array.inner;
 	return inner.kind == Kind_Basic && inner.basic == Int_char;
 }
 
-static bool assignmentCompatible(Type src, Type dest) {
+static bool assignmentCompatible (Type src, Type dest) {
 	if (src.kind == Kind_Array && dest.kind == Kind_Array) {
 		return typeCompatible(*src.array.inner, *dest.array.inner);
 	}
@@ -2041,7 +2046,7 @@ static void maybeBracedInitializer (Parse *parse, InitializationDest dest, u32 o
 				return;
 			}
 
-			if (is_scalar || (parse->pos->kind == Tok_String && isString(type))) {
+			if (is_scalar || (parse->pos->kind == Tok_String && isStringType(type))) {
 				parsemsg(Log_Warn, parse, parse->pos-1, "unnecessary braces around scalar initializer");
 				maybeBracedInitializer(parse, dest, offset, type, no_value);
 				expect(parse, Tok_CloseBrace);
@@ -2221,7 +2226,7 @@ static void initializeFromValue (Parse *parse, InitializationDest dest, u32 offs
 	if (val.typ.kind == Kind_Array && type.kind == Kind_Array) {
 		// Generate a load that will be elided in the next step again.
 		// Ewww.
-		// TODO Warn when truncating
+		// TODO Warn when truncating.
 		u32 src_size = typeSize(val.typ, &parse->target);
 		u32 dest_size = typeSize(type, &parse->target);
 		ref = genLoad(build, val.inst, src_size > dest_size ? dest_size : src_size, val.typ.qualifiers & Qualifier_Volatile);

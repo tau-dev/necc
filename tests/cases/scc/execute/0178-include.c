@@ -1,3 +1,4 @@
+//!necc-dbg @ -pp
 #define FILE "0178-include.h"
 #include FILE
 

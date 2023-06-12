@@ -170,7 +170,9 @@ typedef struct Token {
 		double real;
 		Symbol *symbol;
 		char invalid_token;
-		u32 symbol_idx; // Only used by the lexer
+		// Only used by the lexer; this index into tokenization.symbols
+		// gets turned into a Symbol* before parsing.
+		u32 symbol_idx;
 	} val;
 } Token;
 

@@ -77,8 +77,42 @@ static void printError (SourceFile source, Location loc, const char *msg, ...) {
 	exit(1);
 }
 
+
+static SourceFile *readFileData (FILE *f, long count, String path, String filename) {
+	char *data = malloc(sizeof(SourceFile) + count+2);
+	if (!data) return NULL;
+	char *content = data + sizeof(SourceFile);
+
+	size_t got = fread(content, 1, count, f);
+	const char *nullbyte = memchr(content, 0, got);
+	if (nullbyte) {
+		SourceFile source = { filename, path, {got, content} };
+		Location null_loc = {0, 1, 1};
+		printError(source, null_loc, "file should not contain a null byte");
+	} else if (got == (size_t)count) {
+		// Discard BOM.
+		if (count >= 3 && (uchar) content[0] == 0xef && (uchar) content[1] == 0xbb && (uchar) content[2] == 0xbf) {
+			count -= 3;
+			content += 3;
+		}
+		content[count] = 0;
+		content[count+1] = 0; // The lexer sometimes wants to skip two characters at once.
+		SourceFile *result = (SourceFile*) data;
+		*result = (SourceFile) {
+			.name = filename,
+			.path = path,
+			.content = (String) {count, content},
+		};
+		return result;
+	}
+	free(data);
+	return NULL;
+}
+
 SourceFile *readAllAlloc (String path, String filename) {
 	char *filename_z = malloc(path.len + filename.len + 1);
+	SourceFile *result = NULL;
+
 	if (filename_z) {
 		if (path.len)
 			memcpy(filename_z, path.ptr, path.len);
@@ -90,43 +124,14 @@ SourceFile *readAllAlloc (String path, String filename) {
 		if (f) {
 			if (fseek(f, 0, SEEK_END) == 0) {
 				long count = ftell(f);
-				if (count >= 0 && fseek(f, 0, SEEK_SET) == 0) {
-					char *data = malloc(sizeof(SourceFile) + count+2);
-					char *content = data + sizeof(SourceFile);
-					if (data) {
-						size_t got = fread(content, 1, count, f);
-						const char *nullbyte = memchr(content, 0, got);
-						if (nullbyte) {
-							SourceFile source = { filename, path, {got, content} };
-							Location null_loc = {0, 1, 1};
-							printError(source, null_loc, "file should not contain a null byte");
-						} else if (got == (size_t)count) {
-							// Discard BOM.
-							if (count >= 3 && (uchar) content[0] == 0xef && (uchar) content[1] == 0xbb && (uchar) content[2] == 0xbf) {
-								count -= 3;
-								content += 3;
-							}
-							content[count] = 0;
-							content[count+1] = 0; // The lexer sometimes wants to skip two characters at once.
-							free(filename_z);
-							fclose(f);
-							SourceFile *result = (SourceFile*) data;
-							*result = (SourceFile) {
-								.name = filename,
-								.path = path,
-								.content = (String) {count, content},
-							};
-							return result;
-						}
-						free(data);
-					}
-				}
+				if (count >= 0 && fseek(f, 0, SEEK_SET) == 0)
+					result = readFileData(f, count, path, filename);
 			}
 			fclose(f);
 		}
 		free(filename_z);
 	}
-	return NULL;
+	return result;
 }
 
 u64 strHash (String str) {

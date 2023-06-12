@@ -95,4 +95,4 @@ typedef enum {
 } Intrinsic;
 
 typedef struct Tokenization Tokenization;
-u64 evalPreprocExpression(Tokenization tokens, Arena *arena, Options *opt);
+u64 evalPreprocExpression(Tokenization tokens, Arena *arena, Options *opt, const Token **pos);

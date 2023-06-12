@@ -382,7 +382,8 @@ static inline bool isAlnum (char c) {
 	return isAlpha(c) || isDigit(c);
 }
 
-
+// PERFORMANCE This is another absurd 14% of run time. Don't see a great
+// way to accelerate it tho...
 static void emitType (Codegen *c, Type type, u32 id) {
 	Type res = resolveType(type);
 	switch (res.kind) {
