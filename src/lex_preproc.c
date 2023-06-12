@@ -1238,7 +1238,7 @@ static MacroToken concatenate (const ExpansionParams ex, Token first, u32 *marke
 }
 
 static Token stringify (Arena *arena, SymbolList *symbols, TokenList arg) {
-	u32 data_len = 0; // To account for the trailing \0 emitted by snprintf
+	u32 data_len = 0;
 	for (u32 i = 0; i < arg.count; i++)
 		data_len += strPrintTokenLen(arg.tokens[i], symbols->ptr) + arg.tokens[i].preceded_by_space;
 
@@ -1246,12 +1246,12 @@ static Token stringify (Arena *arena, SymbolList *symbols, TokenList arg) {
 	char *c = start;
 	char *end = start + data_len + 1;
 	for (u32 i = 0; i < arg.count; i++) {
-		if (arg.tokens[i].preceded_by_space)
+		if (i > 0 && arg.tokens[i].preceded_by_space)
 			printto(&c, end, " ");
 		strPrintToken(&c, end, symbols->ptr, arg.tokens[i]);
 	}
 
-	u32 idx = getSymbolId(symbols, (String) {data_len, start});
+	u32 idx = getSymbolId(symbols, (String) {c-start, start});
 	return (Token) {Tok_String, .val.symbol_idx = idx};
 }
 
@@ -1782,21 +1782,41 @@ u32 strPrintTokenLen (Token t, Symbol *syms) {
 	}
 }
 
+static void strPrintChar (char **dest, u32 c) {
+	char de_escaped = de_escape_codes[c];
+	// TODO Handle multibyte characters.
+	if (de_escaped) {
+		**dest = '\\';
+		++*dest;
+		**dest = de_escaped;
+	} else {
+		**dest = c;
+	}
+	++*dest;
+}
+
 void strPrintToken (char **dest, const char *end, Symbol *symbols, Token t) {
 	switch (t.kind) {
 	case Tok_Invalid:
 		**dest = t.val.invalid_token;
-		(*dest)++;
+		++*dest;
 		return;
 	case Tok_PreprocDirective:
-		printto(dest, end, "#");
+		**dest = '#';
+		++*dest;
 		FALLTHROUGH;
 	case Tok_Identifier:
 		printto(dest, end, "%.*s", STRING_PRINTAGE(symbols[t.val.symbol_idx].name));
 		return;
-	case Tok_String:
-		printto(dest, end, "\"%.*s\"", STRING_PRINTAGE(symbols[t.val.symbol_idx].name));
-		return;
+	case Tok_String: {
+		**dest = '\"';
+		++*dest;
+		String data = symbols[t.val.symbol_idx].name;
+		for (u32 i = 0; i < data.len; i++)
+			strPrintChar(dest, data.ptr[i]);
+		**dest = '\"';
+		++*dest;
+	} return;
 	case Tok_Real:
 		printto(dest, end, "%f", t.val.real);
 		return;
@@ -1805,7 +1825,11 @@ void strPrintToken (char **dest, const char *end, Symbol *symbols, Token t) {
 		return;
 	case Tok_Char:
 		// TODO Handle multibyte characters.
-		printto(dest, end, "'%c'", (int) t.val.integer_s);
+		**dest = '\'';
+		++*dest;
+		strPrintChar(dest, t.val.integer_s);
+		**dest = '\'';
+		++*dest;
 		return;
 	default:
 		printto(dest, end, "%s", tokenName(t.kind));
