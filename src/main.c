@@ -99,9 +99,9 @@ const char *help_string = "Usage:\n"
 	"\n"
 	"Options:\n"
 	" -v/-version     Print the compiler version.\n"
-	" -g/-debug       Emit debug information (TODO).\n"
+	" -g/-debug       Emit debug information.\n"
 	" -std <version>  Select the used version of the C standard. Options:\n"
-	"                   c89, c99, c11/c17, c23/latest, gnu, ms, lax.\n"
+	"                   c89/ansi, c99, c11/c17, c23/latest, gnu, ms, lax.\n"
 	" -I <path>       Add <path> as a normal include directory—these are searched by #include directive with quotes, but not with angle brackets.\n"
 	" -stdinc <path>  Add <path> as a standard-library-headers include directory—searched by either kind of directive, after normal include directories.\n"
 	"                   Each is searched last-to-first.\n"
@@ -140,6 +140,7 @@ const char *help_string = "Usage:\n"
 	"\n";
 
 static Name versions[] = {
+	{"ansi", Version_C89},
 	{"c89", Version_C89},
 	{"c99", Version_C99},
 	{"c11", Version_C17},
@@ -167,7 +168,7 @@ bool had_output = false;
 static const char *stdout_marker = "<stdout>";
 
 static void setOut (const char **dest, char *f) {
-	static bool had_stdout = false; // TODO Inits!
+	static bool had_stdout = false;
 	if (f) {
 		*dest = f;
 	} else {

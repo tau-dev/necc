@@ -693,7 +693,7 @@ static void parseStatement (Parse *parse, bool *had_non_declaration) {
 
 		expect(parse, Tok_OpenParen);
 
-		// TODO Limit this to declaration or expression
+		// TODO Limit this to declaration or expression (or only expression before C99).
 		parseStatement(parse, had_non_declaration);
 
 		Block *enclosing_head = parse->current_loop_head;
@@ -824,7 +824,7 @@ static void parseStatement (Parse *parse, bool *had_non_declaration) {
 	} break;
 	case Tok_Semicolon:
 		parse->pos++;
-		break; // TODO Does this count as a non-declaration??
+		break;
 	default: {
 		if (tryEatStaticAssert(parse))
 			break;
@@ -883,11 +883,10 @@ static void parseStatement (Parse *parse, bool *had_non_declaration) {
 	} break;
 	}
 
-	// TODO This is broken.
 	if (is_declaration && *had_non_declaration)
 		requires(parse, "declarations after the begnning of the block", Features_C99);
 	else
-		*had_non_declaration = true;
+		*had_non_declaration = !is_declaration;
 }
 
 
@@ -1602,6 +1601,7 @@ static void skipOverCommaOrToCloseParen (Parse *parse, const Token *opening_pare
 }
 
 static Value parseExprBase (Parse *parse) {
+	static Type void_type = {Kind_Void};
 	IrBuild *build = &parse->build;
 	Token t = *parse->pos;
 	parse->pos++;
@@ -1615,6 +1615,11 @@ static Value parseExprBase (Parse *parse) {
 	case Tok_Integer:
 	case Tok_Char:
 		return immediateIntVal(parse, (Type) {Kind_Basic, .basic = t.literal_type}, t.val.integer_u);
+	case Tok_Key_True:
+	case Tok_Key_False:
+		return immediateIntVal(parse, (Type) {Kind_Basic, .basic = Int_int}, t.kind == Tok_Key_True);
+	case Tok_Key_Nullptr: // Not exactly correct—nullptr has its own type.
+		return immediateIntVal(parse, (Type) {Kind_Pointer, .pointer = &void_type}, 0);
 	case Tok_Real: {
 		IrRef inst = genImmediateReal(build, t.val.real, 8);
 		return (Value) {{Kind_Float, .real = Float_Double}, inst};
@@ -2056,6 +2061,8 @@ static void maybeBracedInitializer (Parse *parse, InitializationDest dest, u32 o
 			while (true) {
 				const Token *primary = parse->pos;
 				bool designated = parse->pos->kind == Tok_Dot || parse->pos->kind == Tok_OpenBracket;
+				if (designated)
+					requires(parse, "designated initializers", Features_C99);
 
 				if (member_idx == MEMBERS_FULL && !designated)
 					parseerror(parse, primary, "too much initialization");

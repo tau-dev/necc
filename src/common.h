@@ -10,6 +10,31 @@ typedef enum {
 	I128 = 16,
 } PrimitiveSize;
 
+
+typedef enum {
+// 	Features_C89 = 0x1,
+	Features_C99 = 0x2,
+	Features_C11 = 0x4,
+	Features_C23 = 0x8,
+	Features_GNU_Extensions = 0x10,
+	Features_MSVC_Extensions = 0x20,
+
+	Features_OldStyleDefinitions = 0x40,
+	Features_DefaultInt = 0x80,
+} Features;
+
+typedef enum {
+	Version_C89       = Features_OldStyleDefinitions | Features_DefaultInt,
+	Version_C99       = Features_C99 | Features_OldStyleDefinitions,
+	Version_C17       = Features_C99 | Features_C11 | Features_OldStyleDefinitions,
+	Version_C23       = Features_C99 | Features_C11 | Features_C23,
+	Version_GNU       = Version_C17 | Features_GNU_Extensions | Features_DefaultInt,
+	Version_MSVC      = Version_C17 | Features_MSVC_Extensions,
+	Version_Lax       = 0x7fffffff,
+} Version;
+const char *versionName(Version);
+
+
 typedef struct Symbol Symbol;
 
 typedef struct Target {

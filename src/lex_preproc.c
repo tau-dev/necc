@@ -92,7 +92,6 @@ Keyword standard_keywords[] = {
 	{"struct", Tok_Key_Struct},
 	{"enum", Tok_Key_Enum},
 	{"union", Tok_Key_Union},
-	{"_Bool", Tok_Key_Bool},
 	{"char", Tok_Key_Char},
 	{"int", Tok_Key_Int},
 	{"void", Tok_Key_Void},
@@ -105,7 +104,6 @@ Keyword standard_keywords[] = {
 	{"unsigned", Tok_Key_Unsigned},
 	{"const", Tok_Key_Const},
 	{"volatile", Tok_Key_Volatile},
-	{"restrict", Tok_Key_Restrict},
 	{"_Atomic", Tok_Key_Atomic},
 	{"typedef", Tok_Key_Typedef},
 	{"auto", Tok_Key_Auto},
@@ -126,6 +124,27 @@ Keyword standard_keywords[] = {
 
 	{"__FILE__", Tok_Key_File},
 	{"__LINE__", Tok_Key_Line},
+};
+
+Keyword c99_keywords[] = {
+	{"_Bool", Tok_Key_Bool},
+	{"restrict", Tok_Key_Restrict},
+};
+
+Keyword c23_keywords[] = {
+	{"alignof", Tok_Key_Alignof},
+	{"alignas", Tok_Key_Alignas},
+	{"bool", Tok_Key_Bool},
+	{"constexpr", Tok_Key_Constexpr},
+	{"false", Tok_Key_False},
+	{"true", Tok_Key_True},
+	{"nullptr", Tok_Key_Nullptr},
+	{"static_assert", Tok_Key_StaticAssert},
+	{"thread_local", Tok_Key_Threadlocal},
+	{"_BitInt", Tok_Key_Bitint},
+	{"_Decimal32", Tok_Key_Decimal32},
+	{"_Decimal64", Tok_Key_Decimal64},
+	{"_Decimal128", Tok_Key_Decimal128},
 };
 
 Keyword special_identifiers[] = {
@@ -591,7 +610,12 @@ static const char *defineMacro(Arena *arena, Arena *generated_strings, SymbolLis
 static void predefineMacros(Arena *arena, Arena *genrated_strings, SymbolList *, FileList *, StringList to_define, SourceKind);
 static void resolveSymbolIndicesToPointers(TokenList t, Symbol *syms);
 static void markMacroDecl(FILE *dest, SourceFile source, Location, String macro_name);
+static void loadKeywords(Tokenization *toks, Keyword *keys, u32 count);
 
+static void loadKeywords (Tokenization *tok, Keyword *keys, u32 count) {
+	for (u32 i = 0; i < count; i++)
+		getSymbol(&tok->symbols, zstr(keys[i].name))->keyword = keys[i].key;
+}
 
 Tokenization lex (Arena *generated_strings, String filename, LexParams params) {
 	typedef struct {
@@ -608,8 +632,12 @@ Tokenization lex (Arena *generated_strings, String filename, LexParams params) {
 	MacroStack macro_expansion_stack = {0};
 	u32 if_depth = 0;
 
-	for (u32 i = 0; i < ARRSIZE(standard_keywords); i++)
-		getSymbol(&t.symbols, zstr(standard_keywords[i].name))->keyword = standard_keywords[i].key;
+	loadKeywords(&t, standard_keywords, ARRSIZE(standard_keywords));
+	if (params.options->target.version & Features_C99)
+		loadKeywords(&t, c99_keywords, ARRSIZE(c99_keywords));
+	if (params.options->target.version & Features_C23)
+		loadKeywords(&t, c23_keywords, ARRSIZE(c23_keywords));
+
 	for (u32 i = 0; i < ARRSIZE(intrinsics); i++) {
 		Symbol *s = getSymbol(&t.symbols, zstr(intrinsics[i].name));
 		s->directive = intrinsics[i].key;
@@ -1009,7 +1037,7 @@ static bool expandInto (const ExpansionParams ex, TokenList *dest, bool is_argum
 			if (t.tok.kind == Tok_EOF) {
 				if (is_argument) {
 					// TODO Use location of the beginning of the invocation.
-					expansionError(ex, t.loc,
+					expansionError(ex, ex.expansion_start,
 							"missing closing parenthesis of macro invocation");
 				} else {
 					return false;
@@ -1627,17 +1655,34 @@ static void preprocExpandLine (ExpansionParams params, TokenList *buf) {
 						lexerror(params.source, *params.loc, "missing closing parenthesis");
 				}
 			} else if (sym->macro) {
-				if (sym->macro->parameters.len > 0)
-					lexerror(params.source, *params.loc, "TODO Expand function-like macros in preprocessor constant expressions");
+				TokenList *arguments = NULL;
+				ExpansionParams sub = params;
+				sub.src = &pos;
 
-				PUSH(*params.stack, ((Replacement) {sym->macro}));
-				expandInto(params, buf, false);
+				if (sym->macro->is_function_like) {
+					gobbleSpaceToNewline(&pos, params.loc);
+					if (pos[0] == '(') {
+						pos++;
+						params.loc->column++;
+						arguments = takeArguments(sub, begin, sym->macro); // Freed by expand_into.
+					} else {
+						goto non_macro_ident;
+					}
+				}
+
+				PUSH(*params.stack, ((Replacement) {
+					sym->macro,
+					.loc = begin,
+					.toks = arguments,
+				}));
+				expandInto(sub, buf, false);
 				continue;
 			} else {
+				non_macro_ident:
 				tok.kind = Tok_Integer;
 				tok.literal_type = Int_int;
 				tok.val.integer_s = 0;
-				if ((params.opt->target.version & Features_C23) && eql("true", sym->name))
+				if (sym->keyword == Tok_Key_True)
 					tok.val.integer_s = 1;
 				else if (sym->keyword == Tok_Key_Line)
 					tok.val.integer_s = begin.line;

@@ -228,8 +228,6 @@ void printto (char **insert, const char *end, const char *fmt, ...) {
 
 
 static u32 find (const StringMap *map, u64 hash, String str) {
-	assert(str.ptr);
-	assert(str.len);
 	if (map->used == 0)
 		return FOUND_NONE;
 

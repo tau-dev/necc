@@ -58,6 +58,15 @@ typedef enum {
 	Tok_Key_Noreturn,
 	Tok_Key_StaticAssert,
 
+	Tok_Key_Constexpr,
+	Tok_Key_False,
+	Tok_Key_True,
+	Tok_Key_Nullptr,
+	Tok_Key_Bitint,
+	Tok_Key_Decimal32,
+	Tok_Key_Decimal64,
+	Tok_Key_Decimal128,
+
 	Tok_Key_File,
 	Tok_Key_Line,
 

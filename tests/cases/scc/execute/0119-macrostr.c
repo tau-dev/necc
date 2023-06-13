@@ -1,3 +1,4 @@
+//!necc-dbg @ -run
 #define B "b"
 
 char s[] = "a" B "c";
