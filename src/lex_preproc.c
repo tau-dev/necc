@@ -512,26 +512,47 @@ static Token getToken (Arena *str_arena, SourceFile source, Location *loc, Symbo
 		// like decimal-type suffixes and digit separators anyways.
 		const char *start = pos;
 
-		bool is_hex = false;
+// 		bool is_hex = false;
 		if (pos[0] == '0' && pos[1] == 'x') {
-			is_hex = true;
+// 			is_hex = true;
 			pos += 2;
+			while (isHexDigit(*pos)) pos++;
+			if (*pos == '.' || *pos == 'p' || *pos == 'P') {
+				if (*pos == '.') {
+					pos++;
+					while (isHexDigit(*pos))
+						pos++;
+				}
+				if (*pos != 'p' && *pos != 'P')
+					lexerror(source, *loc, "hexadecimal floating point constant must have a 'p' suffix");
+				pos++;
+				if ((*pos == '-' || *pos == '+') && isDigit(pos[1]))
+					pos++;
+				while (isDigit(*pos)) pos++;
+				goto floating;
+			} else {
+				goto integer;
+			}
+		} else {
+			while (isDigit(*pos)) pos++;
 		}
 
-		while (isDigit(*pos) || (is_hex && isHexDigit(*pos)))
-			pos++;
 
 		if (*pos == '.' || *pos == 'e' || *pos == 'E' || *pos == 'f' || *pos == 'F') {
-			pos++;
-			while (isDigit(*pos))
+			if (*pos == '.') {
 				pos++;
-			if (*pos == 'e' || *pos == 'E')
+				while (isDigit(*pos))
+					pos++;
+			}
+			if (*pos == 'e' || *pos == 'E') {
 				pos++;
-			if ((*pos == '-' || *pos == '+') && isDigit(pos[1]))
-				pos++;
+				// FIXME: what should happen on missing exponent digits?
+				if ((*pos == '-' || *pos == '+') && isDigit(pos[1]))
+					pos++;
+				while (isDigit(*pos)) pos++;
+			}
 
-			while (isDigit(*pos))
-				pos++;
+			floating:
 			tok = (Token) {
 				Tok_Real,
 				.literal_type = Float_Double,
@@ -541,8 +562,12 @@ static Token getToken (Arena *str_arena, SourceFile source, Location *loc, Symbo
 			if (*pos == 'f' || *pos == 'F') {
 				tok.literal_type = Float_Single,
 				pos++;
+			} else if (*pos == 'l' || *pos == 'L') {
+				tok.literal_type = Float_LongDouble,
+				pos++;
 			}
 		} else {
+			integer:
 			tok = (Token) {Tok_Integer,
 				.literal_type = Int_int,
 				.val.integer_s = strtoll(start, NULL, 0)

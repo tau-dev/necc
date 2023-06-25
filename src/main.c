@@ -1,6 +1,5 @@
 #include <stdio.h>
 #include <stdbool.h>
-#include <limits.h>
 
 // TODO The compiler itself should be completely platform-independent.
 // Enable -run platform-dependently.
@@ -8,7 +7,6 @@
 
 #include "parse.h"
 #include "arena.h"
-#include "ir_gen.h"
 #include "ansi.h"
 #include "analysis.h"
 #include "emit.h"
@@ -374,6 +372,7 @@ int main (int argc, char **args) {
 		PUSH(paths.sys_include_dirs, zstr(MUSL_DIR "/arch/generic/"));
 		PUSH(paths.sys_include_dirs, zstr(MUSL_DIR "/obj/include/"));
 		PUSH(paths.sys_include_dirs, zstr(MUSL_DIR "/include/"));
+		PUSH(paths.sys_include_dirs, zstr("/usr/include/"));
 	}
 	PUSH(paths.user_include_dirs, input_directory);
 

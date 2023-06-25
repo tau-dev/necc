@@ -4,8 +4,6 @@
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdarg.h>
-#include <ctype.h>
-#include <signal.h>
 
 #include "ir_gen.h"
 #include "ansi.h"

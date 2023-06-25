@@ -1,6 +1,5 @@
 #include "analysis.h"
 #include "ir_gen.h"
-#include "emit.h"
 
 
 /*

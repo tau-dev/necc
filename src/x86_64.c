@@ -1078,7 +1078,7 @@ static void emitInstForward(Codegen *c, IrRef i) {
 		if (stack_memory)
 			emit(c, " add rsp, I", stack_memory);
 
-		if (!memory_return) {
+		if (!memory_return && inst.size) {
 			bool bigg = inst.size > 8;
 			u32 reduced = bigg ? 8 : inst.size;
 			emit(c, " mov Z [rsp+I], R", sizeOp(reduced), c->storage[i], registerSized(RAX, reduced));
@@ -1147,6 +1147,7 @@ static inline u16 sizeOfRegister (Register reg) {
 }
 
 static inline Storage registerSize (u16 size) {
+	assert(size);
 	if (size == 1)
 		return RSIZE_BYTE;
 	if (size == 2)
