@@ -172,6 +172,72 @@ Keyword intrinsics[] = {
 	{"__builtin_alloca", Intrinsic_Alloca},
 };
 
+#define MAX_TOKENS 4096
+const char *token_names[MAX_TOKENS] = {
+	[Tok_Invalid] = "invalid token",
+
+	[Tok_Identifier] = "identifier",
+	[Tok_String] = "string-literal",
+	[Tok_Real] = "floating-point-literal",
+	[Tok_Integer] = "int-literal",
+	[Tok_Char] = "char-literal",
+
+	[Tok_PreprocDirective] = "preprocessor-directive",
+	[Tok_PreprocConcatenate] = "##",
+
+	[Tok_OpenParen] = "(",
+	[Tok_CloseParen] = ")",
+	[Tok_OpenBrace] = "{",
+	[Tok_CloseBrace] = "}",
+	[Tok_OpenBracket] = "[",
+	[Tok_CloseBracket] = "]",
+
+	[Tok_Semicolon] = ";",
+	[Tok_Comma] = ",",
+	[Tok_Colon] = ":",
+	[Tok_Dot] = ".",
+	[Tok_TripleDot] = "...",
+
+	[Tok_Arrow] = "->",
+	[Tok_Question] = "?",
+	[Tok_Bang] = "!",
+	[Tok_Bang | Tok_EQUALED] = "!=",
+	[Tok_Equal] = "=",
+	[Tok_Equal | Tok_EQUALED] = "==",
+	[Tok_Plus] = "+",
+	[Tok_DoublePlus] = "++",
+	[Tok_Plus | Tok_EQUALED] = "+=",
+	[Tok_Minus] = "-",
+	[Tok_DoubleMinus] = "--",
+	[Tok_Minus | Tok_EQUALED] = "-=",
+	[Tok_Asterisk] = "*",
+	[Tok_Asterisk | Tok_EQUALED] = "*=",
+	[Tok_Slash] = "/",
+	[Tok_Slash | Tok_EQUALED] = "/=",
+	[Tok_Percent] = "%",
+	[Tok_Percent | Tok_EQUALED] = "%=",
+	[Tok_Less] = "<",
+	[Tok_Less | Tok_EQUALED] = "<=",
+	[Tok_DoubleLess] = "<<",
+	[Tok_DoubleLess | Tok_EQUALED] = "<<=",
+	[Tok_Greater] = ">",
+	[Tok_Greater | Tok_EQUALED] = ">=",
+	[Tok_DoubleGreater] = ">>",
+	[Tok_DoubleGreater | Tok_EQUALED] = ">>=",
+	[Tok_Ampersand] = "&",
+	[Tok_DoubleAmpersand] = "&&",
+	[Tok_Ampersand | Tok_EQUALED] = "&=",
+	[Tok_Pipe] = "|",
+	[Tok_DoublePipe] = "||",
+	[Tok_Pipe | Tok_EQUALED] = "|=",
+	[Tok_Hat] = "^",
+	[Tok_Hat | Tok_EQUALED] = "^=",
+	[Tok_Tilde] = "~",
+	[Tok_Tilde | Tok_EQUALED] = "~=",
+
+	[Tok_EOF] = "end of file",
+};
+
 enum Directive {
 	Directive_If = 1,
 	Directive_Ifdef,
@@ -436,95 +502,151 @@ static Token getToken (Arena *str_arena, SourceFile source, Location *loc, Symbo
 		// TODO Error reporting
 		if (pos[0] != '\'') unreachable;
 	} break;
-	default:
-		if (isAlpha(pos[0])) {
-			if (pos[0] == 'L' && pos[1] == '\'') {
+
+	case '0': case '1': case '2': case '3': case '4':
+	case '5': case '6': case '7': case '8': case '9':
+	start_number: {
+		// Could just use strtod/strtol for number parsing, but the
+		// standard library functions have a pretty inefficient
+		// interface and I will have to manually handle C23 stuff
+		// like decimal-type suffixes and digit separators anyways.
+		const char *start = pos;
+
+		bool is_hex = false;
+		if (pos[0] == '0' && pos[1] == 'x') {
+			is_hex = true;
+			pos += 2;
+		}
+
+		while (isDigit(*pos) || (is_hex && isHexDigit(*pos)))
+			pos++;
+
+		if (*pos == '.' || *pos == 'e' || *pos == 'E' || *pos == 'f' || *pos == 'F') {
+			pos++;
+			while (isDigit(*pos))
 				pos++;
-				goto char_literal;
+			if (*pos == 'e' || *pos == 'E')
+				pos++;
+			if ((*pos == '-' || *pos == '+') && isDigit(pos[1]))
+				pos++;
+
+			while (isDigit(*pos))
+				pos++;
+			tok = (Token) {
+				Tok_Real,
+				.literal_type = Float_Double,
+				.val.real = strtod(start, NULL)
+			};
+
+			if (*pos == 'f' || *pos == 'F') {
+				tok.literal_type = Float_Single,
+				pos++;
 			}
-			const char *start = pos;
-			while (isAlnum(*pos))
+		} else {
+			tok = (Token) {Tok_Integer,
+				.literal_type = Int_int,
+				.val.integer_s = strtoll(start, NULL, 0)
+			};
+
+			bool is_unsigned = pos[0] == 'u' || pos[0] == 'U';
+			if (is_unsigned)
 				pos++;
-
-			String word = {pos - start, start};
-			tok = (Token) {Tok_Identifier, .val.symbol_idx = getSymbolId(syms, word)};
-
-			pos--;
-		} else if (isDigit(pos[0])) start_number: {
-			// Could just use strtod/strtol for number parsing, but the
-			// standard library functions have a pretty inefficient
-			// interface and I will have to manually handle C23 stuff
-			// like decimal-type suffixes and digit separators anyways.
-			const char *start = pos;
-
-			bool is_hex = false;
-			if (pos[0] == '0' && pos[1] == 'x') {
-				is_hex = true;
-				pos += 2;
-			}
-
-			while (isDigit(*pos) || (is_hex && isHexDigit(*pos)))
+			if (pos[0] == 'l' || pos[0] == 'L') {
 				pos++;
-
-			if (*pos == '.' || *pos == 'e' || *pos == 'E' || *pos == 'f' || *pos == 'F') {
-				pos++;
-				while (isDigit(*pos))
-					pos++;
-				if (*pos == 'e' || *pos == 'E')
-					pos++;
-				if ((*pos == '-' || *pos == '+') && isDigit(pos[1]))
-					pos++;
-
-				while (isDigit(*pos))
-					pos++;
-				tok = (Token) {
-					Tok_Real,
-					.literal_type = Float_Double,
-					.val.real = strtod(start, NULL)
-				};
-
-				if (*pos == 'f' || *pos == 'F') {
-					tok.literal_type = Float_Single,
-					pos++;
-				}
-			} else {
-				tok = (Token) {Tok_Integer,
-					.literal_type = Int_int,
-					.val.integer_s = strtoll(start, NULL, 0)
-				};
-
-				bool is_unsigned = pos[0] == 'u' || pos[0] == 'U';
-				if (is_unsigned)
-					pos++;
+				tok.literal_type = Int_long;
 				if (pos[0] == 'l' || pos[0] == 'L') {
 					pos++;
-					tok.literal_type = Int_long;
-					if (pos[0] == 'l' || pos[0] == 'L') {
-						pos++;
-						tok.literal_type = Int_longlong;
-					}
-				}
-				if (pos[0] == 'u' || pos[0] == 'U') {
-					is_unsigned = true;
-					pos++;
-				}
-				// FIXME Use platform-correct integer sizes.
-				if (is_unsigned) {
-					if (tok.literal_type == Int_int && tok.val.integer_s > UINT32_MAX)
-						tok.literal_type = Int_long;
-					tok.literal_type |= Int_unsigned;
-				} else {
-					// ???
-					if (tok.literal_type == Int_int && tok.val.integer_s > UINT32_MAX)
-						tok.literal_type = Int_long;
+					tok.literal_type = Int_longlong;
 				}
 			}
-
-			pos--;
-		} else {
-			tok.kind = Tok_Invalid;
-			tok.val.invalid_token = *pos;
+			if (pos[0] == 'u' || pos[0] == 'U') {
+				is_unsigned = true;
+				pos++;
+			}
+			// FIXME Use platform-correct integer sizes.
+			if (is_unsigned) {
+				if (tok.literal_type == Int_int && tok.val.integer_s > UINT32_MAX)
+					tok.literal_type = Int_long;
+				tok.literal_type |= Int_unsigned;
+			} else {
+				// ???
+				if (tok.literal_type == Int_int && tok.val.integer_s > UINT32_MAX)
+					tok.literal_type = Int_long;
+			}
 		}
+
+		pos--;
+	} break;
+	case 'L':
+	case 'u':
+	case 'U':
+		if (pos[1] == '\'') {
+			pos++;
+			goto char_literal;
+		}
+		FALLTHROUGH;
+	case '_':
+	case 'A':
+	case 'B':
+	case 'C':
+	case 'D':
+	case 'E':
+	case 'F':
+	case 'G':
+	case 'H':
+	case 'I':
+	case 'J':
+	case 'K':
+	case 'M':
+	case 'N':
+	case 'O':
+	case 'P':
+	case 'Q':
+	case 'R':
+	case 'S':
+	case 'T':
+	case 'V':
+	case 'W':
+	case 'X':
+	case 'Y':
+	case 'Z':
+	case 'a':
+	case 'b':
+	case 'c':
+	case 'd':
+	case 'e':
+	case 'f':
+	case 'g':
+	case 'h':
+	case 'i':
+	case 'j':
+	case 'k':
+	case 'l':
+	case 'm':
+	case 'n':
+	case 'o':
+	case 'p':
+	case 'q':
+	case 'r':
+	case 's':
+	case 't':
+	case 'v':
+	case 'w':
+	case 'x':
+	case 'y':
+	case 'z': {
+		const char *start = pos;
+		while (isAlnum(*pos))
+			pos++;
+
+		String word = {pos - start, start};
+		tok = (Token) {Tok_Identifier, .val.symbol_idx = getSymbolId(syms, word)};
+
+		pos--;
+	} break;
+	default:
+		tok.kind = Tok_Invalid;
+		tok.val.invalid_token = *pos;
 	}
 	pos++;
 	if (tok.kind >= Tok_Equalable_Start && pos[0] == '=') {
@@ -564,7 +686,6 @@ typedef struct Replacement {
 	u32 pos;
 	// If mac is NULL, this is an expanded buffer to be read from.
 	// Otherwise, this is an array of the function-like macro's arguments.
-	// STYLE The files field of the Tokenization is not used here.
 	TokenList *toks;
 	Location loc;
 	bool followed_by_concat;
@@ -613,8 +734,11 @@ static void markMacroDecl(FILE *dest, SourceFile source, Location, String macro_
 static void loadKeywords(Tokenization *toks, Keyword *keys, u32 count);
 
 static void loadKeywords (Tokenization *tok, Keyword *keys, u32 count) {
-	for (u32 i = 0; i < count; i++)
-		getSymbol(&tok->symbols, zstr(keys[i].name))->keyword = keys[i].key;
+	for (u32 i = 0; i < count; i++) {
+		Keyword key = keys[i];
+		token_names[key.key] = key.name;
+		getSymbol(&tok->symbols, zstr(key.name))->keyword = key.key;
+	}
 }
 
 Tokenization lex (Arena *generated_strings, String filename, LexParams params) {
@@ -983,8 +1107,10 @@ static bool expandInto (const ExpansionParams ex, TokenList *dest, bool is_argum
 	// The standard says that arguments should be found before they are
 	// expanded, but that would mean having to look at each argument
 	// token twice. This function expands everything immediately, so it
-	// needs to take care that the parens and commas that delimit an
-	// argument do not come from an inner macro expansion.
+	// needs to take care that the comma or paren that delimits an
+	// argument does not come from an inner macro expansion
+	// (collapseMacroStack sees to it that no parenthesis is stolen from
+	// an enclosing call either (TODO)).
 	// The following variable denotes the stack level above the lowest
 	// macro visited (or an argument Tokenization above that), above
 	// which parens do not count towards paren_depth.
@@ -996,40 +1122,46 @@ static bool expandInto (const ExpansionParams ex, TokenList *dest, bool is_argum
 		MacroToken t = takeToken(ex, &level_of_argument_source);
 
 		if (t.tok.kind == Tok_Identifier) {
+			retry:;
 			Macro *mac;
 			if ((mac = ex.tok->symbols.ptr[t.tok.val.symbol_idx].macro) != NULL
 				&& !t.tok.painted)
 			{
 				if (mac->being_replaced) {
 					t.tok.painted = 1;
-					goto non_macro_ident;
-				}
-				TokenList *arguments = NULL;
-				if (mac->is_function_like) {
-					collapseMacroStack(ex.stack, &level_of_argument_source);
-					MacroToken paren = takeToken(ex, &level_of_argument_source);
-					if (paren.tok.kind != Tok_OpenParen) {
-						appendOneToken(dest, t.tok, (TokenLocation) {
-							.source = t.loc, .macro = ex.expansion_start,
-						});
-						t = paren;
-						if (paren.tok.kind == Tok_Identifier)
-							goto non_macro_ident;
-						else
-							goto non_macro;
+				} else {
+					TokenList *arguments = NULL;
+					if (mac->is_function_like) {
+						collapseMacroStack(ex.stack, &level_of_argument_source);
+						MacroToken paren = takeToken(ex, &level_of_argument_source);
+						if (paren.tok.kind != Tok_OpenParen) {
+							// FIXME Cannot convert to keyword here: the
+							// token may still form a valid macro call
+							// in an enclosing expansion.
+							// Keywordification can only happen at the
+							// lexer top-level.
+							resolveIdentToKeyword(ex.tok, &t.tok, ex.expansion_start, ex.source.name);
+							appendOneToken(dest, t.tok, (TokenLocation) {
+								.source = t.loc, .macro = ex.expansion_start,
+							});
+							t = paren;
+							if (paren.tok.kind == Tok_Identifier)
+								goto retry;
+							else
+								goto non_macro;
+						}
+						arguments = takeArguments(ex, t.loc, mac);
 					}
-					arguments = takeArguments(ex, t.loc, mac);
+					mac->being_replaced = true;
+					PUSH(*ex.stack, ((Replacement) {
+						mac,
+						.loc = t.loc,
+						.toks = arguments,
+					}));
+					collapseMacroStack(ex.stack, &level_of_argument_source);
+					continue;
 				}
-				mac->being_replaced = true;
-				PUSH(*ex.stack, ((Replacement) {
-					mac,
-					.loc = t.loc,
-					.toks = arguments,
-				}));
-				collapseMacroStack(ex.stack, &level_of_argument_source);
-				continue;
 			}
-			non_macro_ident:;
 
 			resolveIdentToKeyword(ex.tok, &t.tok, ex.expansion_start, ex.source.name);
 		} else {
@@ -1083,6 +1215,7 @@ static TokenList *takeArguments (const ExpansionParams ex, Location invocation_l
 		u32 dummy_mark = 0;
 		collapseMacroStack(ex.stack, &dummy_mark);
 		MacroToken t = takeToken(ex, &dummy_mark);
+		assert(t.tok.kind != Tok_EOF);
 		if (t.tok.kind != Tok_CloseParen) {
 			expansionError(ex, invocation_loc,
 					"too many arguments provided");
@@ -1636,6 +1769,7 @@ static void preprocExpandLine (ExpansionParams params, TokenList *buf) {
 		Token tok = getToken(str_arena, params.source, params.loc, &params.tok->symbols, &pos);
 		if (tok.kind == Tok_Identifier) {
 			Symbol *sym = &params.tok->symbols.ptr[tok.val.symbol_idx];
+			// 6.10.1-13
 			// TODO Implement __has_include, __has_embed, __has_c_attribute.
 			if (eql("defined", sym->name)) {
 				tok = getTokenSpaced(str_arena, params.source, params.loc, &params.tok->symbols, &pos);
@@ -1760,72 +1894,8 @@ static u64 preprocExpression (ExpansionParams params, TokenList *buf, const Toke
 
 // === Helpers ===
 
-
 // TODO Come up with a better system for nice highlighting.
-const char *token_names[] = {
-	[Tok_Invalid] = "invalid token",
 
-	[Tok_Identifier] = "identifier",
-	[Tok_String] = "string-literal",
-	[Tok_Real] = "floating-point-literal",
-	[Tok_Integer] = "int-literal",
-	[Tok_Char] = "char-literal",
-
-	[Tok_PreprocDirective] = "preprocessor-directive",
-	[Tok_PreprocConcatenate] = "##",
-
-	[Tok_OpenParen] = "(",
-	[Tok_CloseParen] = ")",
-	[Tok_OpenBrace] = "{",
-	[Tok_CloseBrace] = "}",
-	[Tok_OpenBracket] = "[",
-	[Tok_CloseBracket] = "]",
-
-	[Tok_Semicolon] = ";",
-	[Tok_Comma] = ",",
-	[Tok_Colon] = ":",
-	[Tok_Dot] = ".",
-	[Tok_TripleDot] = "...",
-
-	[Tok_Arrow] = "->",
-	[Tok_Question] = "?",
-	[Tok_Bang] = "!",
-	[Tok_Bang | Tok_EQUALED] = "!=",
-	[Tok_Equal] = "=",
-	[Tok_Equal | Tok_EQUALED] = "==",
-	[Tok_Plus] = "+",
-	[Tok_DoublePlus] = "++",
-	[Tok_Plus | Tok_EQUALED] = "+=",
-	[Tok_Minus] = "-",
-	[Tok_DoubleMinus] = "--",
-	[Tok_Minus | Tok_EQUALED] = "-=",
-	[Tok_Asterisk] = "*",
-	[Tok_Asterisk | Tok_EQUALED] = "*=",
-	[Tok_Slash] = "/",
-	[Tok_Slash | Tok_EQUALED] = "/=",
-	[Tok_Percent] = "%",
-	[Tok_Percent | Tok_EQUALED] = "%=",
-	[Tok_Less] = "<",
-	[Tok_Less | Tok_EQUALED] = "<=",
-	[Tok_DoubleLess] = "<<",
-	[Tok_DoubleLess | Tok_EQUALED] = "<<=",
-	[Tok_Greater] = ">",
-	[Tok_Greater | Tok_EQUALED] = ">=",
-	[Tok_DoubleGreater] = ">>",
-	[Tok_DoubleGreater | Tok_EQUALED] = ">>=",
-	[Tok_Ampersand] = "&",
-	[Tok_DoubleAmpersand] = "&&",
-	[Tok_Ampersand | Tok_EQUALED] = "&=",
-	[Tok_Pipe] = "|",
-	[Tok_DoublePipe] = "||",
-	[Tok_Pipe | Tok_EQUALED] = "|=",
-	[Tok_Hat] = "^",
-	[Tok_Hat | Tok_EQUALED] = "^=",
-	[Tok_Tilde] = "~",
-	[Tok_Tilde | Tok_EQUALED] = "~=",
-
-	[Tok_EOF] = "end of file",
-};
 
 static char name[256] = {0};
 static const char *const name_end = name + 256;
@@ -1846,22 +1916,14 @@ const char *tokenNameHighlighted (TokenKind kind) {
 }
 
 const char *tokenName (TokenKind kind) {
-	if (token_names[kind]) {
-		return token_names[kind];
-	} else {
-		if (kind >= Tok_Key_First && kind <= Tok_Key_Last) {
-			for (u32 i = 0; i < ARRSIZE(standard_keywords); i++) {
-				if (standard_keywords[i].key == kind)
-					return standard_keywords[i].name;
-			}
-		}
-		return NULL;
-	}
+	const char *res = token_names[kind];
+	assert(res);
+	return res;
 }
-
 
 u32 strPrintTokenLen (Token t, Symbol *syms) {
 	switch (t.kind) {
+	case Tok_Intrinsic:
 	case Tok_Identifier: return syms[t.val.symbol_idx].name.len;
 	case Tok_PreprocDirective: return syms[t.val.symbol_idx].name.len + 1;
 	case Tok_String: return syms[t.val.symbol_idx].name.len * 2 + 2;
@@ -1869,7 +1931,6 @@ u32 strPrintTokenLen (Token t, Symbol *syms) {
 	case Tok_Char: return 10;
 	case Tok_Real: return 40;
 	default:
-		assert(tokenName(t.kind));
 		return strlen(tokenName(t.kind));
 	}
 }
@@ -1897,6 +1958,7 @@ void strPrintToken (char **dest, const char *end, Symbol *symbols, Token t) {
 		**dest = '#';
 		++*dest;
 		FALLTHROUGH;
+	case Tok_Intrinsic:
 	case Tok_Identifier:
 		printto(dest, end, "%.*s", STRING_PRINTAGE(symbols[t.val.symbol_idx].name));
 		return;
@@ -2341,6 +2403,7 @@ void emitPreprocessed (Tokenization *tok, FILE *dest) {
 		case Tok_PreprocDirective:
 			fprintf(dest, "#");
 			FALLTHROUGH;
+		case Tok_Intrinsic:
 		case Tok_Identifier:
 			fprintf(dest, "%.*s", STRING_PRINTAGE(t.val.symbol->name));
 			break;

@@ -355,6 +355,10 @@ int main (int argc, char **args) {
 	char tmp_exe[L_tmpnam] = {0};
 	char tmp_asm[L_tmpnam] = {0};
 
+	// tmpnam is not atomic, so this may (very rarely) collide with
+	// another process. tmpfile won't work as a replacement because this
+	// file needs to be input into another process, and mkstemp is only
+	// available on POSIX. Damn.
 	if (runit && !exe_out) {
 		tmpnam(tmp_exe);
 		exe_out = tmp_exe;

@@ -9,6 +9,10 @@
 
 typedef enum {
 	Ref_RValue,
+	// Special case for temporary-lifetime objects as defined in 6.4.2-8.
+	// Is byref, but not lvalue.
+	Ref_RValue_Allocated,
+
 	Ref_LValue_Register,
 	Ref_LValue,
 } Category;
@@ -20,7 +24,7 @@ typedef struct {
 
 	IrRef inst;
 	// Category. inst holds the direct value only for
-	// Reference_RValue, pointer to the actual value otherwise.
+	// Ref_RValue, pointer to the actual value otherwise.
 	u8 category;
 	u8 no_discard;
 } Value;
@@ -111,9 +115,12 @@ typedef struct {
 typedef LIST(StaticValue) Module;
 
 
-// STYLE TODO With IR sizing, lvalues are now the same as byref. Merge these two.
-static inline bool isByref(Value val) { return val.category; }
-static inline bool isLvalue(Value val) { return val.category != Ref_RValue; }
+static inline bool isByref(Value val) {
+	return val.category != Ref_RValue;
+}
+static inline bool isLvalue(Value val) {
+	return val.category != Ref_RValue && val.category != Ref_RValue_Allocated;
+}
 
 void parse(Arena *arena, Tokenization tokens, Options *opt, Module *module);
 

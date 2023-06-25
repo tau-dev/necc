@@ -139,14 +139,6 @@ Block *startNewBlock (IrBuild *build, String label) {
 	return blk;
 }
 
-// Unsigned->signed conversion: unlike signed->unsigned casts that are
-// wrapping, unsigned->signed casts out of range would be undefined
-// behavior.
-// Correction: in C17, at least, the result is actually an
-// implementation-defined value or a signal. Hm.
-static inline i64 toSigned(u64 i) {
-	return i <= INT64_MAX ? (i64) i : i == UINT64_MAX ? (i64) -1 : -(i64) (i - INT64_MAX);
-}
 
 static inline double doubleFromConst(u64 i, u16 size) {
 	switch (size) {

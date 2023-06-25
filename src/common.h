@@ -121,3 +121,13 @@ typedef enum {
 
 typedef struct Tokenization Tokenization;
 u64 evalPreprocExpression(Tokenization tokens, Arena *arena, Options *opt, const Token **pos);
+
+
+typedef struct {
+	BasicType type;
+	u64 val; // Bits aboove the represented value are 0.
+} ConstInt;
+
+// Start from *pos and store the next token after the expression back to
+// *pos.
+ConstInt evalIntegerConstantExpression(Tokenization *tokens, const char *cause, const Options *opt, const Token **pos);

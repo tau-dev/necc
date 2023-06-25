@@ -372,7 +372,7 @@ static void parseCompound(Parse *);
 static void parseStatement(Parse *, bool *had_non_declaration);
 static Value parseExpression(Parse *);
 static Value parseExprAssignment(Parse *);
-static Value parseExprElvis(Parse *);
+static Value parseExprConditional(Parse *);
 static Value parseExprOr(Parse *);
 static Value parseExprAnd(Parse *);
 static Value parseExprBitOr(Parse *);
@@ -383,8 +383,8 @@ static Value parseExprComparison(Parse *);
 static Value parseExprShift(Parse *);
 static Value parseExprAddition(Parse *);
 static Value parseExprMultiplication(Parse *);
-static Value parseExprLeftUnary(Parse *);
-static Value parseExprRightUnary(Parse *);
+static Value parseExprPrefix(Parse *);
+static Value parseExprPostfix(Parse *);
 static Value parseExprBase(Parse *);
 static Value parseIntrinsic(Parse *, Intrinsic);
 // TODO The order of parameters here is inconsistent.
@@ -903,7 +903,7 @@ static Value parseExpression (Parse *parse) {
 }
 
 static Value parseExprAssignment (Parse *parse) {
-	Value v = parseExprElvis(parse);
+	Value v = parseExprConditional(parse);
 	const Token *primary = parse->pos;
 
 	if (!(primary->kind == Tok_Equal || primary->kind >= Tok_Assignment_Start))
@@ -963,7 +963,7 @@ static Value parseExprAssignment (Parse *parse) {
 	return assigned;
 }
 
-static Value parseExprElvis (Parse *parse) {
+static Value parseExprConditional (Parse *parse) {
 	Value cond = parseExprOr(parse);
 
 	const Token *primary = parse->pos;
@@ -983,7 +983,7 @@ static Value parseExprElvis (Parse *parse) {
 				expect(parse, Tok_Colon);
 				Block *b = build->insertion_block;
 				startNewBlock(build, zstr("dummy"));
-				parseExprElvis(parse);
+				parseExprConditional(parse);
 				build->insertion_block = b;
 			} else {
 				Block *b = build->insertion_block;
@@ -991,7 +991,7 @@ static Value parseExprElvis (Parse *parse) {
 				parseExprAssignment(parse);
 				expect(parse, Tok_Colon);
 				build->insertion_block = b;
-				res = parseExprElvis(parse);
+				res = parseExprConditional(parse);
 			}
 			return res;
 		}
@@ -1010,7 +1010,7 @@ static Value parseExprElvis (Parse *parse) {
 		expect(parse, Tok_Colon);
 
 		head->exit.branch.on_false = startNewBlock(build, STRING_EMPTY);
-		Value rhs = rvalue(parseExprElvis(parse), parse);
+		Value rhs = rvalue(parseExprConditional(parse), parse);
 
 		Type common;
 		if (typeCompatible(lhs.typ, rhs.typ))
@@ -1270,7 +1270,6 @@ static Value parseExprShift (Parse *parse) {
 		lhs = intPromote(lhs, parse, primary);
 		Value rhs = intPromote(parseExprAddition(parse), parse, primary);
 
-		// TODO Type checking
 		if (primary->kind == Tok_DoubleLess) {
 			lhs.inst = genShiftLeft(&parse->build, lhs.inst, rhs.inst);
 		} else {
@@ -1290,7 +1289,6 @@ static Value parseExprAddition (Parse *parse) {
 		lhs = rvalue(lhs, parse);
 		Value rhs = rvalue(parseExprMultiplication(parse), parse);
 
-		// TODO Type checking
 		if (primary->kind == Tok_Plus)
 			lhs = arithAdd(parse, primary, lhs, rhs);
 		else
@@ -1299,7 +1297,7 @@ static Value parseExprAddition (Parse *parse) {
 }
 
 static Value parseExprMultiplication (Parse *parse) {
-	Value lhs = parseExprLeftUnary(parse);
+	Value lhs = parseExprPrefix(parse);
 
 	while (true) {
 		const Token *primary = parse->pos;
@@ -1307,12 +1305,12 @@ static Value parseExprMultiplication (Parse *parse) {
 			return lhs;
 		parse->pos++;
 		lhs = rvalue(lhs, parse);
-		Value rhs = rvalue(parseExprLeftUnary(parse), parse);
+		Value rhs = rvalue(parseExprPrefix(parse), parse);
 		lhs = arithMultiplicativeOp(parse, primary, primary->kind, lhs, rhs);
 	}
 }
 
-static Value parseExprLeftUnary (Parse *parse) {
+static Value parseExprPrefix (Parse *parse) {
 	IrBuild *build = &parse->build;
 
 	const Token *primary = parse->pos;
@@ -1320,7 +1318,7 @@ static Value parseExprLeftUnary (Parse *parse) {
 	switch (primary->kind) {
 	case Tok_DoublePlus:
 	case Tok_DoubleMinus: {
-		Value v = parseExprLeftUnary(parse);
+		Value v = parseExprPrefix(parse);
 		needAssignableLval(parse, primary, v);
 
 		bool is_volatile = v.typ.qualifiers & Qualifier_Volatile;
@@ -1335,7 +1333,7 @@ static Value parseExprLeftUnary (Parse *parse) {
 		return result;
 	}
 	case Tok_Asterisk: {
-		Value v = rvalue(parseExprLeftUnary(parse), parse);
+		Value v = rvalue(parseExprPrefix(parse), parse);
 		if (v.typ.kind == Kind_FunctionPtr) {
 			v.typ.kind = Kind_Function;
 			v.category = Ref_LValue;
@@ -1346,16 +1344,16 @@ static Value parseExprLeftUnary (Parse *parse) {
 		return dereference(parse, v);
 	}
 	case Tok_Bang: {
-		Value v = rvalue(parseExprLeftUnary(parse), parse);
+		Value v = rvalue(parseExprPrefix(parse), parse);
 		IrRef zero = genImmediateInt(build, 0, typeSize(v.typ, &parse->target));
 		return (Value) {BASIC_INT, genEquals(build, v.inst, zero, parse->target.typesizes[Int_int], v.typ.kind == Kind_Float)};
 	}
 	case Tok_Tilde: {
-		Value v = intPromote(parseExprLeftUnary(parse), parse, primary);
+		Value v = intPromote(parseExprPrefix(parse), parse, primary);
 		return (Value) {v.typ, genBitNot(build, v.inst)};
 	}
 	case Tok_Ampersand: {
-		Value v = parseExprLeftUnary(parse);
+		Value v = parseExprPrefix(parse);
 		// TODO Structs and unions will be handeled byref even if they
 		// are not lvalues; mark this somehow.
 
@@ -1378,7 +1376,7 @@ static Value parseExprLeftUnary (Parse *parse) {
 		Type typ;
 		bool openparen = tryEat(parse, Tok_OpenParen);
 		if (!openparen || !tryParseTypeName(parse, &typ, NULL))
-			typ = parseValueType(parse, openparen ? parseExpression : parseExprLeftUnary);
+			typ = parseValueType(parse, openparen ? parseExpression : parseExprPrefix);
 		if (openparen)
 			expect(parse, Tok_CloseParen);
 		if (typ.kind == Kind_Function)
@@ -1390,8 +1388,7 @@ static Value parseExprLeftUnary (Parse *parse) {
 	}
 	case Tok_Plus:
 	case Tok_Minus: {
-		// TODO Floats
-		Value val = parseExprLeftUnary(parse);
+		Value val = parseExprPrefix(parse);
 		if (val.typ.kind == Kind_Float) {
 			if (primary->kind == Tok_Minus) {
 				u32 zero = genImmediateInt(build, 0, typeSize(val.typ, &parse->target));
@@ -1424,21 +1421,21 @@ static Value parseExprLeftUnary (Parse *parse) {
 				return (Value) {cast_target, stack, Ref_LValue};
 			} else {
 				// Cast operator
-				Value v = rvalue(parseExprLeftUnary(parse), parse);
+				Value v = rvalue(parseExprPrefix(parse), parse);
 				return (Value) {cast_target, coercerval(v, cast_target, parse, primary, true)};
 			}
 		} else {
 			parse->pos--;
-			return parseExprRightUnary(parse);
+			return parseExprPostfix(parse);
 		}
 	} break;
 	default:
 		parse->pos--;
-		return parseExprRightUnary(parse);
+		return parseExprPostfix(parse);
 	}
 }
 
-static Value parseExprRightUnary (Parse *parse) {
+static Value parseExprPostfix (Parse *parse) {
 	IrBuild *build = &parse->build;
 	Value v = parseExprBase(parse);
 
@@ -1551,7 +1548,7 @@ static Value parseExprRightUnary (Parse *parse) {
 			CompoundMember member = resolved.compound.members.ptr[i];
 
 			v.typ = member.type;
-			if (isLvalue(v)) {
+			if (isByref(v)) {
 				IrRef offset = genImmediateInt(build, member.offset, typeSize(parse->target.intptr, &parse->target));
 				v.inst = genAdd(build, v.inst, offset, Unsigned);
 
@@ -1605,7 +1602,7 @@ static Value parseExprBase (Parse *parse) {
 	IrBuild *build = &parse->build;
 	Token t = *parse->pos;
 	parse->pos++;
-	// TODO
+
 	switch (t.kind) {
 	case Tok_OpenParen: {
 		Value v = parseExpression(parse);
@@ -2872,7 +2869,7 @@ static Type parseStructUnionBody(Parse *parse, bool is_struct) {
 
 			if (decl.type.kind == Kind_UnsizedArray) {
 				if (!(parse->pos[0].kind == Tok_Semicolon && parse->pos[1].kind == Tok_CloseBrace)) {
-					// TOOD "such a structure (and any union containing,
+					// TODO "such a structure (and any union containing,
 					// possibly recursively, a member that is such a
 					// structure) shall not be a member of a structure or an
 					// element of an array."
@@ -3329,7 +3326,7 @@ static OrdinaryIdentifier *define (
 
 
 static bool tryIntConstant (Parse *parse, Value v, u64 *result) {
-	if (isLvalue(v)) return false;
+	if (isByref(v)) return false;
 
 	Inst inst = parse->build.ir.ptr[v.inst];
 	if (inst.kind != Ir_Constant) return false;
@@ -3367,8 +3364,8 @@ static bool tryEatStaticAssert (Parse *parse) {
 
 
 static Value arithAdd (Parse *parse, const Token *primary, Value lhs, Value rhs) {
-	assert(!isLvalue(lhs));
-	assert(!isLvalue(rhs));
+	assert(!isByref(lhs));
+	assert(!isByref(rhs));
 	if (lhs.typ.kind == Kind_Pointer || rhs.typ.kind == Kind_Pointer) {
 		return pointerAdd(&parse->build, lhs, rhs, parse, primary);
 	} else {
@@ -3384,8 +3381,8 @@ static Value arithAdd (Parse *parse, const Token *primary, Value lhs, Value rhs)
 }
 
 static Value arithSub (Parse *parse, const Token *primary, Value lhs, Value rhs) {
-	assert(!isLvalue(lhs));
-	assert(!isLvalue(rhs));
+	assert(!isByref(lhs));
+	assert(!isByref(rhs));
 	IrBuild *build = &parse->build;
 	if (lhs.typ.kind == Kind_Pointer) {
 		u32 stride_const = typeSize(*lhs.typ.pointer, &parse->target);
@@ -3547,8 +3544,8 @@ static bool isZeroConstant (Parse *parse, Value v) {
 }
 
 static Value pointerAdd (IrBuild *ir, Value lhs, Value rhs, Parse *op_parse, const Token *token) {
-	assert(!isLvalue(lhs));
-	assert(!isLvalue(rhs));
+	assert(!isByref(lhs));
+	assert(!isByref(rhs));
 	assert(lhs.typ.kind == Kind_Pointer || rhs.typ.kind == Kind_Pointer);
 
 	if (lhs.typ.kind == Kind_Pointer && rhs.typ.kind == Kind_Pointer)
@@ -3606,7 +3603,7 @@ static bool comparablePointers (Parse *parse, Value lhs, Value rhs) {
 static Value dereference (Parse *parse, Value v) {
 	assert(v.typ.kind == Kind_Pointer);
 
-	if (isLvalue(v))
+	if (isByref(v))
 		v.inst = genLoad(&parse->build, v.inst, typeSize(v.typ, &parse->target), v.typ.qualifiers & Qualifier_Volatile);
 	v.typ = *v.typ.pointer;
 	v.category = Ref_LValue;
@@ -3666,10 +3663,10 @@ Value rvalue (Value v, Parse *parse) {
 		assert(isLvalue(v));
 		v.typ.kind = Kind_FunctionPtr;
 	} else if (isAnyArray(v.typ)) {
-		assert(isLvalue(v));
+		assert(isByref(v));
 		v.typ.kind = Kind_Pointer;
 		v.typ.pointer = v.typ.array.inner;
-	} else if (isLvalue(v)) {
+	} else if (isByref(v)) {
 		v.inst = genLoad(&parse->build, v.inst, typeSize(v.typ, &parse->target), v.typ.qualifiers & Qualifier_Volatile);
 		v.typ.qualifiers = 0;
 	}
@@ -3697,7 +3694,7 @@ static IrRef toBoolean (Parse *p, const Token *primary, Value v) {
 
 // Performs implicit conversions on rvalues.
 static IrRef coercerval (Value v, Type t, Parse *p, const Token *primary, bool allow_casts) {
-	assert(!isLvalue(v));
+	assert(!isByref(v));
 	IrBuild *build = &p->build;
 
 	if (t.kind == Kind_Void)

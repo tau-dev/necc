@@ -173,6 +173,9 @@ typedef struct Token {
 	// its macro, thereby disabling all future expansion. (6.10.3.4.2)
 	u8 painted;
 
+	// TODO Do not convert numbers in the lexer: for stringification or
+	// preprocessor-only invocation, we need to be able to re-emit any
+	// token exactly as given.
 	union {
 		i64 integer_s;
 		u64 integer_u;
