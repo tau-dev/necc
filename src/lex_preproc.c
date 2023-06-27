@@ -55,7 +55,6 @@ typedef enum {
 	Space_Linebreak,
 } SpaceClass;
 
-
 typedef enum {
 	If_If,
 	If_IfDef,
@@ -64,11 +63,22 @@ typedef enum {
 	If_End,
 } IfClass;
 
+typedef enum {
+	Painted = 0x01,
+	PrecededBySpace = 0x02,
+} PreprocFlag;
+
+
 typedef struct {
 	char *name;
 	unsigned int key;
 } Keyword;
 
+
+
+// This table also contains some keywords from C11. They were introduced
+// with leading underscore, so should not collide, but it is a bit
+// inconsistent.
 Keyword standard_keywords[] = {
 	{"if", Tok_Key_If},
 	{"else", Tok_Key_Else},
@@ -286,8 +296,10 @@ char escape_codes[256] = {
 	['0'] = 0,
 	['\\'] = '\\',
 	['\"'] = '\"',
+	['\''] = '\'',
 	['r'] = '\r',
 	['v'] = '\v',
+	['f'] = '\f',
 	['t'] = '\t',
 	['n'] = '\n',
 };
@@ -296,8 +308,10 @@ char de_escape_codes[256] = {
 	[0] = '0',
 	['\\'] = '\\',
 	['\"'] = '\"',
+	['\''] = '\'',
 	['\r'] = 'r',
 	['\v'] = 'v',
+	['\f'] = 'f',
 	['\t'] = 't',
 	['\n'] = 'n',
 };
@@ -491,18 +505,35 @@ static Token getToken (Arena *str_arena, SourceFile source, Location *loc, Symbo
 		String val = processStringLiteral(&source, *loc, str_arena, (String) {pos - begin, begin});
 		tok = (Token) {Tok_String, .val.symbol_idx = getSymbolId(syms, val)};
 	} break;
-	case '\'': {
-	char_literal:
+	case '\'':
+	char_literal: {
+		const char *begin = pos;
 		pos++;
+		if (pos[0] == '\'')
+			lexerror(source, *loc, "character constant cannot be empty");
+
 		// TODO Get unicode vals.
-		tok = (Token) {Tok_Char, .literal_type = Int_int, .val.integer_s = pos[0]};
-		if (pos[0] == '\\')
-			tok.val.integer_s = lexEscapeCode(&source, *loc, &pos);
+		if (pos[0] == '\\') {
+			pos++;
+			if (pos[0] == 'x')
+				pos += 2;
+		}
 		pos++;
-		// TODO Error reporting
-		if (pos[0] != '\'') unreachable;
+		if (pos[0] != '\'')
+			lexerror(source, *loc, "missing closing single quote");
+
+		tok = (Token) {Tok_Char,
+			.literal_type = Int_int,
+			.val.literal_src = begin,
+			.literal_len = pos - begin + 1,
+		};
 	} break;
 
+	// The lexer deviates from GCC's and Clang's behavior in that it
+	// does not require white space between a constant and a following
+	// identifier. I believe I am more correct here, in that the lexical
+	// grammar does not forbid this construction, but since it is never
+	// valid by the phrase grammar, this really does not matter much.
 	case '0': case '1': case '2': case '3': case '4':
 	case '5': case '6': case '7': case '8': case '9':
 	start_number: {
@@ -553,11 +584,6 @@ static Token getToken (Arena *str_arena, SourceFile source, Location *loc, Symbo
 			}
 
 			floating:
-			tok = (Token) {
-				Tok_Real,
-				.literal_type = Float_Double,
-				.val.real = strtod(start, NULL)
-			};
 
 			if (*pos == 'f' || *pos == 'F') {
 				tok.literal_type = Float_Single,
@@ -566,39 +592,42 @@ static Token getToken (Arena *str_arena, SourceFile source, Location *loc, Symbo
 				tok.literal_type = Float_LongDouble,
 				pos++;
 			}
-		} else {
-			integer:
-			tok = (Token) {Tok_Integer,
-				.literal_type = Int_int,
-				.val.integer_s = strtoll(start, NULL, 0)
+
+			tok = (Token) {Tok_Real,
+				.literal_type = Float_Double,
+				.val.literal_src = start,
 			};
+		} else {
+			integer:;
 
 			bool is_unsigned = pos[0] == 'u' || pos[0] == 'U';
+			BasicType literal_type = Int_int;
 			if (is_unsigned)
 				pos++;
 			if (pos[0] == 'l' || pos[0] == 'L') {
 				pos++;
-				tok.literal_type = Int_long;
+				literal_type = Int_long;
 				if (pos[0] == 'l' || pos[0] == 'L') {
 					pos++;
-					tok.literal_type = Int_longlong;
+					literal_type = Int_longlong;
 				}
 			}
 			if (pos[0] == 'u' || pos[0] == 'U') {
 				is_unsigned = true;
 				pos++;
 			}
-			// FIXME Use platform-correct integer sizes.
-			if (is_unsigned) {
-				if (tok.literal_type == Int_int && tok.val.integer_s > UINT32_MAX)
-					tok.literal_type = Int_long;
-				tok.literal_type |= Int_unsigned;
-			} else {
-				// ???
-				if (tok.literal_type == Int_int && tok.val.integer_s > UINT32_MAX)
-					tok.literal_type = Int_long;
-			}
+			if (is_unsigned)
+				literal_type |= Int_unsigned;
+
+			tok = (Token) {Tok_Integer,
+				.literal_type = literal_type,
+				.val.literal_src = start,
+			};
 		}
+		u32 len = pos - start;
+		if (len > UINT16_MAX)
+			lexerror(source, *loc, "this number is too long; the maximum supported length is 65535 characters");
+		tok.literal_len = len;
 
 		pos--;
 	} break;
@@ -683,9 +712,90 @@ static Token getToken (Arena *str_arena, SourceFile source, Location *loc, Symbo
 	return tok;
 }
 
+String literalText (const Token t) {
+	assert(t.kind == Tok_Integer || t.kind == Tok_Char || t.kind == Tok_Real);
+	return (String) {
+		.ptr = t.val.literal_src,
+		.len = t.literal_len
+	};
+}
+
+ConstInt intLiteralValue (const Token *t) {
+	assert(t->kind == Tok_Integer);
+	String text = literalText(*t);
+
+	bool is_unsigned = t->literal_type & Int_unsigned;
+
+	ConstInt res = {
+		.type = t->literal_type & ~Int_unsigned,
+	};
+#ifdef NDEBUG
+	res.val = strtoull(text.ptr, NULL, 0);
+#else
+	char *end;
+	res.val = strtoull(text.ptr, &end, 0);
+
+	while (*end == 'u' || *end == 'U' || *end == 'l' || *end == 'L')
+		end++;
+	const char *rest = text.ptr + text.len;
+	assert (end == rest);
+#endif
+
+	// FIXME Use platform-correct integer sizes from options->target.
+	if (res.type == Int_int && res.val > INT32_MAX) {
+		if (res.val > UINT32_MAX)
+			res.type = Int_long;
+		else
+			is_unsigned = true;
+	}
+	if (res.val > INT64_MAX) is_unsigned = true;
+
+	if (is_unsigned)
+		res.type |= Int_unsigned;
+	return res;
+}
+
+ConstInt charLiteralValue (const Tokenization *tok, const Token *t) {
+	assert(t->kind == Tok_Char);
+	Location loc = tok->list.positions[t-tok->list.tokens].source;
+	SourceFile *source = tok->files.ptr[loc.file_id];
+	String text = literalText(*t);
+	const char *src = text.ptr + 1;
+
+	ConstInt res = {
+		.type = t->literal_type & ~Int_unsigned,
+		.val = *src,
+	};
+	if (res.val == '\\') {
+		res.val = lexEscapeCode(source, loc, &src);
+		src++;
+		assert(*src == '\'');
+		assert (src+1 == text.ptr + text.len);
+	}
+	return res;
+}
+
+
+double floatLiteralValue (const Token *t) {
+	assert(t->kind == Tok_Real);
+	String text = literalText(*t);
+
+#ifdef NDEBUG
+	return strtod(text.ptr, NULL);
+#else
+	char *end;
+	double res = strtod(text.ptr, &end);
+	if (*end == 'f' || *end == 'F' || *end == 'l' || *end == 'L')
+		end++;
+	assert(end == text.ptr + text.len);
+	return res;
+#endif
+}
+
 
 typedef struct MacroToken {
 	Token tok;
+	// Carries the original source of the token.
 	Location loc;
 	// 0 if this token is not a parameter, 1+(index into parameters) if it is.
 	u16 parameter;
@@ -1150,10 +1260,10 @@ static bool expandInto (const ExpansionParams ex, TokenList *dest, bool is_argum
 			retry:;
 			Macro *mac;
 			if ((mac = ex.tok->symbols.ptr[t.tok.val.symbol_idx].macro) != NULL
-				&& !t.tok.painted)
+				&& !(t.tok.preproc_flags & Painted))
 			{
 				if (mac->being_replaced) {
-					t.tok.painted = 1;
+					t.tok.preproc_flags |= Painted;
 				} else {
 					TokenList *arguments = NULL;
 					if (mac->is_function_like) {
@@ -1283,8 +1393,8 @@ static TokenList *takeArguments (const ExpansionParams ex, Location invocation_l
 // comments.
 
 static MacroToken toMacroToken(TokenList *tok, u32 pos);
-static MacroToken concatenate(const ExpansionParams ex, Token first, u32 *marker);
-static Token stringify(Arena *arena, SymbolList *symbols, TokenList t);
+static MacroToken concatenate(const ExpansionParams ex, MacroToken first, u32 *marker);
+static Token stringify(Arena *arena, Tokenization *tok, TokenList t);
 
 static MacroToken takeToken (const ExpansionParams ex, u32 *marker) {
 	MacroStack *stack = ex.stack;
@@ -1307,7 +1417,7 @@ static MacroToken takeToken (const ExpansionParams ex, u32 *marker) {
 					if (followed_by_concat)
 						lexerror(ex.source, *ex.loc, "(TODO location, phrasing) stringified parameter can not followed by concatenation");
 					TokenList arg = repl->toks[t.parameter-1];
-					t.tok = stringify(ex.strings_arena, &ex.tok->symbols, arg);
+					t.tok = stringify(ex.strings_arena, ex.tok, arg);
 					return t;
 				}
 				Replacement arg = {
@@ -1325,7 +1435,7 @@ static MacroToken takeToken (const ExpansionParams ex, u32 *marker) {
 				}
 			} else {
 				if (followed_by_concat)
-					return concatenate(ex, t.tok, marker);
+					return concatenate(ex, t, marker);
 				else {
 					// PERFORMANCE Are multiple branches in the hot path really necessary?
 					// STYLE Copypasta from the lex loop
@@ -1346,7 +1456,7 @@ static MacroToken takeToken (const ExpansionParams ex, u32 *marker) {
 
 			if (repl->followed_by_concat) {
 				stack->len--;
-				return concatenate(ex, t.tok, marker);
+				return concatenate(ex, t, marker);
 			} else
 				return t;
 		}
@@ -1356,17 +1466,18 @@ static MacroToken takeToken (const ExpansionParams ex, u32 *marker) {
 	bool have_space = tryGobbleSpace(ex.source, ex.loc, ex.src);
 	Location token_loc = *ex.loc;
 	Token t = getToken(ex.strings_arena, ex.source, ex.loc, &ex.tok->symbols, ex.src);
-	t.preceded_by_space = have_space;
+	if (have_space) t.preproc_flags |= PrecededBySpace;
+
 	return (MacroToken) {
 		.tok = t,
 		.loc = token_loc,
 	};
 }
 
-void strPrintToken(char **dest, const char *end, Symbol *symbols, Token t);
+void strPrintToken(char **dest, const char *end, const Symbol *symbols, Token t);
 u32 strPrintTokenLen(Token t, Symbol *symbols);
 
-static MacroToken concatenate (const ExpansionParams ex, Token first, u32 *marker) {
+static MacroToken concatenate (const ExpansionParams ex, MacroToken first, u32 *marker) {
 	Replacement *repl = &ex.stack->ptr[ex.stack->len - 1];
 	Macro *macro = repl->mac;
 	MacroToken operator = macro->tokens.ptr[repl->pos];
@@ -1381,7 +1492,7 @@ static MacroToken concatenate (const ExpansionParams ex, Token first, u32 *marke
 			.pos = 1,
 		};
 		if (arg.toks->count == 0) {
-			operator.tok = first;
+			operator.tok = first.tok;
 			return operator;
 		}
 
@@ -1398,14 +1509,13 @@ static MacroToken concatenate (const ExpansionParams ex, Token first, u32 *marke
 	}
 	collapseMacroStack(ex.stack, marker);
 
-	u32 len = strPrintTokenLen(first, ex.tok->symbols.ptr) + strPrintTokenLen(second.tok, ex.tok->symbols.ptr) + 1;
+	Symbol *syms = ex.tok->symbols.ptr;
+	u32 len = strPrintTokenLen(first.tok, syms) + strPrintTokenLen(second.tok, syms) + 1;
 	char *rep = aalloc(ex.strings_arena, len);
 	char *insert = rep;
-	strPrintToken(&insert, rep+len, ex.tok->symbols.ptr, first);
-	strPrintToken(&insert, rep+len, ex.tok->symbols.ptr, second.tok);
-	int *c = NULL;
-	if (insert > rep + len)
-		*c = 1;
+	strPrintToken(&insert, rep+len, syms, first.tok);
+	strPrintToken(&insert, rep+len, syms, second.tok);
+	assert (insert < rep + len);
 	*insert = 0;
 
 	const char *src = rep;
@@ -1413,21 +1523,26 @@ static MacroToken concatenate (const ExpansionParams ex, Token first, u32 *marke
 	return operator;
 }
 
-static Token stringify (Arena *arena, SymbolList *symbols, TokenList arg) {
+static Token stringify (Arena *arena, Tokenization *t, TokenList arg) {
 	u32 data_len = 0;
-	for (u32 i = 0; i < arg.count; i++)
-		data_len += strPrintTokenLen(arg.tokens[i], symbols->ptr) + arg.tokens[i].preceded_by_space;
+	for (u32 i = 0; i < arg.count; i++) {
+		data_len += strPrintTokenLen(arg.tokens[i], t->symbols.ptr);
+		if (arg.tokens[i].preproc_flags & PrecededBySpace)
+			data_len++;
+	}
 
 	char *start = aalloc(arena, data_len + 1);
 	char *c = start;
 	char *end = start + data_len + 1;
+	Symbol *syms = t->symbols.ptr;
 	for (u32 i = 0; i < arg.count; i++) {
-		if (i > 0 && arg.tokens[i].preceded_by_space)
+		if (i > 0 && (arg.tokens[i].preproc_flags & PrecededBySpace))
 			printto(&c, end, " ");
-		strPrintToken(&c, end, symbols->ptr, arg.tokens[i]);
+
+		strPrintToken(&c, end, syms, arg.tokens[i]);
 	}
 
-	u32 idx = getSymbolId(symbols, (String) {c-start, start});
+	u32 idx = getSymbolId(&t->symbols, (String) {c-start, start});
 	return (Token) {Tok_String, .val.symbol_idx = idx};
 }
 
@@ -1464,7 +1579,7 @@ static void collapseMacroStack (MacroStack *stack, u32 *marker) {
 static MacroToken toMacroToken (TokenList *tok, u32 pos) {
 	return (MacroToken) {
 		.tok = tok->tokens[pos],
-		.loc = tok->positions[pos].macro,
+		.loc = tok->positions[pos].source,
 	};
 }
 
@@ -1499,9 +1614,9 @@ inline static void resolveIdentToKeyword(Tokenization *t, Token *tok, Location l
 		tok->kind = Tok_String;
 		tok->val.symbol_idx = getSymbolId(&t->symbols, name);
 	} else if (keyword == Tok_Key_Line) {
-		tok->kind = Tok_Integer;
+		tok->kind = Tok_IntegerReplaced;
 		tok->literal_type = Int_int;
-		tok->val.integer_s = loc.line;
+		tok->val.integer = loc.line;
 	} else {
 		tok->kind = keyword;
 	}
@@ -1806,7 +1921,7 @@ static void preprocExpandLine (ExpansionParams params, TokenList *buf) {
 					lexerror(params.source, *params.loc, "the operator %sdefined%s expects an identifier as an argument", BOLD, RESET);
 
 				bool found = params.tok->symbols.ptr[tok.val.symbol_idx].macro;
-				tok = (Token) {Tok_Integer, .literal_type = Int_int, .val.integer_s = found};
+				tok = (Token) {Tok_IntegerReplaced, .val.integer = found};
 
 				if (parenthesized) {
 					gobbleSpaceToNewline(&pos, params.loc);
@@ -1838,13 +1953,13 @@ static void preprocExpandLine (ExpansionParams params, TokenList *buf) {
 				continue;
 			} else {
 				non_macro_ident:
-				tok.kind = Tok_Integer;
+				tok.kind = Tok_IntegerReplaced;
 				tok.literal_type = Int_int;
-				tok.val.integer_s = 0;
+				tok.val.integer = 0;
 				if (sym->keyword == Tok_Key_True)
-					tok.val.integer_s = 1;
+					tok.val.integer = 1;
 				else if (sym->keyword == Tok_Key_Line)
-					tok.val.integer_s = begin.line;
+					tok.val.integer = begin.line;
 			}
 		}
 		appendOneToken(buf, tok, (TokenLocation) {begin});
@@ -1952,9 +2067,11 @@ u32 strPrintTokenLen (Token t, Symbol *syms) {
 	case Tok_Identifier: return syms[t.val.symbol_idx].name.len;
 	case Tok_PreprocDirective: return syms[t.val.symbol_idx].name.len + 1;
 	case Tok_String: return syms[t.val.symbol_idx].name.len * 2 + 2;
-	case Tok_Integer: return 30;
-	case Tok_Char: return 10;
-	case Tok_Real: return 40;
+	case Tok_Integer:
+	case Tok_Real:
+	case Tok_Char:
+		return t.literal_len;
+	case Tok_IntegerReplaced: return 30;
 	default:
 		return strlen(tokenName(t.kind));
 	}
@@ -1973,7 +2090,7 @@ static void strPrintChar (char **dest, u32 c) {
 	++*dest;
 }
 
-void strPrintToken (char **dest, const char *end, Symbol *symbols, Token t) {
+void strPrintToken (char **dest, const char *end, const Symbol *symbols, Token t) {
 	switch (t.kind) {
 	case Tok_Invalid:
 		**dest = t.val.invalid_token;
@@ -1997,18 +2114,13 @@ void strPrintToken (char **dest, const char *end, Symbol *symbols, Token t) {
 		++*dest;
 	} return;
 	case Tok_Real:
-		printto(dest, end, "%f", t.val.real);
-		return;
 	case Tok_Integer:
-		printto(dest, end, "%lld", (llong) t.val.integer_s);
-		return;
-	case Tok_Char:
-		// TODO Handle multibyte characters.
-		**dest = '\'';
-		++*dest;
-		strPrintChar(dest, t.val.integer_s);
-		**dest = '\'';
-		++*dest;
+	case Tok_Char: {
+		printto(dest, end, "%.*s", STRING_PRINTAGE(literalText(t)));
+	} return;
+
+	case Tok_IntegerReplaced:
+		printto(dest, end, "%lld", (llong) t.val.integer);
 		return;
 	default:
 		printto(dest, end, "%s", tokenName(t.kind));
@@ -2142,7 +2254,8 @@ static const char *defineMacro (
 			.tok = getToken(generated_strings, *source, loc, symbols, &pos),
 			.loc = begin,
 		};
-		t.tok.preceded_by_space = havespace;
+		if (havespace)
+			t.tok.preproc_flags |= PrecededBySpace;
 		if (t.tok.kind == Tok_EOF)
 			break;
 
@@ -2232,13 +2345,15 @@ static char lexEscapeCode(SourceFile *source, Location loc, const char **p) {
 	int res;
 	if (pos[0] == 'x') {
 		if (!isHexDigit(pos[1]) || !isHexDigit(pos[2]))
-			lexerror(*source, loc, "invalid character");
+			lexerror(*source, loc, "invalid escape code");
 		res = hexToInt(pos[1])*16 + hexToInt(pos[2]);
 		if (res >= 128)
 			res -= 256;
 		pos += 2;
 	} else {
 		res = escape_codes[(uchar)pos[0]];
+		if (res == 0 && pos[0] != '0')
+			lexerror(*source, loc, "invalid escape code");
 	}
 	*p = pos;
 	return res;
@@ -2440,16 +2555,14 @@ void emitPreprocessed (Tokenization *tok, FILE *dest) {
 			fputc('\"', dest);
 		} break;
 		case Tok_Real:
-			fprintf(dest, "%f", t.val.real);
-			break;
 		case Tok_Integer:
-			fprintf(dest, "%lld", (llong) t.val.integer_s);
-			break;
 		case Tok_Char:
-			fputc('\'', dest);
-			escapeTo(dest, t.val.integer_s);
-			fputc('\'', dest);
+			fprintf(dest, "%.*s", STRING_PRINTAGE(literalText(t)));
 			break;
+		case Tok_IntegerReplaced:
+			fprintf(dest, "%llu", (ullong)t.val.integer);
+			break;
+
 		default:
 			fprintf(dest, "%s", tokenName(t.kind));
 			break;

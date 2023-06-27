@@ -1236,10 +1236,13 @@ static void emitDataLine (FILE *out, u32 len, const char *data) {
 
 static void emitDataString (u32 len, const char *data) {
 	emitZString(" .ascii \"");
-	memcpy(insert, data, len);
-	insert += len;
-	memcpy(insert, "\"\n", 2);
-	insert += 2;
+	for (u32 i = 0; i < len; i++) {
+		if (data[i] == '\\' || data[i] == '\"')
+			*insert++ = '\\';
+		*insert++ = data[i];
+	}
+	*insert++ = '\"';
+	*insert++ = '\n';
 }
 
 static void emitDataRaw (u32 len, const char *data) {

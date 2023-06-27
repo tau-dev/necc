@@ -1461,6 +1461,7 @@ static Value parseExprPostfix (Parse *parse) {
 					if (have_prototype && arguments.len < params.len) {
 						inst = coerce(arg, params.ptr[arguments.len].type, parse, primary);
 					} else {
+						// TODO (6.5.2.2-6) “trailing arguments that have type float are promoted to double”.
 						if (arg.typ.kind == Kind_Basic)
 							inst = intPromote(arg, parse, primary).inst;
 						else
@@ -1607,18 +1608,27 @@ static Value parseExprBase (Parse *parse) {
 		expect(parse, Tok_CloseParen);
 		return v;
 	}
-	case Tok_Integer:
-	case Tok_Char:
-		return immediateIntVal(parse, (Type) {Kind_Basic, .basic = t.literal_type}, t.val.integer_u);
+	case Tok_Char: {
+		ConstInt i = charLiteralValue(&parse->tokens, parse->pos - 1);
+		return immediateIntVal(parse, (Type) {Kind_Basic, .basic = i.type}, i.val);
+	}
+	case Tok_Integer: {
+		ConstInt i = intLiteralValue(parse->pos - 1);
+		return immediateIntVal(parse, (Type) {Kind_Basic, .basic = i.type}, i.val);
+	}
+	case Tok_IntegerReplaced:
+		return immediateIntVal(parse, (Type) {Kind_Basic, .basic = t.literal_type}, t.val.integer);
+
 	case Tok_Key_True:
 	case Tok_Key_False:
 		return immediateIntVal(parse, (Type) {Kind_Basic, .basic = Int_int}, t.kind == Tok_Key_True);
 	case Tok_Key_Nullptr: // Not exactly correct—nullptr has its own type.
 		return immediateIntVal(parse, (Type) {Kind_Pointer, .pointer = &void_type}, 0);
 	case Tok_Real: {
-		IrRef inst = genImmediateReal(build, t.val.real, 8);
-		return (Value) {{Kind_Float, .real = Float_Double}, inst};
+		double val = floatLiteralValue(parse->pos - 1);
+		return immediateIntVal(parse, (Type) {Kind_Basic, .basic = t.literal_type}, val);
 	}
+
 	case Tok_String: {
 		parse->pos--;
 		u32 id = parseStringLiteral(parse);
@@ -1656,7 +1666,7 @@ static Value parseExprBase (Parse *parse) {
 		}
 	} unreachable;
 	case Tok_Key_Generic: {
-		requires(parse, "generic selections", Features_C23);
+		requires(parse, "generic selections", Features_C11);
 
 		const Token *primary = parse->pos;
 		expect(parse, Tok_OpenParen);
@@ -1688,6 +1698,8 @@ static Value parseExprBase (Parse *parse) {
 					}
 					got = true;
 					result = parseExprAssignment(parse);
+					if (parse->pos->kind != Tok_CloseParen)
+						expect(parse, Tok_Comma);
 				} else {
 					skipOverCommaOrToCloseParen(parse, primary);
 				}

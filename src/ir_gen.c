@@ -294,9 +294,25 @@ static IrRef genBinOp (IrBuild *build, InstKind op, u8 properties, IrRef a, IrRe
 		i.kind = Ir_Constant;
 		return append(build, i);
 	} else {
-		if (commutative && inst[a].kind == Ir_Constant) {
-			i.binop.lhs = b;
-			i.binop.rhs = a;
+		if (inst[a].kind == Ir_Constant) {
+			if (commutative) {
+				i.binop.lhs = b;
+				i.binop.rhs = a;
+			} else {
+				u64 constant = inst[a].constant;
+
+				switch (op) {
+				case Ir_Div:
+				case Ir_SDiv:
+				case Ir_Mul:
+				case Ir_ShiftRight:
+				case Ir_ShiftLeft:
+					if (constant == 0)
+						return a;
+					break;
+				default: break;
+				}
+			}
 		}
 		if (inst[i.binop.rhs].kind == Ir_Constant) {
 			u64 constant = inst[i.binop.rhs].constant;
@@ -334,6 +350,14 @@ static IrRef genBinOp (IrBuild *build, InstKind op, u8 properties, IrRef a, IrRe
 				break;
 			case Ir_Mod:
 				// TODO mod 1
+				break;
+			case Ir_ShiftLeft:
+				if (constant == 0)
+					return i.binop.lhs;
+				break;
+			case Ir_ShiftRight:
+				if (constant == 0)
+					return i.binop.lhs;
 				break;
 			default: break;
 			}

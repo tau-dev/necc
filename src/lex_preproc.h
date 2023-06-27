@@ -80,6 +80,8 @@ typedef enum {
 	Tok_Real,
 	Tok_Integer,
 	Tok_Char,
+	// Result of expanding a __LINE__ macro or such. Always has type Int_int.
+	Tok_IntegerReplaced,
 
 	Tok_OpenParen,
 	Tok_CloseParen,
@@ -166,21 +168,17 @@ const char *tokenNameHighlighted(TokenKind k);
 
 typedef struct Token {
 	TokenKind kind;
-	u8 preceded_by_space;
+	u8 preproc_flags;
 	u8 literal_type;
-	// Only relevant during macro expansion:
-	// Marks that a token has been encountered within the expansion of
-	// its macro, thereby disabling all future expansion. (6.10.3.4.2)
-	u8 painted;
+	u16 literal_len;
 
 	// TODO Do not convert numbers in the lexer: for stringification or
 	// preprocessor-only invocation, we need to be able to re-emit any
 	// token exactly as given.
 	union {
-		i64 integer_s;
-		u64 integer_u;
-		double real;
 		Symbol *symbol;
+		const char *literal_src; // Length is in literal_len
+		u64 integer;
 		char invalid_token;
 		// Only used by the lexer; this index into tokenization.symbols
 		// gets turned into a Symbol* before parsing.
@@ -228,3 +226,9 @@ typedef struct {
 
 Tokenization lex(Arena *generated_strings, String filename, LexParams paths);
 void emitPreprocessed(Tokenization *tok, FILE *dest);
+
+String literalText(Token t);
+ConstInt intLiteralValue(const Token *t);
+ConstInt charLiteralValue(const Tokenization *tok, const Token *t);
+double floatLiteralValue(const Token *t);
+

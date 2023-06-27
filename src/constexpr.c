@@ -449,15 +449,20 @@ static CValue evalExprBase (Parse *parse) {
 	Token t = *parse->pos;
 	CValue res;
 
+	parse->pos++;
 	switch (t.kind) {
 	case Tok_OpenParen: {
 		// TODO Need ExprAssignment here?
 		res = evalExprConditional(parse);
 		expect(parse, Tok_CloseParen);
 	} break;
-	case Tok_Integer:
 	case Tok_Char:
-		return (CValue) { .type = t.literal_type, .val = t.val.integer_u };
+		return charLiteralValue(parse->tok, parse->pos - 1);
+	case Tok_Integer:
+		return intLiteralValue(parse->pos - 1);
+	case Tok_IntegerReplaced:
+		return (CValue) { .type = t.literal_type, .val = t.val.integer };
+
 	case Tok_Key_True:
 	case Tok_Key_False:
 		return (CValue) { .type = t.literal_type, .val = t.kind == Tok_Key_True };
