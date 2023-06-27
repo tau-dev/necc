@@ -52,6 +52,7 @@ IrRef genVaStart(IrBuild *build, IrRef va_list_addr, IrRef param);
 IrRef genVaArg(IrBuild *build, IrRef va_list_addr, IrRef size);
 
 void replaceWithCopy(IrList ir, IrRef original, IrRef replacement, IrRef ordered_after);
+void replaceWithNop(IrList ir, IrRef original);
 void genSetZero(IrBuild *, IrRef address, u32 size, bool is_volatile);
 
 void genReturnVal(IrBuild *, IrRef val);

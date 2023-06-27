@@ -319,13 +319,13 @@ int main (int argc, char **args) {
 			}
 		} else {
 			if (input.len)
-				generalFatal("Cannot more than one input file at a time.");
+				generalFatal("Cannot more than one input file at a time");
 			input = zstr(args[i]);
 		}
 	}
 
 	if (!input.len)
-		generalFatal("Please supply a file name. (Use \"-h\" to show usage information.)");
+		generalFatal("Please supply a file name. (Use \"-h\" to show usage information)");
 
 	if (!had_output)
 		exe_out = "./a.out";

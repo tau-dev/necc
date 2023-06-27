@@ -799,6 +799,10 @@ void replaceWithCopy (IrList ir, IrRef original, IrRef replacement, IrRef ordere
 	ir.ptr[original].binop.rhs = ordered_after;
 }
 
+void replaceWithNop (IrList ir, IrRef original) {
+	replaceWithCopy(ir, original, IDX_NONE, ir.ptr[original].mem.ordered_after);
+}
+
 void genSetZero(IrBuild *build, IrRef address, u32 size, bool is_volatile) {
 	u32 zero8 = genImmediateInt(build, 0, I64);
 	u32 pos = 0;

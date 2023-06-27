@@ -454,8 +454,7 @@ void innerBlockPropagate (IrList ir, Blocks blocks) {
 							} else {
 								if (instVolatile(prev))
 									break;
-								// Remove the previous store.
-								replaceWithCopy(ir, prev_ref, IDX_NONE, prev.mem.ordered_after);
+								replaceWithNop(ir, prev_ref);
 								inst.mem.ordered_after = prev.mem.ordered_after;
 							}
 						} else {
@@ -465,6 +464,10 @@ void innerBlockPropagate (IrList ir, Blocks blocks) {
 							break;
 						}
 					} else {
+						// Loads should always be able to move past each
+						// other. A store ordered after one of the loads
+						// would get misplaced by that though.
+						// Ergo: ordered_after is a bad system.
 						break;
 					}
 				}
