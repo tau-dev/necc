@@ -69,13 +69,13 @@ static void vcomperror (Log level, bool crash_on_error, const Tokenization *t, c
 	TokenLocation pos = t->list.positions[idx];
 	SourceFile source = *t->files.ptr[pos.source.file_id];
 
-    printMsg(level, source, pos.source);
+	printMsg(level, source, pos.source);
 
-    vfprintf(stderr, msg, args);
-    fprintf(stderr, ".\n");
+	vfprintf(stderr, msg, args);
+	fprintf(stderr, ".\n");
 	if (pos.macro.line && !(level & Log_Noexpand)) {
-    	printInfo(*t->files.ptr[pos.macro.file_id], pos.macro);
-    	fprintf(stderr, "(macro-expanded from here)\n");
+		printInfo(*t->files.ptr[pos.macro.file_id], pos.macro);
+		fprintf(stderr, "(macro-expanded from here)\n");
 	}
 
 	if (level & Log_Fatal) {
@@ -91,27 +91,27 @@ static void vcomperror (Log level, bool crash_on_error, const Tokenization *t, c
 
 
 _Noreturn static void parseerror (const Parse *p, const Token *main, const char *msg, ...) {
-    va_list args;
-    va_start(args, msg);
-    vcomperror(Log_Err | Log_Fatal, p->opt->crash_on_error, &p->tokens, main ? main : p->pos - 1, p->pos, msg, args);
-    va_end(args);
-    exit(1);
+	va_list args;
+	va_start(args, msg);
+	vcomperror(Log_Err | Log_Fatal, p->opt->crash_on_error, &p->tokens, main ? main : p->pos - 1, p->pos, msg, args);
+	va_end(args);
+	exit(1);
 }
 
 static void parsemsg (Log level, const Parse *p, const Token *main, const char *msg, ...) {
-    va_list args;
-    va_start(args, msg);
-    vcomperror(level, p->opt->crash_on_error, &p->tokens, main ? main : p->pos, p->pos, msg, args);
-    va_end(args);
-    if ((level & ~Log_Fatal & ~Log_Noexpand) == Log_Warn)
-    	p->opt->emitted_warnings = true;
+	va_list args;
+	va_start(args, msg);
+	vcomperror(level, p->opt->crash_on_error, &p->tokens, main ? main : p->pos, p->pos, msg, args);
+	va_end(args);
+	if ((level & ~Log_Fatal & ~Log_Noexpand) == Log_Warn)
+		p->opt->emitted_warnings = true;
 }
 
 
 
 static void redefinitionError (const Parse *p, const Token *main, const Token *previous, Symbol *name) {
-    parsemsg(Log_Err, p, main, "redefinition of %.*s", name->name);
-    parsemsg(Log_Info | Log_Fatal, p, previous, "previous definition was here");
+	parsemsg(Log_Err, p, main, "redefinition of %.*s", name->name);
+	parsemsg(Log_Info | Log_Fatal, p, previous, "previous definition was here");
 }
 
 _Noreturn static void unexpectedToken (const Parse *p, TokenKind expected) {
@@ -1388,6 +1388,7 @@ static Value parseExprPrefix (Parse *parse) {
 	case Tok_Minus: {
 		Value val = parseExprPrefix(parse);
 		if (val.typ.kind == Kind_Float) {
+			val = rvalue(val, parse);
 			if (primary->kind == Tok_Minus) {
 				u32 zero = genImmediateInt(build, 0, typeSize(val.typ, &parse->target));
 				val.inst = genFSub(build, zero, val.inst);
@@ -3186,7 +3187,7 @@ static void defGlobal (
 		if (!typeCompatible(decl.type, existing_type)) {
 			parsemsg(Log_Err, parse, decl_token, "redeclaration of %.*s with incompatible type %s",
 					STRING_PRINTAGE(decl.name->name), printTypeHighlighted(parse->arena, decl.type));
-    		parsemsg(Log_Info | Log_Fatal, parse, existing_val->decl_location, "previous declaration had type %s", printTypeHighlighted(parse->arena, existing_type));
+			parsemsg(Log_Info | Log_Fatal, parse, existing_val->decl_location, "previous declaration had type %s", printTypeHighlighted(parse->arena, existing_type));
 		}
 		if (tentative && existing_val->def_state == Def_Undefined)
 			existing_val->def_state = Def_Tentative;
@@ -3503,7 +3504,7 @@ static Type arithmeticConversions (Parse *parse, const Token *primary, Value *a,
 			If the signed type can represent all values of the unsigned type, then the operand with the unsigned type is implicitly converted to the signed type.
 			Else, both operands undergo implicit conversion to the unsigned type counterpart of the signed operand's type.
 
-    So the logic is:
+	So the logic is:
 
 	if (lhs.typ.basic & Int_unsigned == higher.basic & Int_unsigned) {
 		common = higher;

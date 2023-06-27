@@ -58,19 +58,19 @@ static void msgAt (Log log, const Parse *parse, const Token *pos) {
 	u32 idx = pos - t->list.tokens;
 	TokenLocation loc = t->list.positions[idx];
 	SourceFile source = *t->files.ptr[loc.source.file_id];
-    printMsg(log, source, loc.source);
+	printMsg(log, source, loc.source);
 }
 
 static _Noreturn void cevalerror (const Parse *parse, const char *msg, ...) {
 	msgAt(Log_Err, parse, parse->tok->list.tokens);
-    va_list args;
-    va_start(args, msg);
-    vfprintf(stderr, msg, args);
-    va_end(args);
-    fprintf(stderr, ".\n");
+	va_list args;
+	va_start(args, msg);
+	vfprintf(stderr, msg, args);
+	va_end(args);
+	fprintf(stderr, ".\n");
 
 	msgAt(Log_Info, parse, parse->cause_token);
-    fprintf(stderr, "%s.\n", parse->cause);
+	fprintf(stderr, "%s.\n", parse->cause);
 
 	exit(1);
 }

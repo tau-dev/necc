@@ -317,25 +317,25 @@ char de_escape_codes[256] = {
 };
 
 static _Noreturn void lexerror (SourceFile source, Location loc, const char *msg, ...) {
-    printErr(source, loc);
+	printErr(source, loc);
 
-    va_list args;
-    va_start(args, msg);
-    vfprintf(stderr, msg, args);
-    va_end(args);
-    fprintf(stderr, ".\n");
+	va_list args;
+	va_start(args, msg);
+	vfprintf(stderr, msg, args);
+	va_end(args);
+	fprintf(stderr, ".\n");
 
 	exit(1);
 }
 
 static void lexwarning (SourceFile source, Location loc, const char *msg, ...) {
-    printWarn(source, loc);
+	printWarn(source, loc);
 
-    va_list args;
-    va_start(args, msg);
-    vfprintf(stderr, msg, args);
-    va_end(args);
-    fprintf(stderr, ".\n");
+	va_list args;
+	va_start(args, msg);
+	vfprintf(stderr, msg, args);
+	va_end(args);
+	fprintf(stderr, ".\n");
 }
 
 static char lexEscapeCode(SourceFile *source, Location loc, const char **p);

@@ -378,6 +378,7 @@ int main (int argc, char **args) {
 
 
 	PUSH(paths.system_macros, zstr("__STDC__"));
+	PUSH(paths.system_macros, zstr("__x86_64__"));
 	// TODO
 // 	predefine(arena, macros, "__DATE__", 1);
 // 	predefine(arena, macros, "__TIME__", 1);
