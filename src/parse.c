@@ -1035,10 +1035,12 @@ static Value parseExprConditional (Parse *parse) {
 	return cond;
 }
 
+
 static Value parseExprOr (Parse *parse) {
 	Value lhs = parseExprAnd(parse);
 	const Token *primary = parse->pos;
-	if (tryEat(parse, Tok_DoublePipe)) {
+
+	while (tryEat(parse, Tok_DoublePipe)) {
 		const u16 int_size = parse->target.int_size;
 		IrBuild *build = &parse->build;
 		Block *head = build->insertion_block;
@@ -1047,29 +1049,32 @@ static Value parseExprOr (Parse *parse) {
 		Inst inst = build->ir.ptr[lhs.inst];
 		// TODO Really need constant folding for branches to avoid this kind of stuff
 		if (inst.kind == Ir_Constant || inst.kind == Ir_Reloc) {
-			Value rhs = parseExprOr(parse);
+			IrRef res;
+			if (inst.kind == Ir_Reloc || inst.constant != 0) {
+				Type t = parseValueType(parse, parseExprAnd);
+				(void) t; // TODO Typecheck.
+				res = genImmediateInt(build, 1, int_size);
+			} else {
+				res = toBoolean(parse, primary, parseExprAnd(parse));
+			}
+			lhs = (Value) {BASIC_INT, res};
+		} else {
+			IrRef constant = genPhiOut(build, genImmediateInt(build, 1, int_size));
+			genBranch(build, toBoolean(parse, primary, lhs));
+			head->exit.branch.on_false = startNewBlock(build, STRING_EMPTY);
 
-			IrRef res = (inst.kind == Ir_Reloc || inst.constant != 0) ?
-					  genImmediateInt(build, 1, int_size)
-					: toBoolean(parse, primary, rhs);
-			return (Value) {BASIC_INT, res};
+			Value rhs = parseExprAnd(parse);
+
+			IrRef rhs_val = genPhiOut(build, toBoolean(parse, primary, rhs));
+			Block *join = newBlock(&parse->build, STRING_EMPTY);
+			genJump(build, join);
+			head->exit.branch.on_true = join;
+			IrRef res = genPhiIn(build, int_size);
+
+			setPhiOut(build, constant, res, IDX_NONE);
+			setPhiOut(build, rhs_val, res, IDX_NONE);
+			lhs = (Value) {BASIC_INT, res};
 		}
-
-		IrRef constant = genPhiOut(build, genImmediateInt(build, 1, int_size));
-		genBranch(build, toBoolean(parse, primary, lhs));
-		head->exit.branch.on_false = startNewBlock(build, STRING_EMPTY);
-
-		Value rhs = parseExprOr(parse);
-
-		IrRef rhs_val = genPhiOut(build, toBoolean(parse, primary, rhs));
-		Block *join = newBlock(&parse->build, STRING_EMPTY);
-		genJump(build, join);
-		head->exit.branch.on_true = join;
-		IrRef res = genPhiIn(build, int_size);
-
-		setPhiOut(build, constant, res, IDX_NONE);
-		setPhiOut(build, rhs_val, res, IDX_NONE);
-		lhs = (Value) {BASIC_INT, res};
 	}
 	return lhs;
 }
@@ -1078,7 +1083,7 @@ static Value parseExprOr (Parse *parse) {
 static Value parseExprAnd (Parse *parse) {
 	Value lhs = parseExprBitOr(parse);
 	const Token *primary = parse->pos;
-	if (tryEat(parse, Tok_DoubleAmpersand)) {
+	while (tryEat(parse, Tok_DoubleAmpersand)) {
 		const u16 int_size = parse->target.int_size;
 		IrBuild *build = &parse->build;
 		Block *head = build->insertion_block;
@@ -1087,29 +1092,32 @@ static Value parseExprAnd (Parse *parse) {
 		Inst inst = build->ir.ptr[lhs.inst];
 		// TODO Really need constant folding for branches to avoid this kind of stuff
 		if (inst.kind == Ir_Constant || inst.kind == Ir_Reloc) {
-			Value rhs = parseExprOr(parse);
+			IrRef res;
+			if (inst.kind == Ir_Reloc || inst.constant != 0) {
+				res = toBoolean(parse, primary, parseExprBitOr(parse));
+			} else {
+				Type t = parseValueType(parse, parseExprBitOr);
+				(void) t; // TODO Typecheck.
+				res = genImmediateInt(build, 0, int_size);
+			}
+			lhs = (Value) {BASIC_INT, res};
+		} else {
+			IrRef constant = genPhiOut(build, genImmediateInt(build, 0, int_size));
+			genBranch(build, toBoolean(parse, primary, lhs));
+			head->exit.branch.on_true = startNewBlock(build, STRING_EMPTY);
 
-			IrRef res = (inst.kind == Ir_Reloc || inst.constant != 0) ?
-					  toBoolean(parse, primary, rhs)
-					: genImmediateInt(build, 0, int_size);
-			return (Value) {BASIC_INT, res};
+			Value rhs = parseExprBitOr(parse);
+
+			IrRef rhs_val = genPhiOut(build, toBoolean(parse, primary, rhs));
+			Block *join = newBlock(&parse->build, STRING_EMPTY);
+			genJump(build, join);
+			head->exit.branch.on_false = join;
+			IrRef res = genPhiIn(build, int_size);
+
+			setPhiOut(build, constant, IDX_NONE, res);
+			setPhiOut(build, rhs_val, res, IDX_NONE);
+			lhs = (Value) {BASIC_INT, res};
 		}
-
-		IrRef constant = genPhiOut(build, genImmediateInt(build, 0, int_size));
-		genBranch(build, toBoolean(parse, primary, lhs));
-		head->exit.branch.on_true = startNewBlock(build, STRING_EMPTY);
-
-		Value rhs = parseExprOr(parse);
-
-		IrRef rhs_val = genPhiOut(build, toBoolean(parse, primary, rhs));
-		Block *join = newBlock(&parse->build, STRING_EMPTY);
-		genJump(build, join);
-		head->exit.branch.on_false = join;
-		IrRef res = genPhiIn(build, int_size);
-
-		setPhiOut(build, constant, IDX_NONE, res);
-		setPhiOut(build, rhs_val, res, IDX_NONE);
-		lhs = (Value) {BASIC_INT, res};
 	}
 	return lhs;
 }
