@@ -912,11 +912,10 @@ static Value parseExprAssignment (Parse *parse) {
 	parse->pos++;
 	bool is_volatile = v.typ.qualifiers & Qualifier_Volatile;
 
-	Value assigned = parseExprAssignment(parse);
+	Value assigned = rvalue(parseExprAssignment(parse), parse);
 
 	if (primary->kind != Tok_Equal) {
 		Value loaded = {v.typ, genLoad(&parse->build, v.inst, typeSize(v.typ, &parse->target), is_volatile)};
-		assigned = rvalue(assigned, parse);
 
 		switch (primary->kind) {
 		case Tok_PlusEqual:
@@ -956,8 +955,10 @@ static Value parseExprAssignment (Parse *parse) {
 			parseerror(parse, primary, "TODO Compound assignments");
 		}
 	}
-
-	genStore(&parse->build, v.inst, coerce(assigned, v.typ, parse, primary), is_volatile);
+	assigned = (Value) {v.typ,
+		coercerval(assigned, v.typ, parse, primary, false),
+	};
+	genStore(&parse->build, v.inst, assigned.inst, is_volatile);
 	return assigned;
 }
 
@@ -3639,11 +3640,12 @@ static Value intPromote (Value val, Parse *p, const Token *primary) {
 				printTypeHighlighted(p->arena, val.typ));
 	}
 
-	if (rankDiff(val.typ.basic, Int_int) >= 0)
+	int delta = rankDiff(val.typ.basic, Int_int);
+	if (delta >= 0)
 		return val;
 	const Type unsignedint = {Kind_Basic, .basic = Int_int | Int_unsigned};
 
-	if (val.typ.basic & Int_unsigned)
+	if ((val.typ.basic & Int_unsigned) && (p->target.typesizes[val.typ.basic & ~Int_unsigned] == p->target.int_size))
 		return (Value) {unsignedint, coerce(val, unsignedint, p, primary)};
 	else
 		return (Value) {BASIC_INT, coerce(val, BASIC_INT, p, primary)};

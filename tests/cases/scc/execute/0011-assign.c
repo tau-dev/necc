@@ -3,7 +3,7 @@ int
 main()
 {
 	int x;
-	int y;
-	x = y = 0;
+	unsigned char y;
+	x = y = 1024;
 	return x;
 }
