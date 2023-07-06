@@ -2,7 +2,7 @@ C_SRCS := $(wildcard src/*.c)
 C_HDRS := $(wildcard src/*.h)
 
 C_FLAGS := -lm -std=c11 -Werror -Wall -Wextra -Wno-unused-command-line-argument -pedantic -Wpedantic -Wno-missing-field-initializers \
-	-DMUSL_DIR=\"/home/tau/foreign/lang/musl-1.2.3\"
+	-DMUSL_DIR=\"$(MUSL_DIR)\"
 # C_DBG_FLAGS := -g -O0
 C_DBG_FLAGS := -g -O0 -fsanitize=address -fsanitize=undefined
 # C_REL_FLAGS := -fstrict-aliasing -g -w -fno-omit-frame-pointer -O3 -flto=auto -DNDEBUG
@@ -40,7 +40,7 @@ selfhost/necc: $(SELFHOST_OBJS)
 	musl-gcc -static $^ -lm -o $@
 
 selfhost/%.o: src/%.c $(C_HDRS) bin/necc-dbg
-	./bin/necc-dbg $< -g -obj=$@ -std gnu -def MUSL_DIR=\"/home/tau/foreign/lang/musl-1.2.3\"
+	./bin/necc-dbg $< -g -obj=$@ -std gnu -def MUSL_DIR=\"$(MUSL_DIR)\"
 
 
 

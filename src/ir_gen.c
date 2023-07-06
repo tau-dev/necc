@@ -593,7 +593,7 @@ static inline i64 signExtend (u64 constant, u16 src, u16 target) {
 	// They happen everywhere in the constant folding though and my
 	// compilers don't seem to mess with them, so I'll worry about that
 	// later.
-	return fully_extended & ~bitsAbove(target);
+	return truncate(fully_extended, target);
 }
 
 IrRef genTrunc (IrBuild *build, IrRef source, u16 target) {
@@ -628,7 +628,7 @@ IrRef genZeroExt (IrBuild *build, IrRef source, u16 target) {
 	if (inst[source].size == target)
 		return source;
 	if (inst[source].kind == Ir_Constant)
-		return genImmediateInt(build, truncate(inst[source].constant, target), target);
+		return genImmediateInt(build, inst[source].constant, target);
 
 	return append(build, (Inst) {Ir_ZeroExtend, .size = target, .unop = source});
 }

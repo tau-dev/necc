@@ -865,22 +865,27 @@ static void emitInstForward(Codegen *c, IrRef i) {
 	case Ir_Sub: triple(c, "sub", inst.size, inst.binop.lhs, inst.binop.rhs, i); break;
 	case Ir_Mul: triple(c, "imul", inst.size, inst.binop.lhs, inst.binop.rhs, i); break;
 	case Ir_Div:
-	case Ir_SDiv: {
-		emit(c, " xor R, R", RDX_8, RDX_8);
+	case Ir_Mod: {
 		loadTo(c, RAX, inst.binop.lhs);
+		emit(c, " xor R, R", RDX_8, RDX_8);
 
-		const char *op = inst.kind == Ir_Div ? "div" : "idiv";
-		emit(c, " ZZ #", op, sizeSuffix(inst.size), inst.binop.rhs);
+		emit(c, " divZ #", sizeSuffix(inst.size), inst.binop.rhs);
 		emit(c, " mov #, R", i, registerSized(RAX, inst.size));
+		emit(c, " mov #, R", i, registerSized(inst.kind == Ir_Div ? RAX : RDX, inst.size));
 	} break;
-	case Ir_Mod:
+	case Ir_SDiv:
 	case Ir_SMod: {
-		emit(c, " xor R, R", RDX_8, RDX_8);
 		loadTo(c, RAX, inst.binop.lhs);
+		switch (inst.size) {
+		case 1: emit(c, " cbw"); break;
+		case 2: emit(c, " cwd"); break;
+		case 4: emit(c, " cdq"); break;
+		case 8: emit(c, " cqo"); break;
+		default: unreachable;
+		}
 
-		const char *op = inst.kind == Ir_Mod ? "div" : "idiv";
-		emit(c, " ZZ #", op, sizeSuffix(inst.size), inst.binop.rhs);
-		emit(c, " mov #, R", i, registerSized(RDX, inst.size));
+		emit(c, " idivZ #", sizeSuffix(inst.size), inst.binop.rhs);
+		emit(c, " mov #, R", i, registerSized(inst.kind == Ir_SDiv ? RAX : RDX, inst.size));
 	} break;
 	case Ir_FAdd: ftriple(c, "adds", inst.size, inst.binop.lhs, inst.binop.rhs, i); break;
 	case Ir_FSub: ftriple(c, "subs", inst.size, inst.binop.lhs, inst.binop.rhs, i); break;
@@ -945,14 +950,14 @@ static void emitInstForward(Codegen *c, IrRef i) {
 		loadTo(c, RCX, inst.binop.rhs);
 	} break;
 	case Ir_Truncate: {
-		Register reg = registerSized(RAX, c->ir.ptr[i].size);
+		Register reg = registerSized(RAX, inst.size);
 		emit(c, " mov R, [R+I]", reg, RSP_8, c->storage[inst.unop]);
 		emit(c, " mov #, R", i, reg);
 	} break;
 	case Ir_SignExtend: {
-		Register reg = registerSized(RSI, inst.size);
-		emit(c, " movsxZ R, #",
-			(valueSize(c, inst.unop) > 2 ? "d" : ""), reg, inst.unop);
+		Register reg = registerSized(RAX, inst.size);
+		bool dw = inst.size == 8 && valueSize(c, inst.unop) == 4;
+		emit(c, " movsxZ R, #", (dw ? "d" : ""), reg, inst.unop);
 		emit(c, " mov #, R", i, reg);
 	} break;
 	case Ir_ZeroExtend: {
