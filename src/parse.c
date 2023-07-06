@@ -1041,6 +1041,8 @@ static Value parseExprOr (Parse *parse) {
 	Value lhs = parseExprAnd(parse);
 	const Token *primary = parse->pos;
 
+	if (parse->pos->kind == Tok_DoublePipe)
+		lhs = rvalue(lhs, parse);
 	while (tryEat(parse, Tok_DoublePipe)) {
 		const u16 int_size = parse->target.int_size;
 		IrBuild *build = &parse->build;
@@ -1084,6 +1086,8 @@ static Value parseExprOr (Parse *parse) {
 static Value parseExprAnd (Parse *parse) {
 	Value lhs = parseExprBitOr(parse);
 	const Token *primary = parse->pos;
+	if (parse->pos->kind == Tok_DoubleAmpersand)
+		lhs = rvalue(lhs, parse);
 	while (tryEat(parse, Tok_DoubleAmpersand)) {
 		const u16 int_size = parse->target.int_size;
 		IrBuild *build = &parse->build;
@@ -3597,7 +3601,7 @@ static bool comparablePointers (Parse *parse, Value lhs, Value rhs) {
 	Type b = rhs.typ;
 
 	if (a_zero && b_zero)
-		return true;
+		return lhs.typ.kind == Kind_Basic && rhs.typ.kind == Kind_Basic && lhs.typ.basic == rhs.typ.basic;
 
 	if (!((a.kind == Kind_Pointer || a.kind == Kind_FunctionPtr || a_zero)
 		&& (b.kind == Kind_Pointer || b.kind == Kind_FunctionPtr || b_zero)))

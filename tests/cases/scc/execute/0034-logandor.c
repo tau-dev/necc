@@ -8,11 +8,11 @@ effect()
 	return 1;
 }
 
+int x;
+
 int
 main()
 {
-	int x;
-
 	g = 0;
 	x = 0;
 	if(x && effect())
