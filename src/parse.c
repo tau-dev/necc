@@ -238,6 +238,8 @@ void parse (Arena *code_arena, Tokenization tokens, Options *opt, Module *module
 			continue;
 
 		const Token *type_token = parse.pos;
+		Attributes attr = parseAttributes(&parse);
+		(void) attr;
 		Type base_type = parseTypeBase(&parse, &storage);
 
 		if (allowedNoDeclarator(&parse, base_type))
@@ -1640,7 +1642,8 @@ static Value parseExprBase (Parse *parse) {
 		return immediateIntVal(parse, (Type) {Kind_Pointer, .pointer = &void_type}, 0);
 	case Tok_Real: {
 		double val = floatLiteralValue(parse->pos - 1);
-		return immediateIntVal(parse, (Type) {Kind_Basic, .basic = t.literal_type}, val);
+		Type typ = {Kind_Float, .basic = t.literal_type};
+		return (Value) { typ,  genImmediateReal(&parse->build, val, typeSize(typ, &parse->target)) };
 	}
 
 	case Tok_String: {
@@ -3708,7 +3711,7 @@ static IrRef toBoolean (Parse *p, const Token *primary, Value v) {
 	v = rvalue(v, p);
 	removeEnumness(p, &v.typ);
 
-	if (v.typ.kind != Kind_Basic && v.typ.kind != Kind_Pointer && v.typ.kind != Kind_FunctionPtr)
+	if (v.typ.kind != Kind_Basic && v.typ.kind != Kind_Float && v.typ.kind != Kind_Pointer && v.typ.kind != Kind_FunctionPtr)
 		parseerror(p, primary, "(TODO Explain this better) expected an expression of scalar type");
 
 	u32 size = typeSize(v.typ, &p->target);

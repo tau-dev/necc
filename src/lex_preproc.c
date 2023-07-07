@@ -1014,6 +1014,7 @@ Tokenization lex (Arena *generated_strings, String filename, LexParams params) {
 				bool quoted;
 				String includefilename = includeFilename(expansion, &preproc_evaluation_buf, &quoted);
 
+				// TODO Need to normalize the path before lookup, or #pragma once will not work.
 				SourceFile *new_source = NULL;
 				void **already_loaded = mapGetOrCreate(&sources, includefilename);
 				if (*already_loaded) {

@@ -577,9 +577,11 @@ IrRef genImmediateInt (IrBuild *build, long long i, u16 size) {
 }
 
 IrRef genImmediateReal (IrBuild *build, double r, u16 size) {
-	Inst inst = {Ir_Constant, .size = size};
-	memcpy(&inst.constant, &r, 8);
-
+	union {
+		double r;
+		u64 i;
+	} pun = {.r = r};
+	Inst inst = {Ir_Constant, .size = size, .constant = pun.i};
 	return append(build, inst);
 }
 
