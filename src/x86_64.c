@@ -89,7 +89,10 @@ typedef struct {
 	u16 *usage;
 	Storage *storage;
 	u32 stack_allocated;
-	bool is_memory_return;
+
+	ParameterClass ret_class;
+	bool is_vararg;
+
 	u32 vaarg_gp_offset;
 	u32 vaarg_fp_offset;
 	u32 vaarg_overflow_args;
@@ -600,7 +603,8 @@ static void emitFunctionForward (EmitParams params, u32 id) {
 
 		.types = &types,
 
-		.is_memory_return = mem_return,
+		.ret_class = ret_class,
+		.is_vararg = is_vararg,
 		.storage = calloc(ir.len, sizeof(Storage)),
 		.module = module,
 		.param_info = ALLOCN(params.arena, ParamInfo, ir.params.len),
@@ -701,10 +705,10 @@ static void emitFunctionForward (EmitParams params, u32 id) {
 		for (u32 i = gp_params; i < gp_parameter_regs_count; i++)
 			emit(&c, " mov qword ptr [R+I], R", RSP_8, i*8, registerSized(gp_parameter_regs[i], I64));
 		emit(&c, " test R, R", RAX, RAX);
-		emit(&c, " je .vaarg_no_float_args");
+		emit(&c, " je ..vaarg_no_float_args_I", id);
 		for (u32 i = 0; i < 8; i++)
 			emit(&c, " movaps xmmword ptr [R+I], %xmmI", RSP_8, 48 + i*16, i);
-		emit(&c, ".vaarg_no_float_args:");
+		emit(&c, "..vaarg_no_float_args_I:", id);
 	}
 
 
@@ -771,22 +775,6 @@ static Register loadTo (Codegen *c, Register reg, IrRef i) {
 	Register dest = registerSized(reg, c->ir.ptr[i].size);
 	emit(c, " mov R, #", dest, i);
 	return dest;
-}
-
-
-static bool loadMaybeBigTo (Codegen *c, Register reg1, Register reg2, IrRef i) {
-	u16 size = valueSize(c, i);
-	bool bigg = size > 8;
-
-	u32 reduced_size = bigg ? 8 : size;
-	emit(c, " mov R, Z [R+I]", registerSized(reg1, reduced_size), sizeOp(reduced_size), RSP_8, c->storage[i]);
-
-	if (bigg) {
-		u32 rest = size - reduced_size;
-		emit(c, " mov R, Z [R+I]", registerSized(reg2, rest), sizeOp(rest), RSP_8, c->storage[i] + 8);
-	}
-
-	return bigg;
 }
 
 
@@ -864,11 +852,23 @@ static void emitBlockForward (Codegen *c, Blocks blocks, u32 i) {
 	} break;
 	case Exit_Return:
 		if (exit.ret != IDX_NONE) {
-			if (c->is_memory_return) {
-				emit(c, " mov R, qword ptr [R]", RAX_8, RSP_8);
+			if (c->ret_class.count == 0) {
+				emit(c, " mov R, qword ptr [R+I]", RAX_8, RSP_8, c->is_vararg ? reg_save_area_size : 0);
 				copyTo(c, RAX, 0, RSP, c->storage[exit.ret], valueSize(c, exit.ret));
 			} else {
-				loadMaybeBigTo(c, RAX, RDX, exit.ret);
+				u32 gp_returns = 0;
+				u32 fp_returns = 0;
+				for (u32 j = 0; j < c->ret_class.count; j++) {
+					u32 dest = c->storage[exit.ret] + 8*j;
+					if (c->ret_class.registers[j] == Param_INTEGER) {
+						emit(c, " mov R, qword ptr [R+I]", gp_returns == 0 ? RAX_8 : RDX_8, RSP_8, dest);
+						gp_returns++;
+					} else {
+						assert(c->ret_class.registers[j] == Param_SSE);
+						emit(c, " movsd %xmmI, qword ptr [R+I]", fp_returns, RSP_8, dest);
+						fp_returns++;
+					}
+				}
 			}
 		}
 // 		emit(c, " add rsp, I", c->stack_allocated);
@@ -1198,12 +1198,13 @@ static void emitInstForward(Codegen *c, IrRef i) {
 			u32 gp_returns = 0;
 			u32 fp_returns = 0;
 			for (u32 j = 0; j < ret_class.count; j++) {
+				u32 dest = c->storage[i] + 8*j;
 				if (ret_class.registers[j] == Param_INTEGER) {
-					emit(c, " mov qword ptr [R+I], R", RSP_8, c->storage[i] + 8*j, gp_returns == 0 ? RAX_8 : RDX_8);
+					emit(c, " mov qword ptr [R+I], R", RSP_8, dest, gp_returns == 0 ? RAX_8 : RDX_8);
 					gp_returns++;
 				} else {
 					assert(ret_class.registers[j] == Param_SSE);
-					emit(c, " movsd qword ptr [R+I], %xmmI", RSP_8, c->storage[i] + 8*j, fp_returns);
+					emit(c, " movsd qword ptr [R+I], %xmmI", RSP_8, dest, fp_returns);
 					fp_returns++;
 				}
 			}
@@ -1555,7 +1556,7 @@ static void classifyMembers(const Target *target, ParameterClass *dest, u8 offse
 	} return;
 	case Kind_Array: {
 		u32 begin = offset / 8;
-		u32 end = (offset + typeSize(type, target) + 7) / 8 - begin;
+		u32 end = (offset + typeSize(type, target) + 7) / 8;
 		for (u32 i = begin; i < end; i++) {
 			classifyMembers(target, dest, i * 8, *type.array.inner);
 		}
