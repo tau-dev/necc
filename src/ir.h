@@ -5,6 +5,7 @@
 
 #include "util.h"
 #include "arena.h"
+#include "types.h"
 
 #define AUX_DATA(type, ir, idx) (*(type*) ((ir).aux_data.ptr + (idx)))
 
@@ -13,12 +14,17 @@ typedef struct Inst Inst;
 typedef struct Function Function;
 
 typedef u32 IrRef;
-typedef SPAN(IrRef) ValuesSpan;
 typedef LIST(IrRef) IrRefList;
 typedef LIST(Block*) Blocks;
 
 typedef struct {
+	IrRef arg_inst;
+	Type type;
+} Argument;
+typedef SPAN(Argument) ArgumentSpan;
+typedef struct {
 	u16 size;
+	Type type;
 } Parameter;
 typedef SPAN(Parameter) ParameterSpan;
 
@@ -41,7 +47,8 @@ typedef struct {
 typedef struct {
 	// PERFORMANCE The arguments could probably be stored as a flexible
 	// array member.
-	ValuesSpan arguments;
+	ArgumentSpan arguments;
+	Type rettype;
 } Call;
 
 
@@ -280,6 +287,7 @@ typedef struct Block {
 	u32 visited;
 	Block *dominator;
 	Blocks incoming;
+	u16 loop_depth;
 } Block;
 
 

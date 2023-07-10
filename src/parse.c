@@ -456,6 +456,7 @@ void parseFunction (Parse *parse, Symbol *symbol) {
 		// TODO Omit declaration data if not generating debug info.
 		IrRef slot = genStackAllocNamed(build, typeSize(param.type, &parse->target), param);
 
+		build->ir.params.ptr[i].type = param.type;
 		build->ir.params.ptr[i].size = typeSize(param.type, &parse->target);
 		IrRef paramval = genParameter(build, i);
 		genStore(build, slot, paramval, false);
@@ -1461,7 +1462,7 @@ static Value parseExprPostfix (Parse *parse) {
 			if (func.typ.kind != Kind_FunctionPtr)
 				parseerror(parse, primary, "expected a function type, got an expression of type %s", printTypeHighlighted(parse->arena, func.typ));
 
-			IrRefList arguments = {0};
+			LIST(Argument) arguments = {0};
 			DeclList params = func.typ.function.parameters;
 
 			bool have_prototype = !func.typ.function.missing_prototype;
@@ -1469,21 +1470,28 @@ static Value parseExprPostfix (Parse *parse) {
 			if (parse->pos->kind != Tok_CloseParen) {
 				do {
 					const Token *primary = parse->pos;
-					Value arg = parseExprAssignment(parse);
+					Value val = parseExprAssignment(parse);
 					if (have_prototype && !is_vararg && arguments.len == params.len)
 						parseerror(parse, primary, "too many arguments to function call");
 
-					IrRef inst;
 					if (have_prototype && arguments.len < params.len) {
-						inst = coerce(arg, params.ptr[arguments.len].type, parse, primary);
+						Type dest = params.ptr[arguments.len].type;
+						val.inst = coerce(val, dest, parse, primary);
+						val.typ = dest;
 					} else {
-						// TODO (6.5.2.2-6) “trailing arguments that have type float are promoted to double”.
-						if (arg.typ.kind == Kind_Basic)
-							inst = intPromote(arg, parse, primary).inst;
-						else
-							inst = rvalue(arg, parse).inst;
+						if (val.typ.kind == Kind_Basic) {
+							val = intPromote(val, parse, primary);
+						} else {
+							val = rvalue(val, parse);
+							if (val.typ.kind == Kind_Float && val.typ.real == Float_Single) {
+								val.inst = genFCast(build, val.inst, floatSize(Float_Double));
+								val.typ.real = Float_Double;
+							}
+						}
 					}
-					PUSH_A(parse->code_arena, arguments, inst);
+
+					Argument arg = {.arg_inst = val.inst, .type = val.typ};
+					PUSH_A(parse->code_arena, arguments, arg);
 				} while (tryEat(parse, Tok_Comma));
 			}
 
@@ -1496,10 +1504,10 @@ static Value parseExprPostfix (Parse *parse) {
 					parseerror(parse, primary, "too many arguments to function call");
 			}
 
-			ValuesSpan args = {arguments.len, arguments.ptr};
+			ArgumentSpan args = {arguments.len, arguments.ptr};
 			v = (Value) {
 				*func.typ.function.rettype,
-				genCall(build, func.inst, args, typeSize(*func.typ.function.rettype, &parse->target), is_vararg)
+				genCall(build, func.inst, *func.typ.function.rettype, args, typeSize(*func.typ.function.rettype, &parse->target), is_vararg)
 			};
 		} else if (tryEat(parse, Tok_OpenBracket)) {
 			v = rvalue(v, parse);
@@ -1642,7 +1650,7 @@ static Value parseExprBase (Parse *parse) {
 		return immediateIntVal(parse, (Type) {Kind_Pointer, .pointer = &void_type}, 0);
 	case Tok_Real: {
 		double val = floatLiteralValue(parse->pos - 1);
-		Type typ = {Kind_Float, .basic = t.literal_type};
+		Type typ = {Kind_Float, .real = t.literal_type};
 		return (Value) { typ,  genImmediateReal(&parse->build, val, typeSize(typ, &parse->target)) };
 	}
 
@@ -2007,7 +2015,7 @@ static Value parseIntrinsic (Parse *parse, Intrinsic i) {
 		Type t = parseTypeName(parse, NULL);
 		expect(parse, Tok_CloseParen);
 
-		return (Value){ t, genVaArg(build, v.inst, typeSize(t, &parse->target)) };
+		return (Value){ t, genVaArg(build, v.inst, typeSize(t, &parse->target), t) };
 	}
 	case Intrinsic_Expect: {
 		Value a = parseExprAssignment(parse);
@@ -2407,8 +2415,8 @@ static bool tryParseTypeBase (Parse *parse, Type *type, u8 *storage_dest) {
 				// TODO Better type checking.
 				// On GCC x86-64, for example, it should work roughly as if there was defined:
 				// typedef struct {
-				// 	uint gp_offset;
-				// 	uint fp_offset;
+				// 	unsigned gp_offset;
+				// 	unsigned fp_offset;
 				// 	void *overflow_arg_area;
 				// 	void *reg_save_area;
 				// } __builtin_va_list[1];

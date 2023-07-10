@@ -39,7 +39,7 @@ IrRef genZeroExt(IrBuild *, IrRef source, u16 target);
 IrRef genFCast(IrBuild *, IrRef source, u16 target);
 IrRef genFloatToInt(IrBuild *, IrRef source, u16 target, Signedness);
 IrRef genIntToFloat(IrBuild *, IrRef source, u16 target, Signedness);
-IrRef genCall(IrBuild *, IrRef func, ValuesSpan args, u16 size, bool is_vararg);
+IrRef genCall(IrBuild *, IrRef func, Type rettype, ArgumentSpan args, u16 size, bool is_vararg);
 IrRef genGlobal(IrBuild *, u32 id);
 IrRef genLoad(IrBuild *, IrRef ref, u16 size, bool is_volatile);
 IrRef genStore(IrBuild *, IrRef dest, IrRef value, bool is_volatile);
@@ -49,7 +49,7 @@ IrRef genPhiOut(IrBuild *build, IrRef source);
 void setPhiOut(IrBuild *build, IrRef phi, IrRef dest_true, IrRef dest_false);
 
 IrRef genVaStart(IrBuild *build, IrRef va_list_addr, IrRef param);
-IrRef genVaArg(IrBuild *build, IrRef va_list_addr, IrRef size);
+IrRef genVaArg(IrBuild *build, IrRef va_list_addr, u16 size, Type type);
 
 void replaceWithCopy(IrList ir, IrRef original, IrRef replacement, IrRef ordered_after);
 void replaceWithNop(IrList ir, IrRef original);

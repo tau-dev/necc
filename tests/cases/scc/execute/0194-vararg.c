@@ -9,7 +9,7 @@ fun(int first, ...)
 	va_list va;
 
 	va_start(va, first);
-	c = va_arg(va, int);
+	c = va_arg(va, double);
 	va_end(va);
 
 	return c;
@@ -18,5 +18,5 @@ fun(int first, ...)
 int
 main()
 {
-	return fun(1, 0);
+	return fun(1, 33.0);
 }

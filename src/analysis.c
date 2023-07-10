@@ -48,7 +48,7 @@ should be moved into a separate file at some point).
 	\
 			Call EXPANSION_call = AUX_DATA(Call, (ir), (inst).call.data);	\
 			for (u32 p = 0; p < EXPANSION_call.arguments.len; p++) {	\
-				operand_var = &EXPANSION_call.arguments.ptr[p]; operation;	\
+				operand_var = &EXPANSION_call.arguments.ptr[p].arg_inst; operation;	\
 			}	\
 			break;	\
 		ZEROOP_CASES:	\
@@ -163,7 +163,7 @@ void decimateIr (IrList *ir, Blocks blocks) {
 	*ir = out;
 }
 
-void calcLifetimes (IrList ir, ValuesSpan lastuses) {
+void calcLifetimes (IrList ir, IrRefList lastuses) {
 	assert(ir.len == lastuses.len);
 	IrRef *uses = lastuses.ptr;
 	memset(uses, 0, sizeof(IrRef) * lastuses.len);

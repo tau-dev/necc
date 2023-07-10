@@ -1,5 +1,5 @@
 //!necc-dbg @ -run
-int *calloc(int, int);
+void *calloc(unsigned long, unsigned long);
 
 int N;
 int *t;

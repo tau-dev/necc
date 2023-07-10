@@ -1,4 +1,6 @@
 //!necc-dbg @ -run
+int printf(const char *__restrict, ...);
+
 struct foo {
 	int i, j, k;
 	char *p;
@@ -19,8 +21,7 @@ main(void)
 	struct foo f;
 
 	f.i = f.j = 1;
-	f1(f, &f, 2);
-	f1(f, &f, 2, 1, f, &f);
+	printf("%d, %d\n", f1(f, &f, 2), f1(f, &f, 2, 1, f, &f));
 
 	return 0;
 }

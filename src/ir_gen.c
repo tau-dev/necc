@@ -30,6 +30,7 @@ static IrRef append (IrBuild *build, Inst inst) {
 			generalFatal("out of memory on list growth.");
 	}
 
+	// This is probably not strict-aliasing-correct, but whatevs.
 	list->ptr[list->len] = inst;
 	list->locations[list->len] = build->loc;
 
@@ -38,7 +39,8 @@ static IrRef append (IrBuild *build, Inst inst) {
 
 
 static u32 pushAuxData(IrList *ir, const void *data, u32 len) {
-	ir->aux_data.len = (ir->aux_data.len + 7) / 8 * 8;
+	// TODO Alignment, blah, blah.
+	len = (len + 7) / 8 * 8;
 
 	if (ir->aux_data.len + len >= ir->aux_data.capacity) {
 		ir->aux_data.capacity = (ir->aux_data.len + len) * 3 / 2 + 4;
@@ -708,8 +710,8 @@ IrRef genFloatToInt (IrBuild *build, IrRef source, u16 target, Signedness sign) 
 	return append(build, i);
 }
 
-IrRef genCall (IrBuild *build, IrRef func, ValuesSpan args, u16 size, bool is_vararg) {
-	Call call = {args};
+IrRef genCall (IrBuild *build, IrRef func, Type rettype, ArgumentSpan args, u16 size, bool is_vararg) {
+	Call call = {args, rettype};
 	u32 data = pushAuxData(&build->ir, &call, sizeof call);
 
 	IrRef inst = append(build, (Inst) {
@@ -778,8 +780,9 @@ void setPhiOut (IrBuild *build, IrRef phi, IrRef dest_true, IrRef dest_false) {
 	inst->phi_out.on_false = dest_false;
 }
 
-IrRef genVaArg (IrBuild *build, IrRef va_list_addr, IrRef size) {
-	IrRef store = append(build, (Inst) {Ir_VaArg, .size = size, .unop = va_list_addr});
+IrRef genVaArg (IrBuild *build, IrRef va_list_addr, u16 size, Type type) {
+	u32 data = pushAuxData(&build->ir, &type, sizeof type);
+	IrRef store = append(build, (Inst) {Ir_VaArg, .size = size, .unop_const = {va_list_addr, data}});
 
 	// TODO This should be a mem instruction too.
 	PUSH_A(build->block_arena, build->insertion_block->ordered_instructions, store);
@@ -934,7 +937,7 @@ void printBlock (FILE *dest, Block *blk, IrList ir) {
 
 			Call call = AUX_DATA(Call, ir, inst.call.data);
 			for (u32 i = 0; i < call.arguments.len; i++) {
-				fprintf(dest, "%lu", (ulong) call.arguments.ptr[i]);
+				fprintf(dest, "%lu", (ulong) call.arguments.ptr[i].arg_inst);
 				if (i + 1 < call.arguments.len)
 					fprintf(dest, ", ");
 			}

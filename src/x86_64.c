@@ -67,9 +67,8 @@ typedef enum {
 
 typedef struct {
 	u32 storage;
-	u8 registers;
-	Register reg1;
-	Register reg2;
+	ParameterClass class;
+	u8 registers[8];
 } ParamInfo;
 
 typedef LIST(Location) Locations;
@@ -92,8 +91,9 @@ typedef struct {
 	u32 stack_allocated;
 	bool is_memory_return;
 	u32 vaarg_gp_offset;
-	u32 vaarg_reg_saves;
+	u32 vaarg_fp_offset;
 	u32 vaarg_overflow_args;
+	u32 vaarg_reg_saves;
 	SPAN(ParamInfo) param_info;
 } Codegen;
 
@@ -208,6 +208,7 @@ enum {
 
 
 // Registers rbx, r12 - r15 are callee-save, rsp and rbp are special.
+// On Windows, rsi and rdi and the lower 128 bits of XMM6-XMM15 are callee-save too!
 const Register caller_saved[] = {
 	RAX,
 	RCX,
@@ -220,15 +221,16 @@ const Register caller_saved[] = {
 	R11,
 };
 
-const Register parameter_regs[] = {
-	RDI,
-	RSI,
-	RDX,
-	RCX,
-	R8,
-	R9,
+const int gp_parameter_regs[] = {
+	RDI_8,
+	RSI_8,
+	RDX_8,
+	RCX_8,
+	R8_8,
+	R9_8,
 };
-static const u32 parameter_regs_count = sizeof(parameter_regs) / sizeof(parameter_regs[0]);
+static const u32 gp_parameter_regs_count = sizeof(gp_parameter_regs) / sizeof(gp_parameter_regs[0]);
+const u32 reg_save_area_size = 48 + 128;
 
 
 
@@ -249,7 +251,6 @@ static inline Register registerSized(Register, u16);
 static const char *sizeOp(u16 size);
 static const char *sizeSuffix(u16 size);
 static const char *sizeFSuffix(u16 size);
-static bool isMemory(u16 size);
 static u16 valueSize(Codegen *, IrRef);
 static void emit(Codegen *c, const char *fmt, ...);
 static void emitString(String s);
@@ -268,7 +269,6 @@ static void emitLabel (Module module, u32 i) {
 }
 
 void emitX64AsmSimple(EmitParams params) {
-// 	FILE *out, FILE *debug_out, Arena *arena, Module module, const Target *target;
 	Codegen globals = {
 		.out = params.out,
 		.arena = params.arena,
@@ -574,7 +574,11 @@ static void emitFunctionForward (EmitParams params, u32 id) {
 
 	StaticValue *reloc = &module.ptr[id];
 	Block *entry = reloc->function_ir.entry;
-	bool mem_return = isMemory(typeSize(*reloc->type.function.rettype, params.target));
+	ParameterClass ret_class = classifyParam(params.target, *reloc->type.function.rettype);
+	if (ret_class.sse_count > 2 || ret_class.count - ret_class.count > 2)
+		ret_class.count = 0;
+
+	bool mem_return = ret_class.count == 0;
 	bool is_vararg = reloc->type.function.is_vararg;
 
 
@@ -603,37 +607,40 @@ static void emitFunctionForward (EmitParams params, u32 id) {
 		.ir = ir,
 	};
 
-
+	// Register-save area for the general purpose and the SSE parameter registers.
+	if (is_vararg)
+		c.stack_allocated += reg_save_area_size;
 
 	// A memory return uses up the first parameter register for the
 	// destination address.
-	u32 normal_params_found = mem_return;
-	c.stack_allocated = 8 * mem_return;
+	u32 gp_params = mem_return;
+	u32 fp_params = 0;
+	if (mem_return)
+		c.stack_allocated += 8;
 
 	// First mark parameters in order.
 	for (u32 i = 0; i < ir.params.len; i++) {
-		u32 size = ir.params.ptr[i].size;
-		bool bigg = size > 8;
-		bool is_register = !isMemory(size) && normal_params_found + bigg < parameter_regs_count;
-		c.param_info.ptr[i].registers = is_register ? 1 + bigg : 0;
+		ParameterClass class = classifyParam(c.target, ir.params.ptr[i].type);
+		u32 gp_count = class.count - class.sse_count;
+		if (gp_count > gp_parameter_regs_count - gp_params || class.sse_count > 8 - fp_params)
+			class.count = 0;
 
-		if (is_register) {
-			u32 reduced_size = bigg ? 8 : size;
-			c.param_info.ptr[i].reg1 = registerSized(parameter_regs[normal_params_found], reduced_size);
-			normal_params_found++;
-
-			if (bigg) {
-				c.param_info.ptr[i].reg2 = registerSized(parameter_regs[normal_params_found], size - reduced_size);
-				normal_params_found++;
-			}
-
+		c.param_info.ptr[i].class = class;
+		if (class.count > 0) {
 			c.param_info.ptr[i].storage = c.stack_allocated;
-			c.stack_allocated += roundUp(size);
+			c.stack_allocated += 8 * class.count;
+
+			for (u32 j = 0; j < class.count; j++) {
+				if (class.registers[j] == Param_INTEGER) {
+					c.param_info.ptr[i].registers[j] = gp_params;
+					gp_params++;
+				} else {
+					c.param_info.ptr[i].registers[j] = fp_params;
+					fp_params++;
+				}
+			}
 		}
 	}
-
-	if (is_vararg)
-		c.stack_allocated = 48;
 
 
 	for (u32 i = 0; i < ir.len; i++) {
@@ -648,45 +655,66 @@ static void emitFunctionForward (EmitParams params, u32 id) {
 			c.stack_allocated += roundUp(inst.alloc.size);
 	}
 
+	// Align stack to 16 bytes.
+	c.stack_allocated = (c.stack_allocated + 15) / 16 * 16;
+
+
+	// No need to do callee-saves because those registers are never touched.
 
 	emit(&c, " push R", RBP_8);
 	emit(&c, " mov R, R", RBP_8, RSP_8);
 	emit(&c, " sub R, I", RSP_8, c.stack_allocated);
 
-	if (c.is_memory_return)
-		emit(&c, " mov qword ptr [R], R", RSP_8, RDI_8);
 
-	// rbp and return address
+	if (mem_return)
+		emit(&c, " mov qword ptr [R+I], R", RSP_8, is_vararg ? reg_save_area_size : 0, RDI_8);
+
+	// 16 bytes for rbp and return address.
 	u32 mem_params = c.stack_allocated + 16;
 
+	// Copy regular parameters to the stack.
 	for (u32 i = 0; i < c.param_info.len; i++) {
 		ParamInfo info = c.param_info.ptr[i];
-		if (info.registers) {
-			emit(&c, " mov Z [R+I], R", sizeOp(sizeOfRegister(info.reg1)), RSP_8,info.storage, info.reg1);
-
-			if (info.registers == 2)
-				emit(&c, " mov Z [R+I], R", sizeOp(sizeOfRegister(info.reg2)), RSP_8, info.storage + 8, info.reg2);
+		if (info.class.count) {
+			for (u32 j = 0; j < info.class.count; j++) {
+				if (info.class.registers[j] == Param_INTEGER) {
+					Register reg = gp_parameter_regs[info.registers[j]];
+					emit(&c, " mov qword ptr [R+I], R", RSP_8, info.storage + 8*j, reg);
+				} else {
+					assert(info.class.registers[j] == Param_SSE);
+					emit(&c, " movsd qword ptr [R+I], %xmmI", RSP_8, info.storage + 8*j, (u32) info.registers[j]);
+				}
+			}
 		} else {
 			c.param_info.ptr[i].storage = mem_params;
 			mem_params += roundUp(ir.params.ptr[i].size);
 		}
 	}
 
+	if (is_vararg) {
+		c.vaarg_reg_saves = 0;
+		c.vaarg_gp_offset = gp_params * 8;
+		c.vaarg_fp_offset = 48 + fp_params * 8;
+		c.vaarg_overflow_args = mem_params;
+
+		// Copy out the registers into the register save area.
+		for (u32 i = gp_params; i < gp_parameter_regs_count; i++)
+			emit(&c, " mov qword ptr [R+I], R", RSP_8, i*8, registerSized(gp_parameter_regs[i], I64));
+		emit(&c, " test R, R", RAX, RAX);
+		emit(&c, " je .vaarg_no_float_args");
+		for (u32 i = 0; i < 8; i++)
+			emit(&c, " movaps xmmword ptr [R+I], %xmmI", RSP_8, 48 + i*16, i);
+		emit(&c, ".vaarg_no_float_args:");
+	}
+
+
+	// Initialize the StackAllocs.
 	for (u32 i = 0; i < ir.len; i++) {
 		Inst inst = ir.ptr[i];
 
 		if (inst.kind == Ir_StackAllocFixed) {
 			emit(&c, " lea R, [R+I]", RAX_8, RSP_8, c.storage[i]+8);
 			emit(&c, " mov #, R", i, RAX_8);
-		}
-	}
-
-	if (is_vararg) {
-		c.vaarg_reg_saves = 0;
-		c.vaarg_gp_offset = normal_params_found * 8;
-		c.vaarg_overflow_args = mem_params;
-		for (u32 i = normal_params_found; i < parameter_regs_count; i++) {
-			emit(&c, " mov qword ptr [R+I], R", RSP_8, i*8, registerSized(parameter_regs[i], I64));
 		}
 	}
 
@@ -985,7 +1013,6 @@ static void emitInstForward(Codegen *c, IrRef i) {
 			// Wrapping unsigned to signed is undefined, but whatever.
 			emit(c, " mov Z [R+I], ~I", sizeOp(4), RSP_8, c->storage[i], (i32) inst.constant);
 			emit(c, " mov Z [R+I], ~I", sizeOp(4), RSP_8, c->storage[i] + 4, (i32) (inst.constant >> 32));
-// 		} else if (inst.size == 4) {
 		} else {
 			emit(c, " mov #, ~I", i, (i32) inst.constant);
 		}
@@ -1040,92 +1067,145 @@ static void emitInstForward(Codegen *c, IrRef i) {
 		// State of affairs: rhs should be the last parameter, but it is currently ignored.
 
 		emit(c, " mov dword ptr [R], I", RAX_8, c->vaarg_gp_offset);
-		emit(c, " mov dword ptr [R+4], 48", RAX_8);
-		emit(c, " lea R, [R+I]", RDX_8, RSP_8, c->stack_allocated + 8);
+		emit(c, " mov dword ptr [R+4], I", RAX_8, c->vaarg_fp_offset);
+		emit(c, " lea R, [R+I]", RDX_8, RSP_8, c->vaarg_overflow_args);
 		emit(c, " mov qword ptr [R+8], R", RAX_8, RDX_8);
 		emit(c, " lea R, [R+I]", RDX_8, RSP_8, c->vaarg_reg_saves);
 		emit(c, " mov qword ptr [R+16], R", RAX_8, RDX_8);
 	} break;
 	case Ir_VaArg: {
-		loadTo(c, RAX, inst.unop);
-		if (!isMemory(inst.size)) {
-			emit(c, " xor R, R", RDX_8, RDX_8);
-			emit(c, " mov R, dword ptr [R]", RDX_4, RAX_8);
-			emit(c, " cmp R, I", RDX_4, inst.size <= 8 ? 48 : 40);
-			emit(c, " jae .vaarg_I_overflowarg", i);
+		Type type = AUX_DATA(Type, c->ir, inst.unop_const.offset);
+		ParameterClass class = classifyParam(c->target, type);
 
-			emit(c, " add R, qword ptr [R+16]", RDX_8, RAX_8);
-			emit(c, " add dword ptr [R], I", RAX_8, inst.size <= 8 ? 8 : 16);
+		// Put the va_list's address into RAX.
+		loadTo(c, RAX, inst.unop);
+
+		if (class.count) {
+			u32 gp_count = class.count - class.sse_count;
+
+			if (gp_count) {
+				// Test if all INTEGER parts would fit
+				emit(c, " mov R, dword ptr [R]", RDX_4, RAX_8);
+				emit(c, " cmp R, I", RDX_4, 48 - gp_count*8);
+				emit(c, " ja .vaarg_I_overflowarg", i);
+			}
+
+			if (class.sse_count) {
+				// Test if all SSE parts would fit
+				emit(c, " mov R, dword ptr [R+4]", RDX_4, RAX_8);
+				emit(c, " cmp R, I", RDX_4, reg_save_area_size - class.sse_count*8);
+				emit(c, " ja .vaarg_I_overflowarg", i);
+			}
+
+			for (u32 j = 0; j < class.count; j++) {
+				// Load the register offset to EDX and update it.
+				if (class.registers[j] == Param_INTEGER) {
+					emit(c, " mov R, dword ptr [R]", RDX_4, RAX_8);
+					emit(c, " add dword ptr [R], 8", RAX_8);
+				} else {
+					emit(c, " mov R, dword ptr [R+4]", RDX_4, RAX_8);
+					emit(c, " add dword ptr [R+4], 16", RAX_8);
+				}
+				// Add it to the reg_save_area.
+				emit(c, " add R, qword ptr [R+16]", RDX_8, RAX_8);
+
+				emit(c, " mov R, qword ptr [R]", RDX_8, RDX_8);
+				emit(c, " mov qword ptr [R+I], R", RSP_8, c->storage[i] + j*8, RDX_8);
+			}
 			emit(c, " jmp .vaarg_I_done", i);
 
 			emit(c, ".vaarg_I_overflowarg:", i);
 		}
 		emit(c, " mov R, qword ptr [R+8]", RDX_8, RAX_8);
 		emit(c, " add qword ptr [R+8], I", RAX_8, inst.size);
+		copyTo(c, RSP, c->storage[i], RDX, 0, inst.size);
 
 		emit(c, ".vaarg_I_done:", i);
-		copyTo(c, RSP, c->storage[i], RDX, 0, inst.size);
 	} break;
 	case Ir_Call: {
 		Call call = AUX_DATA(Call, c->ir, inst.call.data);
-		ValuesSpan args = call.arguments;
-		bool memory_return = isMemory(inst.size);
+		ArgumentSpan args = call.arguments;
+		ParameterClass ret_class = classifyParam(c->target, call.rettype);
+		if (ret_class.sse_count > 2 || ret_class.count - ret_class.count > 2)
+			ret_class.count = 0;
 
-// 		emit(c, "	; call");
-		u32 param_slot = memory_return;
+		bool memory_return = ret_class.count == 0;
+
 		if (memory_return)
 			emit(c, " lea R, #", RDI_8, i);
 
 		// STYLE All kinds of copypasta between parameter taking and
 		// argument passing. Need to unify caller and callee definitions
-		// per ABI.
+		// per ABI. PERFORMANCE Could cache ABI calculations in the Type
+		// data of the function prototype, for example.
+
+		u32 gp_params = memory_return;
+		u32 fp_params = 0;
+
 		u32 stack_memory = 0;
-		for (u32 p = 0; p < args.len; p++) {
-			u32 size = valueSize(c, args.ptr[p]);
-			bool bigg = size > 8;
-			if (isMemory(size) || param_slot + bigg >= parameter_regs_count)
-				stack_memory += size;
-			else
-				param_slot += 1 + bigg;
-		}
+		ParameterClass *classes = malloc(args.len * sizeof(*classes));
+		for (u32 i = 0; i < args.len; i++) {
+			Argument arg = args.ptr[i];
+			u16 param_size = valueSize(c, arg.arg_inst);
+			ParameterClass class = classifyParam(c->target, arg.type);
 
-		i32 stack_mem_pos = -stack_memory;
-
-		param_slot = memory_return;
-		for (u32 p = 0; p < args.len; p++) {
-			IrRef param = args.ptr[p];
-			u16 param_size = valueSize(c, param);
-			bool bigg = param_size > 8;
-			if (isMemory(param_size) || param_slot + bigg >= parameter_regs_count) {
-				copyTo(c, RSP, stack_mem_pos, RSP, c->storage[param], param_size);
-				stack_mem_pos += param_size;
-			} else if (bigg) {
-				loadMaybeBigTo(c, parameter_regs[param_slot], parameter_regs[param_slot+1], param);
-				param_slot += 2;
+			u32 gp_count = class.count - class.sse_count;
+			if (gp_count > gp_parameter_regs_count - gp_params || class.sse_count > 8 - fp_params)
+				class.count = 0;
+			classes[i] = class;
+			if (class.count) {
+				for (u32 j = 0; j < class.count; j++) {
+					// TODO Do small arguments need to be zero-extended?
+					if (class.registers[j] == Param_INTEGER) {
+						Register reg = gp_parameter_regs[gp_params];
+						emit(c, " mov R, qword ptr [R+I]", reg, RSP_8, c->storage[arg.arg_inst] + 8*j);
+						gp_params++;
+					} else {
+						assert(class.registers[j] == Param_SSE);
+						// TODO Probably need correct size here.
+						emit(c, " movsd %xmmI, qword ptr [R+I]", fp_params, RSP_8, c->storage[arg.arg_inst] + 8*j);
+						fp_params++;
+					}
+				}
 			} else {
-				loadTo(c, parameter_regs[param_slot], param);
-				param_slot += 1;
+				stack_memory += param_size;
 			}
 		}
-		assert(stack_mem_pos == 0);
 
+		u32 stack_filled = 0;
+		for (u32 i = 0; i < args.len; i++) {
+			if (classes[i].count == 0) {
+				IrRef arg = args.ptr[i].arg_inst;
+				u16 param_size = valueSize(c, arg);
+				copyTo(c, RSP, -(i32)stack_memory + stack_filled, RSP, c->storage[arg], param_size);
+				stack_filled += param_size;
+			}
+		}
+
+		assert(stack_filled == stack_memory);
 
 		if (stack_memory)
 			emit(c, " sub R, I", RSP_8, stack_memory);
 
-		// Necessary for va-arg calls. TODO Mark up call instructions with that info.
-		emit(c, " mov R, 0", RAX_4, stack_memory);
-// 		emit(c, " mov r10, qwor[rsp+I]", stack_memory);
+		if (inst.properties & Prop_Call_Vararg)
+			emit(c, " mov R, I", RAX_4, fp_params);
+
 		emit(c, " call qword ptr [R+I]", RSP_8, c->storage[inst.call.function_ptr] + stack_memory);
 		if (stack_memory)
 			emit(c, " add R, I", RSP_8, stack_memory);
 
 		if (!memory_return && inst.size) {
-			bool bigg = inst.size > 8;
-			u32 reduced = bigg ? 8 : inst.size;
-			emit(c, " mov Z [R+I], R", sizeOp(reduced), RSP_8, c->storage[i], registerSized(RAX, reduced));
-			if (bigg) {
-				emit(c, " mov Z [R+I], R", sizeOp(inst.size - 8), RSP_8, c->storage[i]+8, registerSized(RDX, inst.size - 8));
+			u32 gp_returns = 0;
+			u32 fp_returns = 0;
+			for (u32 j = 0; j < ret_class.count; j++) {
+				if (ret_class.registers[j] == Param_INTEGER) {
+					emit(c, " mov qword ptr [R+I], R", RSP_8, c->storage[i] + 8*j, gp_returns == 0 ? RAX_8 : RDX_8);
+					gp_returns++;
+				} else {
+					assert(ret_class.registers[j] == Param_SSE);
+					emit(c, " movsd qword ptr [R+I], %xmmI", RSP_8, c->storage[i] + 8*j, fp_returns);
+					fp_returns++;
+				}
 			}
 		}
 	} break;
@@ -1237,10 +1317,6 @@ static const char *sizeFSuffix (u16 size) {
 }
 static u16 valueSize (Codegen *c, IrRef ref) {
 	return c->ir.ptr[ref].size;
-}
-
-static bool isMemory(u16 size) {
-	return size > 16;
 }
 
 static inline bool printable(char c) {
@@ -1440,3 +1516,89 @@ static void emitZString (const char *s) {
 	memcpy(insert, s, len);
 	insert += len;
 }
+
+
+
+static void setEightbyteClass(ParameterClass *dest, u8 offset, ParameterEightbyteClass class) {
+	u8 *part = &dest->registers[offset / 8];
+	if (class == Param_SSE && *part != Param_INTEGER)
+		*part = Param_SSE;
+	else
+		*part = Param_INTEGER;
+}
+
+static void classifyMembers(const Target *target, ParameterClass *dest, u8 offset, Type type) {
+	assert(typeSize(type, target) <= 64);
+
+	switch (type.kind) {
+	case Kind_Void:
+	case Kind_Basic:
+	case Kind_Enum:
+	case Kind_Enum_Named:
+	case Kind_Pointer:
+	case Kind_Function:
+	case Kind_FunctionPtr:
+		setEightbyteClass(dest, offset, Param_INTEGER);
+		return;
+	case Kind_Float:
+		setEightbyteClass(dest, offset, Param_SSE);
+		return;
+	case Kind_Struct_Named:
+	case Kind_Union_Named:
+		type = type.nametagged->type;
+		FALLTHROUGH;
+	case Kind_Struct:
+	case Kind_Union: {
+		Members m = type.compound.members;
+		for (u32 i = 0; i < m.len; i++)
+			classifyMembers(target, dest, offset + m.ptr[i].offset, m.ptr[i].type);
+	} return;
+	case Kind_Array: {
+		u32 begin = offset / 8;
+		u32 end = (offset + typeSize(type, target) + 7) / 8 - begin;
+		for (u32 i = begin; i < end; i++) {
+			classifyMembers(target, dest, i * 8, *type.array.inner);
+		}
+	} return;
+	case Kind_VLArray:
+	case Kind_UnsizedArray:
+		unreachable;
+	}
+}
+
+ParameterClass classifyParam(const Target *target, Type type) {
+	switch (type.kind) {
+	case Kind_Void:
+	case Kind_Basic:
+	case Kind_Enum:
+	case Kind_Enum_Named:
+	case Kind_Pointer:
+	case Kind_FunctionPtr:
+		return (ParameterClass) {.count = 1, .registers[0] = Param_INTEGER};
+	case Kind_Float:
+		return (ParameterClass) {.count = 1, .registers[0] = Param_SSE};
+	case Kind_Struct_Named:
+	case Kind_Union_Named:
+		type = type.nametagged->type;
+		FALLTHROUGH;
+	case Kind_Struct:
+	case Kind_Union:
+	case Kind_Array: {
+		u32 size = typeSize(type, target);
+		if (size > 64)
+			return (ParameterClass) {.count = 0};
+		ParameterClass res = {.count = (size + 7) / 8};
+		classifyMembers(target, &res, 0, type);
+		if (res.count > 2 && res.registers[0] != Param_SSE)
+			res.count = 0;
+		return res;
+	}
+	case Kind_Function:
+	case Kind_VLArray:
+	case Kind_UnsizedArray:
+		unreachable;
+	}
+	unreachable;
+}
+
+
