@@ -74,6 +74,13 @@ typedef struct {
 typedef LIST(Location) Locations;
 
 typedef struct {
+	u32 id;
+	u32 inst;
+} DebugMark;
+// STYLE EEEEEW.
+static LIST(DebugMark) line_marks;
+
+typedef struct {
 	Arena *arena;
 	FILE *out;
 	FILE *debug_out;
@@ -81,7 +88,7 @@ typedef struct {
 	IrList ir;
 	Module module;
 	FileList files;
-	bool emit_stabs;
+	bool emit_debug_info;
 
 	StringMap *types;
 	const Target *target;
@@ -235,18 +242,121 @@ const int gp_parameter_regs[] = {
 static const u32 gp_parameter_regs_count = sizeof(gp_parameter_regs) / sizeof(gp_parameter_regs[0]);
 const u32 reg_save_area_size = 48 + 128;
 
-
+static const char* debug_prelude =
+	".set DW_TAG_compile_unit, 0x11\n"
+	".set DW_TAG_subprogram, 0x2e\n"
+	"\n"
+	".set DW_AT_name, 0x3\n"
+	".set DW_AT_comp_dir, 0x1b\n"
+	".set DW_AT_language, 0x13\n"
+	".set DW_AT_stmt_list, 0x10\n"
+	".set DW_AT_decl_file, 0x3a\n"
+	".set DW_AT_decl_line, 0x3b\n"
+	".set DW_AT_decl_column,0x39\n"
+	".set DW_AT_external,   0x3f\n"
+	".set DW_AT_frame_base, 0x40\n"
+	"\n"
+	".set DW_AT_low_pc, 0x11\n"
+	".set DW_AT_high_pc, 0x12\n"
+	"\n"
+	"\n"
+	// The values for an attribute are constrained to one or more classes.
+	// Forms are the particular encodings of the values.
+	"\n"
+	"# class address\n"
+	".set DW_FORM_addr, 0x1\n"
+	"\n"
+	"# class constant\n"
+	".set DW_FORM_data1, 0xb\n"
+	".set DW_FORM_data2, 0x5\n"
+	".set DW_FORM_data4, 0x6\n"
+	".set DW_FORM_data8, 0x7\n"
+	".set DW_FORM_sdata, 0xd # leb128\n"
+	".set DW_FORM_udata, 0xf # leb128\n"
+	"\n"
+	"# class lineptr, rangelistptr or loclistptr\n"
+	".set DW_FORM_sec_offset, 0x17 # offset into the appropriate section, 32/64 bits\n"
+	"\n"
+	"# class reference\n"
+	".set DW_FORM_ref_addr, 0x10 # offset into .debug_info, section, 32/64 bits\n"
+	"\n"
+	"# class string\n"
+	".set DW_FORM_string, 0x8 # null-terminated byte sequence\n"
+	"\n"
+	"# class flag\n"
+	".set DW_FORM_flag, 0xc # single byte\n"
+	"\n"
+	"\n"
+	".set DW_LANG_C99, 0x0c\n"
+	".set DW_LANG_C11, 0x1d\n"
+	"\n"
+	"# TODO Would uleb also take multiple arguments?\n"
+	".macro leb2_128 a,b\n"
+	"	.uleb128 \\a\n"
+	"	.uleb128 \\b\n"
+	".endm\n"
+	"\n"
+	".section .debug_abbrev\n"
+	"	.uleb128 1\n"
+	"	.uleb128 DW_TAG_compile_unit\n"
+	"	.byte 1 # has children\n"
+	"# 	leb2_128 DW_AT_producer,DW_FORM_string\n"
+	"	leb2_128 DW_AT_name,DW_FORM_string\n"
+// 	"	leb2_128 DW_AT_comp_dir,DW_FORM_string\n"
+	"	leb2_128 DW_AT_language,DW_FORM_data1\n"
+	"	leb2_128 DW_AT_stmt_list,DW_FORM_sec_offset\n"
+	"	leb2_128 DW_AT_low_pc,DW_FORM_addr\n"
+	"	leb2_128 DW_AT_high_pc,DW_FORM_addr\n"
+	"	leb2_128 0,0\n"
+	"\n"
+	"	.uleb128 2\n"
+	"	.uleb128 DW_TAG_subprogram\n"
+	"	.byte 0 # has no children\n"
+	"	leb2_128 DW_AT_external,DW_FORM_flag\n"
+	"	leb2_128 DW_AT_name,DW_FORM_string\n"
+	"	leb2_128 DW_AT_decl_file,DW_FORM_data2\n"
+	"	leb2_128 DW_AT_decl_line,DW_FORM_data2\n"
+	"	leb2_128 DW_AT_decl_column,DW_FORM_data2\n"
+	"	leb2_128 DW_AT_low_pc,DW_FORM_addr\n"
+	"	leb2_128 DW_AT_high_pc,DW_FORM_addr\n"
+	"	# leb2_128 DW_AT_frame_base,??\n"
+	"	leb2_128 0,0\n"
+	"\n"
+	"	.uleb128 0\n"
+	"\n"
+	"\n"
+	".set DW_LNS_copy, 1\n"
+	".set DW_LNS_advance_pc, 2\n"
+	".set DW_LNS_advance_line, 3\n"
+	".set DW_LNS_set_file, 4\n"
+	".set DW_LNE_end_sequence, 1\n"
+	".set DW_LNE_set_address, 2\n"
+	"\n"
+	".set last_line, 1\n"
+	".set last_pc, .exec_base\n"
+	"\n"
+	".macro line_inst line,pc\n"
+	"	.byte DW_LNS_advance_line\n"
+	"	.uleb128 \\line - last_line\n"
+	"	.byte DW_LNS_advance_pc\n"
+	"	.uleb128 \\pc - last_pc\n"
+	"	.byte DW_LNS_copy\n"
+	"\n"
+	"	.set last_line, \\line\n"
+	"	.set last_pc, \\pc\n"
+	".endm\n"
+	;
 
 static void emitData(Codegen *, Module, String data, References);
 static void emitDataLine(FILE *, u32 len, const char *data);
 static void emitDataString(u32 len, const char *data);
 static void emitDataRaw(u32 len, const char *data);
-static u32 typeDebugData(Codegen *, Type t);
 static void emitName(Module module, u32 id);
 static void emitJump(Codegen *, const char *inst, const Block *dest);
 static void emitFunctionForward(EmitParams, u32);
 static void emitBlockForward(Codegen *, Blocks, u32);
-static void emitStabsLoc(Codegen *c, IrRef i);
+static inline bool isNewLine(Codegen *c, u32 i);
+static inline bool isNewFile(Codegen *c, u32 i);
 static void emitInstForward(Codegen *c, IrRef i);
 static inline u16 sizeOfRegister(Register size);
 static inline Storage registerSize(u16 size);
@@ -275,7 +385,7 @@ void emitX64AsmSimple(EmitParams params) {
 	Codegen globals = {
 		.out = params.out,
 		.arena = params.arena,
-		.emit_stabs = params.emit_debug_info,
+		.emit_debug_info = params.emit_debug_info,
 		.target = params.target,
 	};
 	Module module = params.module;
@@ -303,20 +413,19 @@ void emitX64AsmSimple(EmitParams params) {
 	}
 
 	emit(&globals, "\n\n");
-	if (params.emit_debug_info) {
-		emit(&globals, ".stabs \"S\",100,0,0,..text_begin",
-			params.module_name);
-	}
+
 	emit(&globals, ".text\n"
-		"..text_begin:");
+		".exec_base:");
 	for (u32 i = 0; i < module.len; i++) {
 		StaticValue reloc = module.ptr[i];
-		if (reloc.def_kind == Static_Function && reloc.def_state) {
+		if (reloc.def_kind == Static_Function && reloc.def_state != Def_Undefined) {
 			emitLabel(module, i);
 			assert(reloc.type.kind == Kind_Function);
 			emitFunctionForward(params, i);
+			emit(&globals, ".S_end:\n", reloc.name);
 		}
 	}
+	emit(&globals, ".exec_end:");
 
 	emit(&globals, "\n\n"
 		".data");
@@ -324,7 +433,7 @@ void emitX64AsmSimple(EmitParams params) {
 		StaticValue reloc = module.ptr[i];
 		if (reloc.def_kind == Static_Variable
 			&& !(reloc.type.qualifiers & Qualifier_Const)
-			&& reloc.def_state)
+			&& reloc.def_state != Def_Undefined)
 		{
 			emitLabel(module, i);
 			emitData(&globals, module, reloc.value_data, reloc.value_references);
@@ -337,7 +446,7 @@ void emitX64AsmSimple(EmitParams params) {
 		StaticValue reloc = module.ptr[i];
 		if (reloc.def_kind == Static_Variable
 			&& (reloc.type.qualifiers & Qualifier_Const)
-			&& reloc.def_state)
+			&& reloc.def_state != Def_Undefined)
 		{
 			emitLabel(module, i);
 			emitData(&globals, module, reloc.value_data, reloc.value_references);
@@ -345,14 +454,132 @@ void emitX64AsmSimple(EmitParams params) {
 	}
 	(void)emitData;
 
+
+
+	if (params.emit_debug_info) {
+		emitZString(debug_prelude);
+		emitZString("\n\n"
+			".section .debug_info\n"
+			"	.int .info_end - .info_start # unit_length\n"
+			".info_start:\n"
+			"	.short 4 # version\n"
+			"	.int 0 # debug_abbrev_offset\n"
+			"	.byte 8 # address_size\n"
+			"\n");
+		flushit(params.out);
+		emit(&globals,
+			"	/* compilation unit: */\n"
+			"	.uleb128 1\n"
+			"	.string \"S\"",
+			params.module_name);
+		emitZString(
+			"	.byte DW_LANG_C99\n"
+			"	.int 0\n"
+			"	.quad .exec_base\n"
+			"	.quad .exec_end\n");
+
+		for (u32 i = 0; i < module.len; i++) {
+			StaticValue reloc = module.ptr[i];
+			if (reloc.def_kind == Static_Function && reloc.def_state != Def_Undefined) {
+				String name = reloc.name;
+				Location reloc_loc = reloc.function_ir.locations[0];
+				emit(&globals,
+					"	.uleb128 2\n"
+					"	.byte I\n"
+					"	.string \"S\"\n"
+					"	.short I\n"
+					"	.short I\n"
+					"	.short I\n"
+					"	.quad S\n"
+					"	.quad .S_end\n",
+					reloc.is_public, name,
+					reloc_loc.file_id, reloc_loc.line, reloc_loc.column,
+					name, name);
+
+			}
+		}
+
+		emitZString(
+			"	leb2_128 0,0\n"
+			".info_end:\n"
+			"\n"
+			"\n"
+			".section .debug_line\n"
+			"	.int .line_end - .line_start # unit_length\n"
+			".line_start:\n"
+			"	.short 4 # version\n"
+			"	.int .line_data - .line_header\n"
+			".line_header:\n"
+			"	.byte 1 # minimum_instruction_length\n"
+			"	.byte 1 # maximum_operations_per_instruction\n"
+			"	.byte 1 # default_is_stmt\n"
+			"	.byte 1 # line_base, for computing special ops.\n"
+			"	.byte 1 # line_range, for computing special ops.\n"
+			"	.byte 13 # opcode_base\n"
+			"	.byte 0,1,1,1,1,0,0,0,1,0,0,1 # standard_opcode_lengths\n"
+			"	# include_directories\n"
+			"	.byte 0\n" // TODO
+			"	# file_names\n");
+		for (u32 i = 1; i < params.files.len; i++) {
+			SourceFile *file = params.files.ptr[i];
+			emit(&globals,
+				"	.string \"SS\"\n"
+				"	.uleb128 0\n"
+				"	.uleb128 0\n"
+				"	.uleb128 0\n",
+				file->path, file->name);
+		}
+		emitZString(
+			"	.byte 0\n"
+			"\n"
+			".line_data:\n"
+			"	.byte 0,9 # extended opcode over 9 bytes\n"
+			"	.byte DW_LNE_set_address\n"
+			"	.quad .exec_base\n"
+			);
+
+		Location prev = {0};
+		for (u32 i = 0; i < line_marks.len; i++) {
+			DebugMark m = line_marks.ptr[i];
+			Location loc = module.ptr[m.id].function_ir.locations[m.inst];
+
+			if (loc.file_id != prev.file_id) {
+				emitZString("	.byte DW_LNS_set_file\n");
+				emit(&globals,
+					"	.uleb128 I", loc.file_id);
+			}
+			if (loc.line != prev.line || loc.file_id != prev.file_id) {
+				if (i == 0 || m.id != line_marks.ptr[i-1].id) {
+					emit(&globals, "	line_inst I, S", loc.line, module.ptr[m.id].name);
+				}
+				emit(&globals, "	line_inst I, ..IiI", loc.line, m.id, m.inst);
+			}
+			prev = loc;
+		}
+		emitZString(
+				"\n"
+				"	.byte 0,9 # extended op\n"
+				"	.byte DW_LNE_set_address\n"
+				"	.quad .exec_end\n"
+				"\n"
+				"	.byte DW_LNS_advance_line\n"
+				"	.uleb128 1\n"
+				"	.byte 0,1 # extended op\n"
+				"	.byte DW_LNE_end_sequence\n"
+				"\n"
+				"\n"
+				".line_end:\n");
+	}
+
 	flushit(params.out);
 }
+
 
 static void emitName (Module module, u32 id) {
 	StaticValue reloc = module.ptr[id];
 	if (reloc.name.len) {
 		if (reloc.parent_decl != IDX_NONE) {
-			emitName(module , reloc.parent_decl);
+			emitName(module, reloc.parent_decl);
 			*insert++ = '.';
 		}
 		emitString(reloc.name);
@@ -366,6 +593,7 @@ static void emitData (Codegen *c, Module module, String data, References referen
 	if (references.len) {
 		qsort(references.ptr, references.len, sizeof(references.ptr[0]),
 			splice_dest_order);
+		assert(!(references.len > 1 && references.ptr[0].splice_pos > references.ptr[1].splice_pos));
 	}
 
 	u32 pos = 0;
@@ -385,31 +613,6 @@ static void emitData (Codegen *c, Module module, String data, References referen
 	emitDataLine(c->out, data.len - pos, data.ptr + pos);
 }
 
-typedef struct TypeData {
-	String view;
-	Type type;
-	u32 id;
-} TypeData;
-
-static void emitType(Codegen *, Type, u32 id);
-
-static u32 typeDebugData (Codegen *c, Type t) {
-	String view = {sizeof(t), (char *)&t};
-	void **entry = mapGetOrCreate(c->types, view);
-	if (*entry)
-		return ((TypeData *)*entry)->id;
-
-	*entry = ALLOC(c->arena, TypeData);
-	u32 id = c->types->used;
-
-	TypeData *data = *entry;
-	data->id = id;
-	data->type = t;
-	data->view = (String) {sizeof(data->type), (char *) &data->type};
-
-	emitType(c, t, id);
-	return id;
-}
 
 
 static inline bool isAlpha (char c) {
@@ -422,150 +625,6 @@ static inline bool isAlnum (char c) {
 	return isAlpha(c) || isDigit(c);
 }
 
-// PERFORMANCE This is another absurd 14% of run time. Don't see a great
-// way to accelerate it tho...
-static void emitType (Codegen *c, Type type, u32 id) {
-	Type res = resolveType(type);
-	switch (res.kind) {
-	case Kind_Union:
-	case Kind_Struct:
-		for (u32 i = 0; i < res.compound.members.len; i++)
-			typeDebugData(c, res.compound.members.ptr[i].type);
-		break;
-	case Kind_Pointer:
-		typeDebugData(c, *type.pointer);
-		break;
-	case Kind_Array:
-	case Kind_VLArray:
-	case Kind_UnsizedArray:
-		typeDebugData(c, *type.array.inner);
-		break;
-	case Kind_Function:
-	case Kind_FunctionPtr:
-		typeDebugData(c, *type.function.rettype);
-		for (u32 i = 0; i < type.function.parameters.len; i++) {
-			typeDebugData(c, type.function.parameters.ptr[i].type);
-		}
-		break;
-	case Kind_Basic:
-	case Kind_Float:
-	case Kind_Void:
-	case Kind_Enum:
-		break;
-	default: unreachable;
-	}
-
-	emitZString(".stabs \"");
-
-	char *name = printType(c->arena, type);
-	emitZString(name);
-	emitZString(":t");
-	emitInt(id);
-	emitZString("=");
-
-	switch (res.kind) {
-	case Kind_Enum:
-		emitZString("-1");// TODO Portablility
-		break;
-	case Kind_Array:
-	case Kind_VLArray:
-	case Kind_UnsizedArray:
-		if (res.kind == Kind_UnsizedArray || (res.kind == Kind_Array && res.array.count == 0)) {
-			emitZString("A");
-			emitInt(typeDebugData(c, *type.array.inner));
-			break;
-		}
-		emitZString("ar-1;0;");
-		if (res.kind == Kind_Array)
-			emitInt(type.array.count);
-		else
-			emitZString("-1");
-		emitZString(";");
-		emitInt(typeDebugData(c, *type.array.inner));
-		break;
-	case Kind_FunctionPtr:
-		*insert++ = '*';
-		FALLTHROUGH;
-	case Kind_Function: {
-		*insert++ = 'f';
-		emitInt(typeDebugData(c, *type.function.rettype));
-
-		if (!type.function.missing_prototype) {
-			*insert++ = ',';
-			u32 count = type.function.parameters.len;
-			emitInt(count);
-			*insert++ = ';';
-			for (u32 i = 0; i < type.function.parameters.len; i++) {
-				Declaration decl = type.function.parameters.ptr[i];
-				if (decl.name) {
-					emitString(decl.name->name);
-				} else {
-					emitZString("__param_");
-					emitInt(i);
-				}
-				*insert++ = ':';
-				emitInt(typeDebugData(c, decl.type));
-				emitZString(",1;");
-			}
-		}
-		*insert++ = ';';
-
-	} break;
-	case Kind_Pointer:
-		emitZString("*");
-		emitInt(typeDebugData(c, *type.pointer));
-		break;
-	case Kind_Struct:
-	case Kind_Union:
-		emitZString(res.kind == Kind_Struct ? "s" : "u");
-		emitInt(typeSize(res, c->target));
-		for (u32 i = 0; i < res.compound.members.len; i++) {
-			CompoundMember m = res.compound.members.ptr[i];
-			emitString(m.name->name);
-			emitZString(":");
-			emitInt(typeDebugData(c, m.type));
-			emitZString(",");
-			emitInt(m.offset * 8);
-			emitZString(",");
-			emitInt(typeSize(m.type, c->target) * 8);
-			emitZString(";");
-		}
-		emitZString(";");
-		break;
-	case Kind_Void:
-		emitZString("-11"); break;
-	case Kind_Float:
-		switch (type.real) {
-		case Float_Single: emitZString("-12"); break;
-		case Float_Double: emitZString("-13"); break;
-		case Float_LongDouble: emitZString("-14"); break;
-		}
-		break;
-	case Kind_Basic:
-		switch ((int) type.basic) {
-		case Int_bool: emitZString("-5"); break;
-		case Int_char: emitZString("-2"); break;
-		case Int_suchar | Int_unsigned: emitZString("-5"); break;
-		case Int_suchar: emitZString("-6"); break;
-		case Int_short: emitZString("-3"); break;
-		case Int_int: emitZString("-1"); break;
-		case Int_long: emitZString("-4"); break;
-		case Int_longlong: emitZString("-31"); break;
-		case Int_short | Int_unsigned: emitZString("-7"); break;
-		case Int_int | Int_unsigned: emitZString("-8"); break;
-		case Int_long | Int_unsigned: emitZString("-10"); break;
-		case Int_longlong | Int_unsigned: emitZString("-32"); break;
-		default: unreachable;
-		}
-		break;
-	default:
-		unreachable;
-	}
-	emitZString("\",128,0,0,0\n");
-
-	if (insert > buf + (BUF - MAX_LINE))
-		flushit(c->out);
-}
 
 static u32 roundUp(u32 x)  {
 	return ((x + 7) / 8) * 8;
@@ -597,7 +656,7 @@ static void emitFunctionForward (EmitParams params, u32 id) {
 		.arena = params.arena,
 		.out = params.out,
 		.current_id = id,
-		.emit_stabs = params.emit_debug_info,
+		.emit_debug_info = params.emit_debug_info,
 		.files = params.files,
 		.target = params.target,
 
@@ -730,24 +789,6 @@ static void emitFunctionForward (EmitParams params, u32 id) {
 
 
 
-
-	if (c.emit_stabs) {
-		emit(&c, ".stabs \"S:ZI\",36,0,0,S\n", reloc->name,
-			reloc->is_public ? "F" : "f",
-			typeDebugData(&c, *reloc->type.function.rettype), reloc->name);
-		for (u32 i = 0; i < ir.len; i++) {
-			Inst inst = ir.ptr[i];
-
-			if (inst.kind == Ir_StackAllocFixed) {
-				if (c.emit_stabs && inst.alloc.decl_data != IDX_NONE) {
-					Declaration decl = AUX_DATA(Declaration, ir, inst.alloc.decl_data);
-					emit(&c, ".stabs \"S:I\",128,0,0,~I", decl.name->name, typeDebugData(&c, decl.type),
-						(i32) (c.storage[i]+8) - c.stack_allocated);
-				}
-			}
-		}
-	}
-
 	free(c.storage);
 	mapFree(c.types);
 }
@@ -804,14 +845,17 @@ static void emitBlockForward (Codegen *c, Blocks blocks, u32 i) {
 
 
 	emit(c, "..I_I_S:", c->current_id, block->id, block->label);
-	if (c->emit_stabs && block->first_inst < block->inst_end)
-		emitStabsLoc(c, block->first_inst);
 
 	IrRefList false_phis = {0};
 
 	for (IrRef ref = block->first_inst; ref < block->inst_end; ref++) {
-		if (c->emit_stabs && ref > block->first_inst)
-			emitStabsLoc(c, ref);
+		if (c->emit_debug_info) {
+			if (isNewLine(c, ref) || isNewFile(c, ref)) {
+				emit(c, "..IiI:", c->current_id, ref);
+				DebugMark mark = {.id = c->current_id, .inst = ref};
+				PUSH(line_marks, mark);
+			}
+		}
 		emitInstForward(c, ref);
 
 		Inst inst = c->ir.ptr[ref];
@@ -1213,25 +1257,16 @@ static void emitInstForward(Codegen *c, IrRef i) {
 	}
 }
 
-static void emitStabsLoc (Codegen *c, u32 i) {
-	Location loc = c->ir.locations[i];
 
-	bool labeled = false;
-	if (i == 0 || c->ir.locations[i-1].file_id != loc.file_id) {
-		SourceFile *src = c->files.ptr[loc.file_id];
-		emit(c, ".stabs \"SS\",132,0,0,..IiI",
-			src->path, src->name, c->current_id, i);
-		labeled = true;
-	}
-	if (i == 0 || c->ir.locations[i-1].line != loc.line) {
-		emit(c, ".stabn 68,0,I,..IiI",
-			loc.line, c->current_id, i);
-		labeled = true;
-	}
-
-	if (labeled)
-		emit(c, "..IiI:", c->current_id, i);
+static inline bool isNewLine (Codegen *c, u32 i) {
+	return i == 0 || c->ir.locations[i].line != c->ir.locations[i-1].line;
 }
+
+static inline bool isNewFile (Codegen *c, u32 i) {
+	return i == 0 || c->ir.locations[i].line != c->ir.locations[i-1].line;
+}
+
+
 
 // static void emitFunctionLineInfo (Arena *arena, FILE *out, Module module, StaticValue *reloc, const Target *target) {
 // 	ir = reloc->function_ir;
