@@ -297,6 +297,7 @@ static const char* debug_prelude =
 	".endm\n"
 	"\n"
 	".section .debug_abbrev\n"
+	".abbrevs:\n"
 	"	.uleb128 1\n"
 	"	.uleb128 DW_TAG_compile_unit\n"
 	"	.byte 1 # has children\n"
@@ -463,7 +464,7 @@ void emitX64AsmSimple(EmitParams params) {
 			"	.int .info_end - .info_start # unit_length\n"
 			".info_start:\n"
 			"	.short 4 # version\n"
-			"	.int 0 # debug_abbrev_offset\n"
+			"	.int offset .abbrevs # debug_abbrev_offset\n"
 			"	.byte 8 # address_size\n"
 			"\n");
 		flushit(params.out);
@@ -474,7 +475,7 @@ void emitX64AsmSimple(EmitParams params) {
 			params.module_name);
 		emitZString(
 			"	.byte DW_LANG_C99\n"
-			"	.int 0\n"
+			"	.int offset .lines\n"
 			"	.quad .exec_base\n"
 			"	.quad .exec_end\n");
 
@@ -500,11 +501,12 @@ void emitX64AsmSimple(EmitParams params) {
 		}
 
 		emitZString(
-			"	leb2_128 0,0\n"
+			"	.uleb128 0\n"
 			".info_end:\n"
 			"\n"
 			"\n"
 			".section .debug_line\n"
+			".lines:\n"
 			"	.int .line_end - .line_start # unit_length\n"
 			".line_start:\n"
 			"	.short 4 # version\n"
