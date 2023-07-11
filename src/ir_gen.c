@@ -669,12 +669,22 @@ IrRef genIntToFloat (IrBuild *build, IrRef source, u16 target, Signedness sign) 
 	if (source_inst.kind == Ir_Constant) {
 		i.kind = Ir_Constant;
 		// TODO Handle negative numbers
-		if (target == 4)
-			i.constant = constFromFloat((float) source_inst.constant);
-		else if (target == 8)
-			i.constant = constFromDouble((double) source_inst.constant);
-		else
-			unreachable;
+		if (sign == Unsigned) {
+			if (target == 4)
+				i.constant = constFromFloat((float) source_inst.constant);
+			else if (target == 8)
+				i.constant = constFromDouble((double) source_inst.constant);
+			else
+				unreachable;
+		} else {
+			i64 s = signExtend(source_inst.constant, source_inst.size, I64);
+			if (target == 4)
+				i.constant = constFromFloat((float) s);
+			else if (target == 8)
+				i.constant = constFromDouble((double) s);
+			else
+				unreachable;
+		}
 	}
 	return append(build, i);
 }
