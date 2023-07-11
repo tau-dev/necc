@@ -742,12 +742,15 @@ static void emitFunctionForward (EmitParams params, u32 id) {
 		ParamInfo info = c.param_info.ptr[i];
 		if (info.class.count) {
 			for (u32 j = 0; j < info.class.count; j++) {
+				u32 size = ir.params.ptr[i].size - j*8;
+				if (size > 8) size = 8;
+
 				if (info.class.registers[j] == Param_INTEGER) {
 					Register reg = gp_parameter_regs[info.registers[j]];
-					emit(&c, " mov qword ptr [R+I], R", RSP_8, info.storage + 8*j, reg);
+					emit(&c, " mov Z [R+I], R", sizeOp(size), RSP_8, info.storage + 8*j, registerSized(reg, size));
 				} else {
 					assert(info.class.registers[j] == Param_SSE);
-					emit(&c, " movsd qword ptr [R+I], %xmmI", RSP_8, info.storage + 8*j, (u32) info.registers[j]);
+					emit(&c, " movsZ [R+I], %xmmI", sizeFSuffix(size), RSP_8, info.storage + 8*j, (u32) info.registers[j]);
 				}
 			}
 		} else {
@@ -905,13 +908,16 @@ static void emitBlockForward (Codegen *c, Blocks blocks, u32 i) {
 				u32 gp_returns = 0;
 				u32 fp_returns = 0;
 				for (u32 j = 0; j < c->ret_class.count; j++) {
-					u32 dest = c->storage[exit.ret] + 8*j;
+					u32 size = valueSize(c, exit.ret) - 8*j;
+					if (size > 8) size = 8;
+					u32 src = c->storage[exit.ret] + 8*j;
 					if (c->ret_class.registers[j] == Param_INTEGER) {
-						emit(c, " mov R, qword ptr [R+I]", gp_returns == 0 ? RAX_8 : RDX_8, RSP_8, dest);
+						int reg = gp_returns == 0 ? RAX_8 : RDX_8;
+						emit(c, " mov R, Z [R+I]", registerSized(reg, size), sizeOp(size), RSP_8, src);
 						gp_returns++;
 					} else {
 						assert(c->ret_class.registers[j] == Param_SSE);
-						emit(c, " movsd %xmmI, qword ptr [R+I]", fp_returns, RSP_8, dest);
+						emit(c, " movsZ %xmmI, [R+I]", sizeFSuffix(size), fp_returns, RSP_8, src);
 						fp_returns++;
 					}
 				}
@@ -1201,15 +1207,17 @@ static void emitInstForward(Codegen *c, IrRef i) {
 			classes[i] = class;
 			if (class.count) {
 				for (u32 j = 0; j < class.count; j++) {
+					u32 size = param_size - j*8;
+					if (size > 8) size = 8;
+
 					// TODO Do small arguments need to be zero-extended?
 					if (class.registers[j] == Param_INTEGER) {
-						Register reg = gp_parameter_regs[gp_params];
-						emit(c, " mov R, qword ptr [R+I]", reg, RSP_8, c->storage[arg.arg_inst] + 8*j);
+						Register reg = registerSized(gp_parameter_regs[gp_params], size);
+						emit(c, " mov R, Z [R+I]", reg, sizeOp(size), RSP_8, c->storage[arg.arg_inst] + 8*j);
 						gp_params++;
 					} else {
 						assert(class.registers[j] == Param_SSE);
-						// TODO Probably need correct size here.
-						emit(c, " movsd %xmmI, qword ptr [R+I]", fp_params, RSP_8, c->storage[arg.arg_inst] + 8*j);
+						emit(c, " movsZ %xmmI, [R+I]", sizeFSuffix(size), fp_params, RSP_8, c->storage[arg.arg_inst] + 8*j);
 						fp_params++;
 					}
 				}
@@ -1245,12 +1253,16 @@ static void emitInstForward(Codegen *c, IrRef i) {
 			u32 fp_returns = 0;
 			for (u32 j = 0; j < ret_class.count; j++) {
 				u32 dest = c->storage[i] + 8*j;
+				u32 size = inst.size - 8*j;
+				if (size > 8) size = 8;
+
 				if (ret_class.registers[j] == Param_INTEGER) {
-					emit(c, " mov qword ptr [R+I], R", RSP_8, dest, gp_returns == 0 ? RAX_8 : RDX_8);
+					int reg = gp_returns == 0 ? RAX_8 : RDX_8;
+					emit(c, " mov Z [R+I], R", sizeOp(size), RSP_8, dest, registerSized(reg, size));
 					gp_returns++;
 				} else {
 					assert(ret_class.registers[j] == Param_SSE);
-					emit(c, " movsd qword ptr [R+I], %xmmI", RSP_8, dest, fp_returns);
+					emit(c, " movsZ [R+I], %xmmI", sizeFSuffix(size), RSP_8, dest, fp_returns);
 					fp_returns++;
 				}
 			}
@@ -1319,7 +1331,7 @@ static inline Storage registerSize (u16 size) {
 	unreachable;
 }
 
-static inline Register registerSized(Register stor, u16 size) {
+static inline Register registerSized (Register stor, u16 size) {
 	return (stor & ~RSIZE_MASK) | registerSize(size);
 }
 
