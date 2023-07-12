@@ -141,6 +141,10 @@ Block *startNewBlock (IrBuild *build, String label) {
 	return blk;
 }
 
+void discardBlock(Block *blk) {
+	(void) blk;
+}
+
 
 static inline double doubleFromConst(u64 i, u16 size) {
 	switch (size) {

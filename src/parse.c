@@ -180,6 +180,7 @@ static nodiscard bool allowedNoDeclarator(Parse *, Type base_type);
 static void initializeStaticToZero(Parse *, StaticValue *);
 static void initializeStaticDefinition(Parse *, OrdinaryIdentifier *, Type, const Token *init_token);
 static void initializeAutoDefinition(Parse *, OrdinaryIdentifier *, Type, const Token *init_token);
+static IrRef checkVaListValue(Parse *parse, Value v, const Token *pos);
 static void parseInitializer(Parse *, InitializationDest, u32 offset, Type type);
 static void maybeBracedInitializer(Parse *, InitializationDest, u32 offset, Type type, Value current_value);
 static bool tryIntConstant(Parse *, Value, u64 *result);
@@ -1983,7 +1984,7 @@ static Value parseIntrinsic (Parse *parse, Intrinsic i) {
 			parseerror(parse, first, "va_start may only be called from a variadic function");
 		DeclList params = parse->current_func_type.parameters;
 
-		Value v = parseExprAssignment(parse);
+		IrRef v = checkVaListValue(parse, parseExprAssignment(parse), first);
 
 		if (!(parse->target.version & Features_C23) || parse->pos->kind == Tok_Comma) {
 			expect(parse, Tok_Comma);
@@ -1996,26 +1997,26 @@ static Value parseIntrinsic (Parse *parse, Intrinsic i) {
 			}
 		}
 		expect(parse, Tok_CloseParen);
-
-		if (!isLvalue(v))
-			parseerror(parse, first, "va_start expects an lvalue");
-		if (v.typ.kind != Kind_Array || v.typ.array.inner->kind != Kind_Basic)
-			parseerror(parse, first, "va_start expects a va_list, not a %s", printTypeHighlighted(parse->arena, v.typ));
-		genVaStart(build, v.inst, IDX_NONE /*ignored*/);
+		genVaStart(build, v, IDX_NONE /*ignored*/);
 
 		return (Value){ BASIC_VOID };
 	}
 	case Intrinsic_VaArg: {
-		Value v = parseExprAssignment(parse);
-		if (!isLvalue(v))
-			parseerror(parse, first, "va_arg expects an lvalue");
-		if (v.typ.kind != Kind_Array || v.typ.array.inner->kind != Kind_Basic)
-			parseerror(parse, first, "va_arg expects a va_list, not a %s", printTypeHighlighted(parse->arena, v.typ));
+		IrRef v = checkVaListValue(parse, parseExprAssignment(parse), first);
 		expect(parse, Tok_Comma);
 		Type t = parseTypeName(parse, NULL);
 		expect(parse, Tok_CloseParen);
 
-		return (Value){ t, genVaArg(build, v.inst, typeSize(t, &parse->target), t) };
+		return (Value){ t, genVaArg(build, v, typeSize(t, &parse->target), t) };
+	}
+	case Intrinsic_VaCopy: {
+		IrRef dest = checkVaListValue(parse, parseExprAssignment(parse), first);
+		expect(parse, Tok_Comma);
+		IrRef src = checkVaListValue(parse, parseExprAssignment(parse), first);
+		expect(parse, Tok_CloseParen);
+
+		genStore(&parse->build, dest, genLoad(&parse->build, src, 24, false), false);
+		return (Value){{Kind_Void}};
 	}
 	case Intrinsic_Expect: {
 		Value a = parseExprAssignment(parse);
@@ -2028,7 +2029,6 @@ static Value parseIntrinsic (Parse *parse, Intrinsic i) {
 	case Intrinsic_Clzll:
 	case Intrinsic_Ctz:
 	case Intrinsic_Ctzll:
-	case Intrinsic_VaCopy:
 	case Intrinsic_VaEnd:
 	case Intrinsic_Nanf:
 	case Intrinsic_Inff:
@@ -2041,6 +2041,14 @@ static Value parseIntrinsic (Parse *parse, Intrinsic i) {
 	default:
 		unreachable;
 	}
+}
+
+static IrRef checkVaListValue(Parse *parse, Value v, const Token *pos) {
+	if (!isLvalue(v))
+		parseerror(parse, pos, "va_arg expects an lvalue");
+	if (v.typ.kind != Kind_Array || v.typ.pointer->kind != Kind_Basic)
+		parseerror(parse, pos, "va_arg expects a va_list, not a %s", printTypeHighlighted(parse->arena, v.typ));
+	return v.inst;
 }
 
 
@@ -2319,8 +2327,9 @@ static void initializeFromValue (Parse *parse, InitializationDest dest, u32 offs
 static Type parseValueType (Parse *parse, Value (*operator)(Parse *parse)) {
 	Block *current = parse->build.insertion_block;
 	// Emit the expression into a block which is then discarded. Pretty hacky.
-	startNewBlock(&parse->build, STRING_EMPTY);
+	Block *dummy = startNewBlock(&parse->build, STRING_EMPTY);
 	Type type = operator(parse).typ;
+	discardBlock(dummy);
 	parse->build.insertion_block = current;
 	return type;
 }

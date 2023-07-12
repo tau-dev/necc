@@ -37,7 +37,7 @@ bin/necc: $(C_SRCS) $(C_HDRS)
 	$(CC) $(C_SRCS) $(C_FLAGS) $(C_REL_FLAGS) -o $@
 
 selfhost/necc: $(SELFHOST_OBJS)
-	musl-gcc -static $^ -lm -o $@
+	musl-gcc -static -g $^ -lm -o $@
 
 selfhost/%.o: src/%.c $(C_HDRS) bin/necc-dbg
 	./bin/necc-dbg $< -g -obj=$@ -std gnu -def MUSL_DIR=\"$(MUSL_DIR)\"

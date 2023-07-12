@@ -1,3 +1,5 @@
+//!necc-dbg @ -run
+
 int
 main(void) {
 	static struct {
