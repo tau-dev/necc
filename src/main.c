@@ -5,6 +5,9 @@
 // Enable -run platform-dependently.
 #include <unistd.h>
 
+#define __STDC_WANT_LIB_EXT1__ 1
+#include <time.h>
+
 #include "parse.h"
 #include "arena.h"
 #include "ansi.h"
@@ -379,9 +382,28 @@ int main (int argc, char **args) {
 
 	PUSH(paths.system_macros, zstr("__STDC__"));
 	PUSH(paths.system_macros, zstr("__x86_64__"));
-	// TODO
-// 	predefine(arena, macros, "__DATE__", 1);
-// 	predefine(arena, macros, "__TIME__", 1);
+
+
+	time_t compilation_time = time(NULL);
+#ifdef __STDC_LIB_EXT1__
+	char buf[26];
+	ctime_s(buf, 26, &compilation_time);
+	char *date_text = buf;
+#else
+	char *date_text = ctime(&compilation_time);
+#endif
+
+	char date_macro_text[30] = "__DATE__=\"";
+	memcpy(date_macro_text+10, date_text+4, 6); // "Mmm dd" part
+	memcpy(date_macro_text+16, date_text+19, 5); // " yyyy" part
+	date_macro_text[21] = '\"';
+	PUSH(paths.system_macros, ((String) { 10 + 11, date_macro_text }));
+
+	char time_macro_text[30] = "__TIME__=\"";
+	memcpy(time_macro_text+10, date_text+11, 8); // "hh:mm:ss" part
+	time_macro_text[18] = '\"';
+	PUSH(paths.system_macros, ((String) { 10 + 8, time_macro_text }));
+
 	if (options.target.version & Features_C23) {
 		PUSH(paths.system_macros, zstr("__STDC_VERSION__=202301L"));
 	} else if (options.target.version & Features_C11) {

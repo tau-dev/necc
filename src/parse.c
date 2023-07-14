@@ -1433,6 +1433,7 @@ static Value parseExprPrefix (Parse *parse) {
 				InitializationDest dest = {
 					.address = stack,
 				};
+				genSetZero(build, dest.address, typeSize(cast_target, &parse->target), false);
 				parseInitializer(parse, dest, 0, cast_target);
 				return (Value) {cast_target, stack, Ref_LValue};
 			} else {
@@ -2033,8 +2034,7 @@ static Value parseIntrinsic (Parse *parse, Intrinsic i) {
 	case Intrinsic_Nanf:
 	case Intrinsic_Inff:
 	case Intrinsic_FrameAddress:
-	case Intrinsic_Alloca:
-	{
+	case Intrinsic_Alloca: {
 		eatMatchingParens(parse);
 		return immediateIntVal(parse, BASIC_INT, 0);
 	}
@@ -2044,10 +2044,11 @@ static Value parseIntrinsic (Parse *parse, Intrinsic i) {
 }
 
 static IrRef checkVaListValue(Parse *parse, Value v, const Token *pos) {
-	if (!isLvalue(v))
-		parseerror(parse, pos, "va_arg expects an lvalue");
-	if (v.typ.kind != Kind_Array || v.typ.pointer->kind != Kind_Basic)
-		parseerror(parse, pos, "va_arg expects a va_list, not a %s", printTypeHighlighted(parse->arena, v.typ));
+// 	if (!isLvalue(v))
+// 		parseerror(parse, pos, "va_arg expects an lvalue");
+	v = rvalue(v, parse);
+	if (v.typ.kind != Kind_Pointer || v.typ.pointer->kind != Kind_Basic || v.typ.pointer->basic != Int_long)
+		parseerror(parse, pos, "expected a va_list, not a %s", printTypeHighlighted(parse->arena, v.typ));
 	return v.inst;
 }
 

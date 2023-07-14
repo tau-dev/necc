@@ -25,6 +25,7 @@ typedef long long llong;
 static inline bool isSpace(char);
 static inline bool isAlpha(char c);
 static inline bool isHexDigit(char c);
+static inline bool isOctDigit(char c);
 static inline int hexToInt(char c);
 static inline bool isDigit(char c);
 static inline bool isAlnum(char c);
@@ -293,10 +294,10 @@ Keyword preproc_directives[] = {
 
 
 char escape_codes[256] = {
-	['0'] = 0,
 	['\\'] = '\\',
 	['\"'] = '\"',
 	['\''] = '\'',
+	['\?'] = '?',
 	['a'] = '\a',
 	['b'] = '\b',
 	['r'] = '\r',
@@ -307,10 +308,10 @@ char escape_codes[256] = {
 };
 
 char de_escape_codes[256] = {
-	[0] = '0',
 	['\\'] = '\\',
 	['\"'] = '\"',
 	['\''] = '\'',
+	['\?'] = '?',
 	['\a'] = 'a',
 	['\b'] = 'b',
 	['\r'] = 'r',
@@ -2113,8 +2114,9 @@ void strPrintToken (char **dest, const char *end, const Symbol *symbols, Token t
 		**dest = '\"';
 		++*dest;
 		String data = symbols[t.val.symbol_idx].name;
+		// TODO Correct this to printable characters only.
 		for (u32 i = 0; i < data.len; i++)
-			strPrintChar(dest, data.ptr[i]);
+			strPrintChar(dest, (uchar) data.ptr[i]);
 		**dest = '\"';
 		++*dest;
 	} return;
@@ -2155,6 +2157,10 @@ static inline bool isHexDigit (char c) {
 		return true;
 	c |= 32;
 	return c >= 'a' && c <= 'f';
+}
+
+static inline bool isOctDigit (char c) {
+	return c >= '0' && c <= '7';
 }
 
 static inline int hexToInt (char c) {
@@ -2355,9 +2361,17 @@ static char lexEscapeCode(SourceFile *source, Location loc, const char **p) {
 		if (res >= 128)
 			res -= 256;
 		pos += 2;
+	} else if (isOctDigit(pos[0])) {
+		res = pos[0] - '0';
+		while (isOctDigit(pos[1])) {
+			res = res * 8 + pos[1] - '0';
+			if (res > 255)
+				lexerror(*source, loc, "invalid escape code");
+			pos++;
+		}
 	} else {
 		res = escape_codes[(uchar)pos[0]];
-		if (res == 0 && pos[0] != '0')
+		if (res == 0)
 			lexerror(*source, loc, "invalid escape code");
 	}
 	*p = pos;
