@@ -161,6 +161,7 @@ Type resolveType(Type t);
 bool typeCompatible(Type a, Type b);
 bool fnTypeEqual(FunctionType a, FunctionType b);
 u32 typeSize(Type t, const Target *target);
+bool isIncomplete(Type t);
 u32 typeAlignment(Type t, const Target *target);
 u32 addMemberOffset(u32 *offset, Type t, const Target *target);
 int rankDiff(BasicType a, BasicType b);

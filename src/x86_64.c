@@ -330,6 +330,7 @@ static const char* debug_prelude =
 	".set DW_LNS_advance_pc, 2\n"
 	".set DW_LNS_advance_line, 3\n"
 	".set DW_LNS_set_file, 4\n"
+	".set DW_LNS_prologue_end, 10\n"
 	".set DW_LNE_end_sequence, 1\n"
 	".set DW_LNE_set_address, 2\n"
 	"\n"
@@ -338,9 +339,9 @@ static const char* debug_prelude =
 	"\n"
 	".macro line_inst line,pc\n"
 	"	.byte DW_LNS_advance_line\n"
-	"	.uleb128 \\line - last_line\n"
+	"	.sleb128 \\line - last_line\n"
 	"	.byte DW_LNS_advance_pc\n"
-	"	.uleb128 \\pc - last_pc\n"
+	"	.sleb128 \\pc - last_pc\n"
 	"	.byte DW_LNS_copy\n"
 	"\n"
 	"	.set last_line, \\line\n"
@@ -546,13 +547,13 @@ void emitX64AsmSimple(EmitParams params) {
 			Location loc = module.ptr[m.id].function_ir.locations[m.inst];
 
 			if (loc.file_id != prev.file_id) {
-				emitZString("	.byte DW_LNS_set_file\n");
-				emit(&globals,
-					"	.uleb128 I", loc.file_id);
+				emitZString(   "	.byte DW_LNS_set_file\n");
+				emit(&globals, "	.uleb128 I", loc.file_id);
 			}
 			if (loc.line != prev.line || loc.file_id != prev.file_id) {
 				if (i == 0 || m.id != line_marks.ptr[i-1].id) {
 					emit(&globals, "	line_inst I, S", loc.line, module.ptr[m.id].name);
+					emitZString(   "	.byte DW_LNS_prologue_end\n");
 				}
 				emit(&globals, "	line_inst I, ..IiI", loc.line, m.id, m.inst);
 			}
@@ -565,7 +566,7 @@ void emitX64AsmSimple(EmitParams params) {
 				"	.quad .exec_end\n"
 				"\n"
 				"	.byte DW_LNS_advance_line\n"
-				"	.uleb128 1\n"
+				"	.sleb128 1\n"
 				"	.byte 0,1 # extended op\n"
 				"	.byte DW_LNE_end_sequence\n"
 				"\n"
@@ -804,13 +805,13 @@ static void copyTo (Codegen *c, Register to_addr, i32 to_offset, Register from_a
 	to_addr = registerSized(to_addr, 8);
 	from_addr = registerSized(from_addr, 8);
 	while (size - offset > 8) {
-		emit(c, " mov %r8, qword ptr [R~I]", from_addr, offset+from_offset);
-		emit(c, " mov qword ptr [R~I], %r8", to_addr, offset+to_offset);
+		emit(c, " mov %r10, qword ptr [R~I]", from_addr, offset+from_offset);
+		emit(c, " mov qword ptr [R~I], %r10", to_addr, offset+to_offset);
 		offset += 8;
 	}
 
 	// This will break for non-power-of-two remainders.
-	Register tmp = registerSized(R8, size - offset);
+	Register tmp = registerSized(R10, size - offset);
 	const char *op = sizeOp(size - offset);
 	emit(c, " mov R, Z [R~I]", tmp, op, from_addr, offset+from_offset);
 	emit(c, " mov Z [R~I], R", op, to_addr, offset+to_offset, tmp);
@@ -1098,15 +1099,90 @@ static void emitInstForward(Codegen *c, IrRef i) {
 		emit(c, " cvtsZ2sZ %xmm1, #", sizeFSuffix(source), fsuff, inst.unop);
 		emit(c, " movsZ #, %xmm1", fsuff, i);
 	} break;
-	case Ir_UIntToFloat: // TODO This is a hack, must be handled differently.
+	case Ir_UIntToFloat: {
+		const char *fsuff = sizeFSuffix(inst.size);
+
+		u32 src_size = valueSize(c, inst.unop);
+
+		if (src_size == 8) {
+			// x86 doesn't have a 64 bit int->float instruction, so we
+			// use this polyfill, taken from GCC output.
+
+			loadTo(c, RAX, inst.unop);
+			emit(c, " testq R, R", RAX_8, RAX_8);
+			emit(c, " js .u2f_negative_I_I", c->current_id, i);
+			// When no sign bit is set, we can use the signed instruction.
+			emit(c, " cvtsi2sZ %xmm0, R", fsuff, RAX_8);
+			emit(c, " jmp .u2f_done_I_I", c->current_id, i);
+
+			emit(c, ".u2f_negative_I_I:", c->current_id, i);
+			// Divide RAX by two, rounding to odd.
+			emit(c, " movq R, R", RDI_8, RAX_8);
+        	emit(c, " and R, 1", RDI_4);
+	        emit(c, " shrq R", RAX_8);
+        	emit(c, " orq R, R", RAX_8, RDI_8);
+        	// Now convert normally and multiply by 2. Now the lowest
+        	// bit would be lost, but it cannot be represented in the
+        	// mantissa anyways.
+			emit(c, " cvtsi2sZ %xmm0, R", fsuff, RAX_8);
+			emit(c, " addsZ %xmm0, %xmm0", fsuff);
+
+			emit(c, ".u2f_done_I_I:", c->current_id, i);
+		} else {
+			emit(c, " xor R, R", RAX_8, RAX_8);
+			loadTo(c, RAX, inst.unop);
+			emit(c, " cvtsi2sZ %xmm0, R", fsuff, RAX_8);
+		}
+		emit(c, " movsZ #, %xmm0", fsuff, i);
+	} break;
 	case Ir_SIntToFloat: {
 		const char *fsuff = sizeFSuffix(inst.size);
-		loadTo(c, RAX, inst.unop);
+
+		u32 src_size = valueSize(c, inst.unop);
+		if (src_size != 8)
+			emit(c, " movsxZ R, #", (src_size == 4 ? "d" : ""), RAX_8, inst.unop);
+		else
+			emit(c, " mov R, #", RAX_8, inst.unop);
 
 		emit(c, " cvtsi2sZ %xmm1, R", fsuff, RAX_8);
 		emit(c, " movsZ #, %xmm1", fsuff, i);
 	} break;
-	case Ir_FloatToUInt:
+	case Ir_FloatToUInt: {
+		u32 float_size = c->ir.ptr[inst.unop].size;
+		const char *fsuff = sizeFSuffix(float_size);
+		u32 dest_size = valueSize(c, inst.unop);
+
+		if (dest_size == 8) {
+			// Same problem as with Ir_UIntToFloat.
+
+			// Load INT64_MAX as float.
+			if (float_size == 4)
+				emit(c, " mov R, 0x5f000000", RAX_8);
+			else
+				emit(c, " movabsq R, 0x43e0000000000000", RAX_8);
+			emit(c, " movd %xmm1, R", RAX_8);
+
+			emit(c, " movsZ %xmm0, [R+I]", fsuff, RSP_8, c->storage[inst.unop]);
+			emit(c, " comisZ %xmm0, %xmm1", fsuff, RSP_8, c->storage[inst.unop]);
+			emit(c, " jnb .f2u_negative_I_I", c->current_id, i);
+
+			// When below INT64_MAX, we can use the signed instruction.
+			emit(c, " cvttsZ2siq R, %xmm0", fsuff, RAX_8);
+			emit(c, " jmp .f2u_done_I_I", c->current_id, i);
+
+			emit(c, ".f2u_negative_I_I:", c->current_id, i);
+			// Otherwise, subtract INT64_MAX as float, convert, set sign bit.
+			emit(c, " subsZ %xmm0, %xmm1", fsuff);
+			emit(c, " cvttsZ2siq R, %xmm0", fsuff, RAX_8);
+			emit(c, " btcq R, 63", RAX_8);
+
+			emit(c, ".f2u_done_I_I:", c->current_id, i);
+		} else {
+			emit(c, " movsZ %xmm0, [R+I]", fsuff, RSP_8, c->storage[inst.unop]);
+			emit(c, " cvttsZ2si R, %xmm0", fsuff, RAX_8);
+		}
+		emit(c, " mov #, R", i, registerSized(RAX, inst.size));
+	} break;
 	case Ir_FloatToSInt: {
 		const char *fsuff = sizeFSuffix(c->ir.ptr[inst.unop].size);
 
@@ -1139,14 +1215,14 @@ static void emitInstForward(Codegen *c, IrRef i) {
 				// Test if all INTEGER parts would fit
 				emit(c, " mov R, dword ptr [R]", RDX_4, RAX_8);
 				emit(c, " cmp R, I", RDX_4, 48 - gp_count*8);
-				emit(c, " ja .vaarg_I_overflowarg", i);
+				emit(c, " ja .vaarg_I_I_overflowarg", c->current_id, i);
 			}
 
 			if (class.sse_count) {
 				// Test if all SSE parts would fit
 				emit(c, " mov R, dword ptr [R+4]", RDX_4, RAX_8);
 				emit(c, " cmp R, I", RDX_4, reg_save_area_size - class.sse_count*8);
-				emit(c, " ja .vaarg_I_overflowarg", i);
+				emit(c, " ja .vaarg_I_I_overflowarg", c->current_id, i);
 			}
 
 			for (u32 j = 0; j < class.count; j++) {
@@ -1164,15 +1240,15 @@ static void emitInstForward(Codegen *c, IrRef i) {
 				emit(c, " mov R, qword ptr [R]", RDX_8, RDX_8);
 				emit(c, " mov qword ptr [R+I], R", RSP_8, c->storage[i] + j*8, RDX_8);
 			}
-			emit(c, " jmp .vaarg_I_done", i);
+			emit(c, " jmp .vaarg_I_I_done", c->current_id, i);
 
-			emit(c, ".vaarg_I_overflowarg:", i);
+			emit(c, ".vaarg_I_I_overflowarg:", c->current_id, i);
 		}
 		emit(c, " mov R, qword ptr [R+8]", RDX_8, RAX_8);
 		emit(c, " add qword ptr [R+8], I", RAX_8, inst.size);
 		copyTo(c, RSP, c->storage[i], RDX, 0, inst.size);
 
-		emit(c, ".vaarg_I_done:", i);
+		emit(c, ".vaarg_I_I_done:", c->current_id, i);
 	} break;
 	case Ir_Call: {
 		Call call = AUX_DATA(Call, c->ir, inst.call.data);

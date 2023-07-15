@@ -322,7 +322,7 @@ int main (int argc, char **args) {
 			}
 		} else {
 			if (input.len)
-				generalFatal("Cannot more than one input file at a time");
+				generalFatal("Cannot compile more than one input file at a time");
 			input = zstr(args[i]);
 		}
 	}

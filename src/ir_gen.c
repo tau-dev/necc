@@ -3,6 +3,9 @@
 #include "checked_arith.h"
 #include "emit.h"
 
+typedef unsigned long ulong;
+typedef unsigned int uint;
+
 /*
 
 Generates IR while doing a first constant-folding pass, and prints it in a nicely formatted form.
@@ -672,7 +675,6 @@ IrRef genIntToFloat (IrBuild *build, IrRef source, u16 target, Signedness sign) 
 	};
 	if (source_inst.kind == Ir_Constant) {
 		i.kind = Ir_Constant;
-		// TODO Handle negative numbers
 		if (sign == Unsigned) {
 			if (target == 4)
 				i.constant = constFromFloat((float) source_inst.constant);
@@ -910,8 +912,6 @@ void emitIr (EmitParams params) {
 }
 
 
-typedef unsigned long ulong;
-typedef unsigned int uint;
 static void printOrder (FILE *out, IrRef r) {
 	if (r != IDX_NONE)
 		fprintf(out, " after %lu", (ulong) r);

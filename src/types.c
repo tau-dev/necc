@@ -77,16 +77,39 @@ u32 typeSize (Type t, const Target *target) {
 	case Kind_FunctionPtr:
 		assert(target->typesizes[target->ptrdiff.basic] == target->ptr_size);
 		return target->ptr_size;
-	case Kind_Function:
-		unreachable;
 	case Kind_Array:
 		return t.array.count * typeSize(*t.array.inner, target);
 	case Kind_UnsizedArray:
 		return 0;
-	case Kind_VLArray:
-		unreachable;
-	default: assert(!"TODO Calculate other type sizes.");
+	case Kind_Function:
+	case Kind_VLArray: break;
 	}
+	unreachable;
+}
+
+// Result of 0 means incomplete type.
+bool isIncomplete (Type t) {
+	switch (t.kind) {
+	case Kind_Void:
+		return true;
+	case Kind_Enum_Named:
+	case Kind_Union_Named:
+	case Kind_Struct_Named:
+	case Kind_UnsizedArray:
+		return t.nametagged->type.kind == Kind_Void;
+	case Kind_Union:
+	case Kind_Struct:
+	case Kind_Basic:
+	case Kind_Float:
+	case Kind_Enum:
+	case Kind_Pointer:
+	case Kind_FunctionPtr:
+	case Kind_Array:
+		return false;
+	case Kind_Function:
+	case Kind_VLArray: break;
+	}
+	unreachable;
 }
 
 

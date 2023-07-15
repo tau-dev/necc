@@ -197,7 +197,7 @@ static nodiscard bool tryParseTypeName(Parse *, Type *dest, u8 *storage);
 static void parseFunction(Parse *, Symbol *name);
 static Value rvalue(Value v, Parse *);
 static bool isStringType(Type typ);
-static Value dereference(Parse *, Value v);
+static Value dereference(Parse *, Value v, const Token *primary);
 static Value pointerAdd(IrBuild *, Value lhs, Value rhs, Parse *op_parse, const Token *);
 static bool comparablePointers(Parse *, Value a, Value b);
 static void parseTypedefDecls(Parse *, Type base_type);
@@ -1356,7 +1356,7 @@ static Value parseExprPrefix (Parse *parse) {
 		}
 		if (v.typ.kind != Kind_Pointer)
 			parseerror(parse, primary, "cannot dereference value of type %s; expected a pointer type", printTypeHighlighted(parse->arena, v.typ));
-		return dereference(parse, v);
+		return dereference(parse, v, primary);
 	}
 	case Tok_Bang: {
 		Value v = rvalue(parseExprPrefix(parse), parse);
@@ -1522,7 +1522,7 @@ static Value parseExprPostfix (Parse *parse) {
 
 			if (!(v.typ.kind == Kind_Pointer || index.typ.kind == Kind_Pointer))
 				parseerror(parse, primary, "either the subscript or the subscripted value must be a pointer");
-			v = dereference(parse, pointerAdd(build, v, index, parse, primary));
+			v = dereference(parse, pointerAdd(build, v, index, parse, primary), primary);
 		} else if (tryEat(parse, Tok_DoublePlus) || tryEat(parse, Tok_DoubleMinus)) {
 			// STYLE Copypasta from preincrement
 			needAssignableLval(parse, primary, v);
@@ -1544,7 +1544,7 @@ static Value parseExprPostfix (Parse *parse) {
 			if (arrow) {
 				if (v.typ.kind != Kind_Pointer)
 					parseerror(parse, NULL, "the arrow %s->%s operator expects a pointer value. You may want to use a regular dot", BOLD, RESET);
-				v = dereference(parse, v);
+				v = dereference(parse, v, primary);
 			}
 
 
@@ -1868,7 +1868,7 @@ static void initializeAutoDefinition (Parse *parse, OrdinaryIdentifier *ord, Typ
 		return;
 	}
 
-	if (typeSize(type, &parse->target) == 0)
+	if (isIncomplete(type))
 		parseerror(parse, init_token, "cannot initialize incomplete type %s", printTypeHighlighted(parse->arena, type));
 
 	// PERFORMANCE This could generate significant load on the memory optimizer.
@@ -2804,14 +2804,8 @@ static bool tryParseTypeBase (Parse *parse, Type *type, u8 *storage_dest) {
 			if (is_unsigned)
 				base.basic |= Int_unsigned;
 			*type = base;
-			if (!longness[0] && !shortness && !is_unsigned && bases == 0) {
-				if (!storage)
-					parseerror(parse, begin, "missing type");
-				// TODO Is this ever reachable?
-
-				Version v = parse->target.version;
-				if (v > Version_C89 && !(v & Features_GNU_Extensions))
-					parseerror(parse, begin, "support for implicit %s in declarations was removed in C99", printTypeHighlighted(parse->arena, BASIC_INT));
+			if (!longness[0] && !shortness && !signedness && bases == 0 && !storage) {
+				requires(parse, "default types of int", Features_DefaultInt);
 			}
 			return true;
 		} else if (base.basic == Int_char) {
@@ -3645,8 +3639,13 @@ static bool comparablePointers (Parse *parse, Value lhs, Value rhs) {
 	return true;
 }
 
-static Value dereference (Parse *parse, Value v) {
+static Value dereference (Parse *parse, Value v, const Token *primary) {
 	assert(v.typ.kind == Kind_Pointer);
+	if (isIncomplete(*v.typ.pointer)) {
+		parseerror(parse, primary, "cannot dereference pointer to incomplete type %s",
+				printTypeHighlighted(parse->arena, *v.typ.pointer));
+	}
+
 
 	if (isByref(v))
 		v.inst = genLoad(&parse->build, v.inst, typeSize(v.typ, &parse->target), v.typ.qualifiers & Qualifier_Volatile);

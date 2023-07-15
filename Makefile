@@ -10,8 +10,9 @@ C_REL_FLAGS := -fstrict-aliasing -g -w -fno-omit-frame-pointer -O1
 
 OBJS := $(patsubst src/%.c,bin/%.o,$(C_SRCS))
 SELFHOST_OBJS := $(patsubst src/%.c,selfhost/%.o,$(C_SRCS))
+SELFSELF_OBJS := $(patsubst src/%.c,selfself/%.o,$(C_SRCS))
 
-REQUIRED_DIRS := bin tests/bin selfhost
+REQUIRED_DIRS := bin tests/bin selfhost selfself
 
 debug: bin/necc-dbg
 
@@ -19,8 +20,11 @@ release: bin/necc
 
 self: selfhost/necc
 	@echo
+selfs: selfself/necc
 
 test: bin/necc-dbg bin/necc tests/runner self
+all: debug release selfs
+
 	@./tests/runner
 
 
@@ -43,9 +47,18 @@ selfhost/%.o: src/%.c $(C_HDRS) bin/necc-dbg
 	./bin/necc-dbg $< -g -obj=$@ -std gnu -def MUSL_DIR=\"$(MUSL_DIR)\"
 
 
+selfself/necc: $(SELFSELF_OBJS)
+	musl-gcc -static -g $^ -lm -o $@
+	diff selfhost/ selfself/
+	# TODO Add error message here: "Inherited codegen error: self-compiled executable self-compiling does not yield the same executable."
+
+selfself/%.o: src/%.c $(C_HDRS) selfhost/necc
+	./selfhost/necc $< -g -obj=$@ -std gnu -def MUSL_DIR=\"$(MUSL_DIR)\"
+
+
 
 .PHONY: debug release re clean printvars \
-		self run run-rel gdb lldb
+		self run run-rel gdb lldb all
 
 clean:
 	@rm -f -r bin/*
