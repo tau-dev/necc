@@ -22,9 +22,9 @@ self: selfhost/necc
 	@echo
 selfs: selfself/necc
 
-test: bin/necc-dbg bin/necc tests/runner self
 all: debug release selfs
 
+test: bin/necc-dbg bin/necc tests/runner selfs
 	@./tests/runner
 
 
