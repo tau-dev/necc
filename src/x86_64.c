@@ -358,7 +358,6 @@ static void emitInstForward(Codegen *c, IrRef i);
 static inline u16 sizeOfRegister(Register size);
 static inline Storage registerSize(u16 size);
 static inline Register registerSized(Register, u16);
-static const char *sizeOp(u16 size);
 static const char *sizeSuffix(u16 size);
 static const char *sizeFSuffix(u16 size);
 static u16 valueSize(Codegen *, IrRef);
@@ -388,7 +387,7 @@ void emitX64AsmSimple(EmitParams params) {
 	};
 	Module module = params.module;
 
-	fprintf(params.out, ".intel_syntax\n\n");
+// 	fprintf(params.out, ".intel_syntax\n\n");
 
 	for (u32 i = 0; i < module.len; i++) {
 		StaticValue reloc = module.ptr[i];
@@ -461,7 +460,7 @@ void emitX64AsmSimple(EmitParams params) {
 			"	.int .info_end - .info_start # unit_length\n"
 			".info_start:\n"
 			"	.short 4 # version\n"
-			"	.int offset .abbrevs # debug_abbrev_offset\n"
+			"	.int .abbrevs # debug_abbrev_offset\n"
 			"	.byte 8 # address_size\n"
 			"\n");
 		flushit(params.out);
@@ -472,7 +471,7 @@ void emitX64AsmSimple(EmitParams params) {
 			params.module_name);
 		emitZString(
 			"	.byte DW_LANG_C99\n"
-			"	.int offset .lines\n"
+			"	.int .lines\n"
 			"	.quad .exec_base\n"
 			"	.quad .exec_end\n");
 
@@ -729,10 +728,10 @@ static void emitFunctionForward (EmitParams params, u32 id) {
 	// No need to do callee-saves because those registers are never touched.
 
 	emit(&c, " push R", RBP_8);
-	emit(&c, " mov R, R", RBP_8, RSP_8);
-	emit(&c, " sub R, I", RSP_8, stack_allocated);
+	emit(&c, " mov R, R", RSP_8, RBP_8);
+	emit(&c, " sub $I, R", stack_allocated, RSP_8);
 	if (mem_return)
-		emit(&c, " mov qword ptr [R~I], R", RBP_8, c.return_pointer_storage, RDI_8);
+		emit(&c, " movq R, ~I(R)", RDI_8, c.return_pointer_storage, RBP_8);
 
 
 
@@ -749,10 +748,10 @@ static void emitFunctionForward (EmitParams params, u32 id) {
 
 				if (info.class.registers[j] == Param_INTEGER) {
 					Register reg = gp_parameter_regs[info.registers[j]];
-					emit(&c, " mov Z [R~I], R", sizeOp(size), RBP_8, info.storage + 8*j, registerSized(reg, size));
+					emit(&c, " movZ R, ~I(R)", sizeSuffix(size), registerSized(reg, size), info.storage + 8*j, RBP_8);
 				} else {
 					assert(info.class.registers[j] == Param_SSE);
-					emit(&c, " movsZ [R~I], %xmmI", sizeFSuffix(size), RBP_8, info.storage + 8*j, (u32) info.registers[j]);
+					emit(&c, " movsZ %xmmI, ~I(R)", sizeFSuffix(size), (u32) info.registers[j], info.storage + 8*j, RBP_8);
 				}
 			}
 		} else {
@@ -769,11 +768,11 @@ static void emitFunctionForward (EmitParams params, u32 id) {
 
 		// Copy out the registers into the register save area.
 		for (u32 i = gp_params; i < gp_parameter_regs_count; i++)
-			emit(&c, " mov qword ptr [R~I], R", RBP_8, -reg_save_area_size + i*8, registerSized(gp_parameter_regs[i], I64));
+			emit(&c, " movq R, ~I(R)", registerSized(gp_parameter_regs[i], I64), -reg_save_area_size + i*8, RBP_8);
 		emit(&c, " test R, R", RAX, RAX);
 		emit(&c, " je ..vaarg_no_float_args_I", id);
 		for (u32 i = 0; i < 8; i++)
-			emit(&c, " movaps xmmword ptr [R~I], %xmmI", RBP_8, -reg_save_area_size + 48 + i*16, i);
+			emit(&c, " movaps %xmmI, ~I(R)", i, -reg_save_area_size + 48 + i*16, RBP_8);
 		emit(&c, "..vaarg_no_float_args_I:", id);
 	}
 
@@ -783,8 +782,8 @@ static void emitFunctionForward (EmitParams params, u32 id) {
 		Inst inst = ir.ptr[i];
 
 		if (inst.kind == Ir_StackAllocFixed) {
-			emit(&c, " lea R, [R~I]", RAX_8, RBP_8, c.storage[i]+8);
-			emit(&c, " mov #, R", i, RAX_8);
+			emit(&c, " lea ~I(R), R", c.storage[i]+8, RBP_8, RAX_8);
+			emit(&c, " mov R, #", RAX_8, i);
 		}
 	}
 
@@ -806,37 +805,37 @@ static void copyTo (Codegen *c, Register to_addr, i32 to_offset, Register from_a
 	to_addr = registerSized(to_addr, 8);
 	from_addr = registerSized(from_addr, 8);
 	while (size - offset > 8) {
-		emit(c, " mov %r10, qword ptr [R~I]", from_addr, offset+from_offset);
-		emit(c, " mov qword ptr [R~I], %r10", to_addr, offset+to_offset);
+		emit(c, " movq ~I(R), R", offset+from_offset, from_addr, R10_8);
+		emit(c, " movq R, ~I(R)", R10_8, offset+to_offset, to_addr);
 		offset += 8;
 	}
 
 	// This will break for non-power-of-two remainders.
 	Register tmp = registerSized(R10, size - offset);
-	const char *op = sizeOp(size - offset);
-	emit(c, " mov R, Z [R~I]", tmp, op, from_addr, offset+from_offset);
-	emit(c, " mov Z [R~I], R", op, to_addr, offset+to_offset, tmp);
+	const char *op = sizeSuffix(size - offset);
+	emit(c, " movZ ~I(R), R", op, offset+from_offset, from_addr, tmp);
+	emit(c, " movZ R, ~I(R)", op, tmp, offset+to_offset, to_addr);
 }
 
 
 static Register loadTo (Codegen *c, Register reg, IrRef i) {
 	Register dest = registerSized(reg, c->ir.ptr[i].size);
-	emit(c, " mov R, #", dest, i);
+	emit(c, " mov #, R", i, dest);
 	return dest;
 }
 
 
 static void triple (Codegen *c, const char *inst, u16 size, IrRef lhs, IrRef rhs, IrRef dest) {
 	Register rax = loadTo(c, RAX, lhs);
-	emit(c, " ZZ R, #", inst, sizeSuffix(size), rax, rhs);
-	emit(c, " mov #, R", dest, rax);
+	emit(c, " ZZ #, R", inst, sizeSuffix(size), rhs, rax);
+	emit(c, " mov R, #", rax, dest);
 }
 
 static void ftriple (Codegen *c, const char *inst, u16 size, IrRef lhs, IrRef rhs, IrRef dest) {
 	const char *suff = sizeFSuffix(size);
-	emit(c, " movsZ %xmm1, #", suff, lhs);
-	emit(c, " ZZ %xmm1, #", inst, suff, rhs);
-	emit(c, " movsZ #, %xmm1", suff, dest);
+	emit(c, " movsZ #, %xmm1", suff, lhs);
+	emit(c, " ZZ #, %xmm1", inst, suff, rhs);
+	emit(c, " movsZ %xmm1, #", suff, dest);
 }
 
 
@@ -877,14 +876,14 @@ static void emitBlockForward (Codegen *c, Blocks blocks, u32 i) {
 			emitJump(c, "jmp", exit.unconditional);
 		break;
 	case Exit_Branch: {
-		emit(c, " test #, -1", exit.branch.condition);
+		emit(c, " testZ $-1, #", sizeSuffix(valueSize(c, exit.branch.condition)), exit.branch.condition);
 		emitJump(c, "jnz", exit.branch.on_true);
 
 
 		for (u32 k = 0; k < false_phis.len; k++) {
 			Inst inst  = c->ir.ptr[false_phis.ptr[k]];
-			emit(c, " mov #, R",
-				inst.phi_out.on_false, loadTo(c, RAX, inst.phi_out.source));
+			emit(c, " mov R, #",
+				loadTo(c, RAX, inst.phi_out.source), inst.phi_out.on_false);
 		}
 
 		if (exit.branch.on_false != next)
@@ -895,7 +894,9 @@ static void emitBlockForward (Codegen *c, Blocks blocks, u32 i) {
 		Cases cases = exit.switch_.cases;
 
 		for (u32 i = 0; i < cases.len; i++) {
-			emit(c, " cmp #, L", exit.switch_.value, cases.ptr[i].value & 0xffffffff);
+			u32 size = valueSize(c, exit.switch_.value);
+			assert(size <= 4);
+			emit(c, " cmpZ $L, #", sizeSuffix(size), cases.ptr[i].value & 0xffffffff, exit.switch_.value);
 			emitJump(c, "je", cases.ptr[i].dest);
 		}
 		if (exit.switch_.default_case != next)
@@ -904,7 +905,7 @@ static void emitBlockForward (Codegen *c, Blocks blocks, u32 i) {
 	case Exit_Return:
 		if (exit.ret != IDX_NONE) {
 			if (c->ret_class.count == 0) {
-				emit(c, " mov R, qword ptr [R~I]", RAX_8, RBP_8, c->return_pointer_storage);
+				emit(c, " movq ~I(R), R", c->return_pointer_storage, RBP_8, RAX_8);
 				copyTo(c, RAX, 0, RBP, c->storage[exit.ret], valueSize(c, exit.ret));
 			} else {
 				u32 gp_returns = 0;
@@ -915,17 +916,17 @@ static void emitBlockForward (Codegen *c, Blocks blocks, u32 i) {
 					i32 src = c->storage[exit.ret] + 8*j;
 					if (c->ret_class.registers[j] == Param_INTEGER) {
 						int reg = gp_returns == 0 ? RAX_8 : RDX_8;
-						emit(c, " mov R, Z [R~I]", registerSized(reg, size), sizeOp(size), RBP_8, src);
+						emit(c, " movZ ~I(R), R", sizeSuffix(size), src, RBP_8, registerSized(reg, size));
 						gp_returns++;
 					} else {
 						assert(c->ret_class.registers[j] == Param_SSE);
-						emit(c, " movsZ %xmmI, [R~I]", sizeFSuffix(size), fp_returns, RBP_8, src);
+						emit(c, " movsZ ~I(R), %xmmI", sizeFSuffix(size), src, RBP_8, fp_returns);
 						fp_returns++;
 					}
 				}
 			}
 		}
-		emit(c, " mov R, R", RSP_8, RBP_8);
+		emit(c, " mov R, R", RBP_8, RSP_8);
 		emit(c, " pop R", RBP_8);
 		emit(c, " ret");
 		break;
@@ -951,8 +952,7 @@ static void emitInstForward(Codegen *c, IrRef i) {
 		emit(c, " xor R, R", RDX_8, RDX_8);
 
 		emit(c, " divZ #", sizeSuffix(inst.size), inst.binop.rhs);
-		emit(c, " mov #, R", i, registerSized(RAX, inst.size));
-		emit(c, " mov #, R", i, registerSized(inst.kind == Ir_Div ? RAX : RDX, inst.size));
+		emit(c, " mov R, #", registerSized(inst.kind == Ir_Div ? RAX : RDX, inst.size), i);
 	} break;
 	case Ir_SDiv:
 	case Ir_SMod: {
@@ -966,7 +966,7 @@ static void emitInstForward(Codegen *c, IrRef i) {
 		}
 
 		emit(c, " idivZ #", sizeSuffix(inst.size), inst.binop.rhs);
-		emit(c, " mov #, R", i, registerSized(inst.kind == Ir_SDiv ? RAX : RDX, inst.size));
+		emit(c, " mov R, #", registerSized(inst.kind == Ir_SDiv ? RAX : RDX, inst.size), i);
 	} break;
 	case Ir_FAdd: ftriple(c, "adds", inst.size, inst.binop.lhs, inst.binop.rhs, i); break;
 	case Ir_FSub: ftriple(c, "subs", inst.size, inst.binop.lhs, inst.binop.rhs, i); break;
@@ -980,7 +980,7 @@ static void emitInstForward(Codegen *c, IrRef i) {
 	case Ir_BitNot: {
 		Register reg = loadTo(c, RAX, inst.unop);
 		emit(c, " not R", reg);
-		emit(c, " mov #, R", i, reg);
+		emit(c, " mov R, #", reg, i);
 	} break;
 	case Ir_Equals:
 	case Ir_FEquals:
@@ -991,11 +991,11 @@ static void emitInstForward(Codegen *c, IrRef i) {
 	case Ir_SLessThanOrEquals:
 	case Ir_FLessThanOrEquals: {
 		if (inst.kind == Ir_FLessThan || inst.kind == Ir_FLessThanOrEquals || inst.kind == Ir_FEquals) {
-			u16 sz = c->ir.ptr[inst.binop.lhs].size;
-			emit(c, " movsZ %xmm1, #", sizeFSuffix(sz), inst.binop.lhs);
-			emit(c, " comisZ %xmm1, #", sizeFSuffix(sz), inst.binop.rhs);
+			u16 sz = valueSize(c, inst.binop.lhs);
+			emit(c, " movsZ #, %xmm1", sizeFSuffix(sz), inst.binop.lhs);
+			emit(c, " comisZ #, %xmm1", sizeFSuffix(sz), inst.binop.rhs);
 		} else {
-			emit(c, " cmp #, R", inst.binop.lhs, loadTo(c, RAX, inst.binop.rhs));
+			emit(c, " cmp R, #", loadTo(c, RAX, inst.binop.rhs), inst.binop.lhs);
 		}
 		switch (inst.kind) {
 			case Ir_LessThan:
@@ -1012,39 +1012,36 @@ static void emitInstForward(Codegen *c, IrRef i) {
 			case Ir_FEquals:
 				emit(c, " sete R", RAX); break;
 		}
-		emit(c, " movzx R, R", RSI_8, RAX);
-		emit(c, " mov #, R", i, registerSized(RSI, inst.size));
+		emit(c, " movzx R, R", RAX, RSI_8);
+		emit(c, " mov R, #", registerSized(RSI, inst.size), i);
 	} break;
 	case Ir_ShiftLeft: {
 		loadTo(c, RCX, inst.binop.rhs);
 		Register shiftee = loadTo(c, R8, inst.binop.lhs);
-		emit(c, " xor R, R", RAX_8, RAX_8);
-		emit(c, " shld R, R, R", shiftee, registerSized(RAX, inst.size), RCX);
-		emit(c, " mov #, R", i, shiftee);
+		emit(c, " shl R, R", RCX, shiftee);
+		emit(c, " mov R, #", shiftee, i);
 	} break;
 	case Ir_ShiftRight: {
 		loadTo(c, RCX, inst.binop.rhs);
 		Register shiftee = loadTo(c, R8, inst.binop.lhs);
-		emit(c, " xor R, R", RAX_8, RAX_8);
-		emit(c, " shrd R, R, R", shiftee, registerSized(RAX, inst.size), RCX);
-		emit(c, " mov #, R", i, shiftee);
-		loadTo(c, RCX, inst.binop.rhs);
+		emit(c, " shr R, R", RCX, shiftee);
+		emit(c, " mov R, #", shiftee, i);
 	} break;
 	case Ir_Truncate: {
 		Register reg = registerSized(RAX, inst.size);
-		emit(c, " mov R, [R~I]", reg, RBP_8, c->storage[inst.unop]);
-		emit(c, " mov #, R", i, reg);
+		emit(c, " mov ~I(R), R", c->storage[inst.unop], RBP_8, reg);
+		emit(c, " mov R, #", reg, i);
 	} break;
 	case Ir_SignExtend: {
 		Register reg = registerSized(RAX, inst.size);
 		bool dw = inst.size == 8 && valueSize(c, inst.unop) == 4;
-		emit(c, " movsxZ R, #", (dw ? "d" : ""), reg, inst.unop);
-		emit(c, " mov #, R", i, reg);
+		emit(c, " movsxZ #, R", (dw ? "d" : ""), inst.unop, reg);
+		emit(c, " mov R, #", reg, i);
 	} break;
 	case Ir_ZeroExtend: {
 		emit(c, " xor R, R", RAX_8, RAX_8);
-		emit(c, " mov R, #", registerSized(RAX, valueSize(c, inst.unop)), inst.unop);
-		emit(c, " mov #, R", i, registerSized(RAX, inst.size));
+		emit(c, " mov #, R", inst.unop, registerSized(RAX, valueSize(c, inst.unop)));
+		emit(c, " mov R, #", registerSized(RAX, inst.size), i);
 	} break;
 	case Ir_Store: {
 		copyTo(c, loadTo(c, RAX, inst.mem.address), 0, RBP, c->storage[inst.mem.source], inst.size);
@@ -1064,29 +1061,29 @@ static void emitInstForward(Codegen *c, IrRef i) {
 		assert(inst.size <= 8);
 		if (inst.size > 4 && inst.constant > INT32_MAX) {
 			// Wrapping unsigned to signed is undefined, but whatever.
-			emit(c, " mov Z [R~I], ~I", sizeOp(4), RBP_8, c->storage[i], (i32) inst.constant);
-			emit(c, " mov Z [R~I], ~I", sizeOp(4), RBP_8, c->storage[i] + 4, (i32) (inst.constant >> 32));
+			emit(c, " movl $~I, ~I(R)", (i32) inst.constant, c->storage[i], RBP_8);
+			emit(c, " movl $~I, ~I(R)", (i32) (inst.constant >> 32), c->storage[i] + 4, RBP_8);
 		} else {
-			emit(c, " mov #, ~I", i, (i32) inst.constant);
+			emit(c, " movZ $~I, #", sizeSuffix(inst.size), (i32) inst.constant, i);
 		}
 		break;
 	case Ir_StackAllocFixed:
 		break;
 	case Ir_StackAllocVLA: {
-		emit(c, " sub R, #", RSP_8, inst.unop);
-		emit(c, " mov #, R", i, RSP_8);
+		emit(c, " sub #, R", inst.unop, RSP_8);
+		emit(c, " mov R, #", RSP_8, i);
 	} break;
 	case Ir_StackDeallocVLA: {
-		emit(c, " add R, #", RSP_8, c->ir.ptr[inst.unop].unop);
+		emit(c, " add #, R", c->ir.ptr[inst.unop].unop, RSP_8);
 	} break;
 	case Ir_Reloc:
 		assert(inst.size == 8);
 
-		emitZString(" mov %rax, offset flat:");
+		emitZString(" lea ");
 		emitName(c->module, inst.reloc.id);
-		emit(c, "~L", inst.reloc.offset);
+		emit(c, "~L(%rip), %rax", inst.reloc.offset);
 
-		emit(c, " mov #, R", i,  RAX_8);
+		emit(c, " mov R, #", RAX_8, i);
 		break;
 	case Ir_PhiOut: {
 		if (inst.phi_out.on_true != IDX_NONE) {
@@ -1098,10 +1095,10 @@ static void emitInstForward(Codegen *c, IrRef i) {
 	case Ir_Copy: break;
 	case Ir_PhiIn: break;
 	case Ir_FCast: {
-		u32 source = c->ir.ptr[inst.unop].size;
+		u32 source = valueSize(c, inst.unop);
 		const char *fsuff = sizeFSuffix(inst.size);
-		emit(c, " cvtsZ2sZ %xmm1, #", sizeFSuffix(source), fsuff, inst.unop);
-		emit(c, " movsZ #, %xmm1", fsuff, i);
+		emit(c, " cvtsZ2sZ #, %xmm1", sizeFSuffix(source), fsuff, inst.unop);
+		emit(c, " movsZ %xmm1, #", fsuff, i);
 	} break;
 	case Ir_UIntToFloat: {
 		const char *fsuff = sizeFSuffix(inst.size);
@@ -1113,46 +1110,46 @@ static void emitInstForward(Codegen *c, IrRef i) {
 			// use this polyfill, taken from GCC output.
 
 			loadTo(c, RAX, inst.unop);
-			emit(c, " testq R, R", RAX_8, RAX_8);
+			emit(c, " test R, R", RAX_8, RAX_8);
 			emit(c, " js .u2f_negative_I_I", c->current_id, i);
 			// When no sign bit is set, we can use the signed instruction.
-			emit(c, " cvtsi2sZ %xmm0, R", fsuff, RAX_8);
+			emit(c, " cvtsi2sZ R, %xmm0", fsuff, RAX_8);
 			emit(c, " jmp .u2f_done_I_I", c->current_id, i);
 
 			emit(c, ".u2f_negative_I_I:", c->current_id, i);
 			// Divide RAX by two, rounding to odd.
-			emit(c, " movq R, R", RDI_8, RAX_8);
-        	emit(c, " and R, 1", RDI_4);
-	        emit(c, " shrq R", RAX_8);
-        	emit(c, " orq R, R", RAX_8, RDI_8);
-        	// Now convert normally and multiply by 2. Now the lowest
-        	// bit would be lost, but it cannot be represented in the
-        	// mantissa anyways.
-			emit(c, " cvtsi2sZ %xmm0, R", fsuff, RAX_8);
+			emit(c, " movq R, R", RAX_8, RDI_8);
+			emit(c, " and $1, R", RDI_8);
+			emit(c, " shrq R", RAX_8);
+			emit(c, " orq R, R", RDI_8, RAX_8);
+			// Now convert normally and multiply by 2. Now the lowest
+			// bit would be lost, but it cannot be represented in the
+			// mantissa anyways.
+			emit(c, " cvtsi2sZ R, %xmm0", fsuff, RAX_8);
 			emit(c, " addsZ %xmm0, %xmm0", fsuff);
 
 			emit(c, ".u2f_done_I_I:", c->current_id, i);
 		} else {
 			emit(c, " xor R, R", RAX_8, RAX_8);
 			loadTo(c, RAX, inst.unop);
-			emit(c, " cvtsi2sZ %xmm0, R", fsuff, RAX_8);
+			emit(c, " cvtsi2sZ R, %xmm0", fsuff, RAX_8);
 		}
-		emit(c, " movsZ #, %xmm0", fsuff, i);
+		emit(c, " movsZ %xmm0, #", fsuff, i);
 	} break;
 	case Ir_SIntToFloat: {
 		const char *fsuff = sizeFSuffix(inst.size);
 
 		u32 src_size = valueSize(c, inst.unop);
 		if (src_size != 8)
-			emit(c, " movsxZ R, #", (src_size == 4 ? "d" : ""), RAX_8, inst.unop);
+			emit(c, " movsxZ #, R", (src_size == 4 ? "d" : ""), inst.unop, RAX_8);
 		else
-			emit(c, " mov R, #", RAX_8, inst.unop);
+			emit(c, " mov #, R", inst.unop, RAX_8);
 
-		emit(c, " cvtsi2sZ %xmm1, R", fsuff, RAX_8);
-		emit(c, " movsZ #, %xmm1", fsuff, i);
+		emit(c, " cvtsi2sZ R, %xmm1", fsuff, RAX_8);
+		emit(c, " movsZ %xmm1, #", fsuff, i);
 	} break;
 	case Ir_FloatToUInt: {
-		u32 float_size = c->ir.ptr[inst.unop].size;
+		u32 float_size = valueSize(c, inst.unop);
 		const char *fsuff = sizeFSuffix(float_size);
 		u32 dest_size = valueSize(c, inst.unop);
 
@@ -1161,49 +1158,49 @@ static void emitInstForward(Codegen *c, IrRef i) {
 
 			// Load INT64_MAX as float.
 			if (float_size == 4)
-				emit(c, " mov R, 0x5f000000", RAX_8);
+				emit(c, " mov $0x5f000000, R", RAX_8);
 			else
-				emit(c, " movabsq R, 0x43e0000000000000", RAX_8);
+				emit(c, " movabsq $0x43e0000000000000, R", RAX_8);
 			emit(c, " movd %xmm1, R", RAX_8);
 
-			emit(c, " movsZ %xmm0, [R~I]", fsuff, RBP_8, c->storage[inst.unop]);
-			emit(c, " comisZ %xmm0, %xmm1", fsuff);
+			emit(c, " movsZ ~I(R), %xmm0", fsuff, c->storage[inst.unop], RBP_8);
+			emit(c, " comisZ %xmm1, %xmm0", fsuff);
 			emit(c, " jnb .f2u_negative_I_I", c->current_id, i);
 
 			// When below INT64_MAX, we can use the signed instruction.
-			emit(c, " cvttsZ2siq R, %xmm0", fsuff, RAX_8);
+			emit(c, " cvttsZ2siq %xmm0, R", fsuff, RAX_8);
 			emit(c, " jmp .f2u_done_I_I", c->current_id, i);
 
 			emit(c, ".f2u_negative_I_I:", c->current_id, i);
 			// Otherwise, subtract INT64_MAX as float, convert, set sign bit.
-			emit(c, " subsZ %xmm0, %xmm1", fsuff);
-			emit(c, " cvttsZ2siq R, %xmm0", fsuff, RAX_8);
-			emit(c, " btcq R, 63", RAX_8);
+			emit(c, " subsZ %xmm1, %xmm0", fsuff);
+			emit(c, " cvttsZ2siq %xmm0, R", fsuff, RAX_8);
+			emit(c, " btcq $63, R", RAX_8);
 
 			emit(c, ".f2u_done_I_I:", c->current_id, i);
 		} else {
-			emit(c, " movsZ %xmm0, [R~I]", fsuff, RBP_8, c->storage[inst.unop]);
-			emit(c, " cvttsZ2si R, %xmm0", fsuff, RAX_8);
+			emit(c, " movsZ ~I(R), %xmm0", fsuff, c->storage[inst.unop], RBP_8);
+			emit(c, " cvttsZ2si %xmm0, R", fsuff, RAX_8);
 		}
-		emit(c, " mov #, R", i, registerSized(RAX, inst.size));
+		emit(c, " mov R, #", registerSized(RAX, inst.size), i);
 	} break;
 	case Ir_FloatToSInt: {
-		const char *fsuff = sizeFSuffix(c->ir.ptr[inst.unop].size);
+		const char *fsuff = sizeFSuffix(valueSize(c, inst.unop));
 
-		emit(c, " movsZ %xmm0, [R~I]", fsuff, RBP_8, c->storage[inst.unop]);
-		emit(c, " cvttsZ2si R, %xmm0", fsuff, RAX_8);
-		emit(c, " mov #, R", i, registerSized(RAX, inst.size));
+		emit(c, " movsZ ~I(R), %xmm0", fsuff, c->storage[inst.unop], RBP_8);
+		emit(c, " cvttsZ2si %xmm0, R", fsuff, RAX_8);
+		emit(c, " mov R, #", registerSized(RAX, inst.size), i);
 	} break;
 	case Ir_VaStart: {
 		loadTo(c, RAX, inst.binop.lhs);
 		// State of affairs: rhs should be the last parameter, but it is currently ignored.
 
-		emit(c, " mov dword ptr [R], I", RAX_8, c->vaarg_gp_offset);
-		emit(c, " mov dword ptr [R+4], I", RAX_8, c->vaarg_fp_offset);
-		emit(c, " lea R, [R~I]", RDX_8, RBP_8, c->vaarg_overflow_args);
-		emit(c, " mov qword ptr [R+8], R", RAX_8, RDX_8);
-		emit(c, " lea R, [R~I]", RDX_8, RBP_8, c->vaarg_reg_saves);
-		emit(c, " mov qword ptr [R+16], R", RAX_8, RDX_8);
+		emit(c, " movl $I, (R)", c->vaarg_gp_offset, RAX_8);
+		emit(c, " movl $I, 4(R)", c->vaarg_fp_offset, RAX_8);
+		emit(c, " lea ~I(R), R", c->vaarg_overflow_args, RBP_8, RDX_8);
+		emit(c, " movq R, 8(R)", RDX_8, RAX_8);
+		emit(c, " lea ~I(R), R", c->vaarg_reg_saves, RBP_8, RDX_8);
+		emit(c, " movq R, 16(R)", RDX_8, RAX_8);
 	} break;
 	case Ir_VaArg: {
 		Type type = AUX_DATA(Type, c->ir, inst.unop_const.offset);
@@ -1217,39 +1214,39 @@ static void emitInstForward(Codegen *c, IrRef i) {
 
 			if (gp_count) {
 				// Test if all INTEGER parts would fit
-				emit(c, " mov R, dword ptr [R]", RDX_4, RAX_8);
-				emit(c, " cmp R, I", RDX_4, 48 - gp_count*8);
+				emit(c, " movl (R), R", RAX_8, RDX_4);
+				emit(c, " cmp $I, R", 48 - gp_count*8, RDX_4);
 				emit(c, " ja .vaarg_I_I_overflowarg", c->current_id, i);
 			}
 
 			if (class.sse_count) {
 				// Test if all SSE parts would fit
-				emit(c, " mov R, dword ptr [R+4]", RDX_4, RAX_8);
-				emit(c, " cmp R, I", RDX_4, reg_save_area_size - class.sse_count*8);
+				emit(c, " movl 4(R), R", RAX_8, RDX_4);
+				emit(c, " cmp $I, R", reg_save_area_size - class.sse_count*8, RDX_4);
 				emit(c, " ja .vaarg_I_I_overflowarg", c->current_id, i);
 			}
 
 			for (u32 j = 0; j < class.count; j++) {
 				// Load the register offset to EDX and update it.
 				if (class.registers[j] == Param_INTEGER) {
-					emit(c, " mov R, dword ptr [R]", RDX_4, RAX_8);
-					emit(c, " add dword ptr [R], 8", RAX_8);
+					emit(c, " movl (R), R", RAX_8, RDX_4);
+					emit(c, " addl $8, (R)", RAX_8);
 				} else {
-					emit(c, " mov R, dword ptr [R+4]", RDX_4, RAX_8);
-					emit(c, " add dword ptr [R+4], 16", RAX_8);
+					emit(c, " movl 4(R), R", RAX_8, RDX_4);
+					emit(c, " addq $16, 4(R)", RAX_8);
 				}
 				// Add it to the reg_save_area.
-				emit(c, " add R, qword ptr [R+16]", RDX_8, RAX_8);
+				emit(c, " addq 16(R), R", RAX_8, RDX_8);
 
-				emit(c, " mov R, qword ptr [R]", RDX_8, RDX_8);
-				emit(c, " mov qword ptr [R~I], R", RBP_8, c->storage[i] + j*8, RDX_8);
+				emit(c, " movq (R), R", RDX_8, RDX_8);
+				emit(c, " movq R, ~I(R)", RDX_8, c->storage[i] + j*8, RBP_8);
 			}
 			emit(c, " jmp .vaarg_I_I_done", c->current_id, i);
 
 			emit(c, ".vaarg_I_I_overflowarg:", c->current_id, i);
 		}
-		emit(c, " mov R, qword ptr [R+8]", RDX_8, RAX_8);
-		emit(c, " add qword ptr [R+8], I", RAX_8, inst.size);
+		emit(c, " movq 8(R), R", RAX_8, RDX_8);
+		emit(c, " addq $I, 8(R)", inst.size, RAX_8);
 		copyTo(c, RBP, c->storage[i], RDX, 0, inst.size);
 
 		emit(c, ".vaarg_I_I_done:", c->current_id, i);
@@ -1264,7 +1261,7 @@ static void emitInstForward(Codegen *c, IrRef i) {
 		bool memory_return = ret_class.count == 0;
 
 		if (memory_return)
-			emit(c, " lea R, #", RDI_8, i);
+			emit(c, " lea #, R", i, RDI_8);
 
 		// STYLE All kinds of copypasta between parameter taking and
 		// argument passing. Need to unify caller and callee definitions
@@ -1293,11 +1290,11 @@ static void emitInstForward(Codegen *c, IrRef i) {
 					// TODO Do small arguments need to be zero-extended?
 					if (class.registers[j] == Param_INTEGER) {
 						Register reg = registerSized(gp_parameter_regs[gp_params], size);
-						emit(c, " mov R, Z [R~I]", reg, sizeOp(size), RBP_8, c->storage[arg.arg_inst] + 8*j);
+						emit(c, " movZ ~I(R), R", sizeSuffix(size), c->storage[arg.arg_inst] + 8*j, RBP_8, reg);
 						gp_params++;
 					} else {
 						assert(class.registers[j] == Param_SSE);
-						emit(c, " movsZ %xmmI, [R~I]", sizeFSuffix(size), fp_params, RBP_8, c->storage[arg.arg_inst] + 8*j);
+						emit(c, " movsZ ~I(R), %xmmI", sizeFSuffix(size), c->storage[arg.arg_inst] + 8*j, RBP_8, fp_params);
 						fp_params++;
 					}
 				}
@@ -1319,14 +1316,14 @@ static void emitInstForward(Codegen *c, IrRef i) {
 		assert(stack_filled == arg_stack_memory);
 
 		if (arg_stack_memory)
-			emit(c, " sub R, I", RSP_8, arg_stack_memory);
+			emit(c, " sub $I, R", arg_stack_memory, RSP_8);
 
 		if (inst.properties & Prop_Call_Vararg)
-			emit(c, " mov R, I", RAX_4, fp_params);
+			emit(c, " mov $I, R", fp_params, RAX_4);
 
-		emit(c, " call qword ptr [R~I]", RBP_8, c->storage[inst.call.function_ptr]);
+		emit(c, " call *~I(R)", c->storage[inst.call.function_ptr], RBP_8);
 		if (arg_stack_memory)
-			emit(c, " add R, I", RSP_8, arg_stack_memory);
+			emit(c, " add $I, R", arg_stack_memory, RSP_8);
 
 		if (!memory_return && inst.size) {
 			u32 gp_returns = 0;
@@ -1338,11 +1335,11 @@ static void emitInstForward(Codegen *c, IrRef i) {
 
 				if (ret_class.registers[j] == Param_INTEGER) {
 					int reg = gp_returns == 0 ? RAX_8 : RDX_8;
-					emit(c, " mov Z [R~I], R", sizeOp(size), RBP_8, dest, registerSized(reg, size));
+					emit(c, " movZ R, ~I(R)", sizeSuffix(size), registerSized(reg, size), dest, RBP_8);
 					gp_returns++;
 				} else {
 					assert(ret_class.registers[j] == Param_SSE);
-					emit(c, " movsZ [R~I], %xmmI", sizeFSuffix(size), RBP_8, dest, fp_returns);
+					emit(c, " movsZ %xmmI, ~I(R)", sizeFSuffix(size), fp_returns, dest, RBP_8);
 					fp_returns++;
 				}
 			}
@@ -1415,17 +1412,6 @@ static inline Register registerSized (Register stor, u16 size) {
 	return (stor & ~RSIZE_MASK) | registerSize(size);
 }
 
-static const char *sizeOp (u16 size) {
-	if (size == 1)
-		return "byte ptr";
-	if (size == 2)
-		return "word ptr";
-	if (size <= 4)
-		return "dword ptr";
-	if (size <= 8)
-		return "qword ptr";
-	unreachable;
-}
 
 static const char *sizeSuffix (u16 size) {
 	if (size == 1)
@@ -1433,7 +1419,7 @@ static const char *sizeSuffix (u16 size) {
 	if (size == 2)
 		return "w";
 	if (size <= 4)
-		return "d";
+		return "l";
 	if (size <= 8)
 		return "q";
 	return NULL;
@@ -1560,17 +1546,9 @@ static void emit (Codegen *c, const char *fmt, ...) {
 		} break;
 		case '#': {
 			IrRef ref = va_arg(args, IrRef);
-			u32 size = c->ir.ptr[ref].size;
-			if (size <= 8) {
-			const char *size_op = sizeOp(c->ir.ptr[ref].size);
-				u32 len = strlen(size_op);
-				memcpy(insert, size_op, len);
-				insert += len;
-			}
-			memcpy(insert, " [%rbp", 6);
-			insert += 6;
 			emitIntSigned(c->storage[ref]);
-			*insert++ = ']';
+			memcpy(insert, "(%rbp)", 6);
+			insert += 6;
 		} break;
 		case 'I':
 			emitInt(va_arg(args, u32));
