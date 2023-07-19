@@ -17,7 +17,13 @@ ParameterClass foo(int w) {}
 int c(int w) {return w + 1;}
 int d(int w) {return w + c(w);}
 
+
+
+int more(int a, int b, int c, int d, int e, int f, int g) {
+	return a + b + c + d + e + f + g;
+}
+
 main() {
 	b();
-	return d(4);
+	return d(4) + more(1, 2, 3, 4, 5, 6, 7);
 }

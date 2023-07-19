@@ -34,13 +34,19 @@ int skips = 0;
 int created = 0;
 int passes = 0;
 bool quiet = false;
+bool tty;
+
 
 const char *plural(int x) { return x == 1 ? "" : "s"; }
+
+
 
 char output_path[L_tmpnam];
 int main(int argc, char **argv) {
 	(void) argc;
-	tmpnam(output_path);
+	char *res = tmpnam(output_path);
+	assert(res);
+	tty = isatty(1);
 
 	for (int i = 1; i < argc; i++) {
 		if (!strcmp(argv[i], "-q")) {
@@ -96,12 +102,12 @@ Result performTest(const char *name) {
 		break;
 	case Skip:
 		if (!quiet)
-			fprintf(out, "%s", isatty(1) ? "\033[1G\033[0K" : "skipping.\n");
+			fprintf(out, "%s", tty ? "\033[1G\033[0K" : "skipping.\n");
 		skips++;
 		break;
 	case Pass:
 		if (!quiet)
-			fprintf(out, "%s", isatty(1) ? "\033[1G\033[0K" : "passed.\n");
+			fprintf(out, "%s", tty ? "\033[1G\033[0K" : "passed.\n");
 		passes++;
 		break;
 	}
@@ -144,6 +150,7 @@ Result testCompare(const char *name, const char *reference_path) {
 	}
 	append(&cmd, " 2>&1 ; echo \"exit code $?\"");
 	cmd = cmd_buf;
+// 	fprintf(stderr, "RUNNING: %s\n", cmd);
 
 	char buf1[BUF] = {0};
 	char buf2[BUF] = {0};
@@ -159,23 +166,28 @@ Result testCompare(const char *name, const char *reference_path) {
 			writeAll(reference, buf1, len);
 	} else {
 		FILE *output_dest = fopen(output_path, "w");
+		assert(output_dest);
 
 		size_t len1, len2;
 		while ((len1 = readAll(output, buf1, BUF))
 			&& (len2 = readAll(reference, buf2, len1)))
 		{
+// 			fprintf(stderr, "RESULT: %.*s\n", (int)len1, buf1);
 			writeAll(output_dest, buf1, len1);
-			if (len1 != len2)
+			if (len1 != len2) {
+				res = Fail;
 				break;
-			if (memcmp(buf1, buf2, len1))
-				return Fail;
+			}
+			if (memcmp(buf1, buf2, len1)) {
+				res = Fail;
+				break;
+			}
 		}
 
 		if (len1 > len2)
-			return Fail;
-		if (readAll(reference, buf2, BUF))
-			return Fail;
-
+			res = Fail;
+		if (res == Pass && readAll(reference, buf2, BUF))
+			res = Fail;
 		fclose(output_dest);
 	}
 	fclose(reference);

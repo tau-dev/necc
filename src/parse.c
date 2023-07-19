@@ -198,7 +198,8 @@ static void parseFunction(Parse *, Symbol *name);
 static Value rvalue(Value v, Parse *);
 static bool isStringType(Type typ);
 static Value dereference(Parse *, Value v, const Token *primary);
-static Value pointerAdd(IrBuild *, Value lhs, Value rhs, Parse *op_parse, const Token *);
+static IrRef calcTypeSize(Parse *, Type);
+static Value pointerAdd(Parse *, Value lhs, Value rhs, const Token *);
 static bool comparablePointers(Parse *, Value a, Value b);
 static void parseTypedefDecls(Parse *, Type base_type);
 static u32 parseStringLiteral(Parse *);
@@ -393,9 +394,9 @@ static Value intPromote(Value v, Parse *, const Token*);
 static void needAssignableLval(Parse *, const Token *, Value v);
 static void needScalar(Parse *, const Token *, Type t);
 static void discardValue(Parse *, const Token *, Value v);
-static IrRef coerce(Value v, Type t, Parse *, const Token *);
+static IrRef coerce(Parse *, Value v, Type t, const Token *);
 static IrRef toBoolean(Parse *, const Token *, Value v);
-static IrRef coercerval(Value v, Type t, Parse *, const Token *, bool allow_casts);
+static IrRef coercerval(Parse *, Value v, Type t, const Token *, bool allow_casts);
 static Value immediateIntVal(Parse *, Type typ, u64 val);
 static inline void removeEnumness(Parse *, Type *t);
 
@@ -622,9 +623,9 @@ static void parseStatement (Parse *parse, bool *had_non_declaration) {
 		if (tryEat(parse, Tok_Semicolon)) {
 			genReturnVal(build, IDX_NONE);
 		} else {
-			IrRef val = coerce(parseExpression(parse),
+			IrRef val = coerce(parse, parseExpression(parse),
 					*parse->current_func_type.rettype,
-					parse, primary);
+					primary);
 			expect(parse, Tok_Semicolon);
 
 			genReturnVal(build, val);
@@ -862,7 +863,7 @@ static void parseStatement (Parse *parse, bool *had_non_declaration) {
 					definer, parse->current_func_id);
 
 			if (ord->kind == Sym_Value_Auto) {
-				ord->value = (Value) {decl.type, genStackAllocNamed(build, typeSize(decl.type, &parse->target), decl), Ref_LValue};
+				ord->value = (Value) {decl.type, genStackAllocVlaNamed(build, calcTypeSize(parse, decl.type), decl), Ref_LValue};
 				if (definer)
 					initializeAutoDefinition(parse, ord, decl.type, definer);
 			} else {
@@ -960,7 +961,7 @@ static Value parseExprAssignment (Parse *parse) {
 		}
 	}
 	assigned = (Value) {v.typ,
-		coercerval(assigned, v.typ, parse, primary, false),
+		coercerval(parse, assigned, v.typ, primary, false),
 	};
 	genStore(&parse->build, v.inst, assigned.inst, is_volatile);
 	return assigned;
@@ -1024,12 +1025,12 @@ static Value parseExprConditional (Parse *parse) {
 		else // This can only generate an extension instruction, which will be reordered into the right block.
 			common = arithmeticConversions(parse, colon, &rhs, &lhs);
 
-		IrRef src_r = genPhiOut(build, coercerval(rhs, common, parse, colon, true));
+		IrRef src_r = genPhiOut(build, coercerval(parse, rhs, common, colon, true));
 		Block *join = newBlock(&parse->build, STRING_EMPTY);
 		genJump(build, join);
 
 		build->insertion_block = true_branch;
-		IrRef src_l = genPhiOut(build, coercerval(lhs, common, parse, colon, true));
+		IrRef src_l = genPhiOut(build, coercerval(parse, lhs, common, colon, true));
 		genJump(build, join);
 
 		IrRef dest = genPhiIn(build, typeSize(common, &parse->target));
@@ -1344,7 +1345,7 @@ static Value parseExprPrefix (Parse *parse) {
 		Value one = immediateIntVal(parse, BASIC_INT, delta);
 		Value result = arithAdd(parse, primary, one, rval);
 
-		genStore(build, v.inst, coercerval(result, v.typ, parse, primary, false), is_volatile);
+		genStore(build, v.inst, coercerval(parse, result, v.typ, primary, false), is_volatile);
 		return result;
 	}
 	case Tok_Asterisk: {
@@ -1439,7 +1440,7 @@ static Value parseExprPrefix (Parse *parse) {
 			} else {
 				// Cast operator
 				Value v = rvalue(parseExprPrefix(parse), parse);
-				return (Value) {cast_target, coercerval(v, cast_target, parse, primary, true)};
+				return (Value) {cast_target, coercerval(parse, v, cast_target, primary, true)};
 			}
 		} else {
 			parse->pos--;
@@ -1478,7 +1479,7 @@ static Value parseExprPostfix (Parse *parse) {
 
 					if (have_prototype && arguments.len < params.len) {
 						Type dest = params.ptr[arguments.len].type;
-						val.inst = coerce(val, dest, parse, primary);
+						val.inst = coerce(parse, val, dest, primary);
 						val.typ = dest;
 					} else {
 						if (val.typ.kind == Kind_Basic) {
@@ -1522,7 +1523,7 @@ static Value parseExprPostfix (Parse *parse) {
 
 			if (!(v.typ.kind == Kind_Pointer || index.typ.kind == Kind_Pointer))
 				parseerror(parse, primary, "either the subscript or the subscripted value must be a pointer");
-			v = dereference(parse, pointerAdd(build, v, index, parse, primary), primary);
+			v = dereference(parse, pointerAdd(parse, v, index, primary), primary);
 		} else if (tryEat(parse, Tok_DoublePlus) || tryEat(parse, Tok_DoubleMinus)) {
 			// STYLE Copypasta from preincrement
 			needAssignableLval(parse, primary, v);
@@ -1535,7 +1536,7 @@ static Value parseExprPostfix (Parse *parse) {
 			Value one = immediateIntVal(parse, BASIC_INT, delta);
 			Value result = arithAdd(parse, primary, one, rval);
 
-			genStore(build, v.inst, coercerval(result, v.typ, parse, primary, false), is_volatile);
+			genStore(build, v.inst, coercerval(parse, result, v.typ, primary, false), is_volatile);
 			v = rval;
 		} else if (parse->pos[0].kind == Tok_Dot || parse->pos[0].kind == Tok_Arrow) {
 			bool arrow = parse->pos[0].kind == Tok_Arrow;
@@ -1622,8 +1623,10 @@ static void skipOverCommaOrToCloseParen (Parse *parse, const Token *opening_pare
 		parse->pos--;
 }
 
+static Type void_type = {Kind_Void};
+static Type void_ptr_type = {Kind_Pointer, .pointer = &void_type};
+
 static Value parseExprBase (Parse *parse) {
-	static Type void_type = {Kind_Void};
 	IrBuild *build = &parse->build;
 	Token t = *parse->pos;
 	parse->pos++;
@@ -1649,7 +1652,7 @@ static Value parseExprBase (Parse *parse) {
 	case Tok_Key_False:
 		return immediateIntVal(parse, (Type) {Kind_Basic, .basic = Int_int}, t.kind == Tok_Key_True);
 	case Tok_Key_Nullptr: // Not exactly correct—nullptr has its own type.
-		return immediateIntVal(parse, (Type) {Kind_Pointer, .pointer = &void_type}, 0);
+		return immediateIntVal(parse, void_ptr_type, 0);
 	case Tok_Real: {
 		double val = floatLiteralValue(parse->pos - 1);
 		Type typ = {Kind_Float, .real = t.literal_type};
@@ -1859,7 +1862,8 @@ static void initializeAutoDefinition (Parse *parse, OrdinaryIdentifier *ord, Typ
 	}
 
 	if (type.kind == Kind_VLArray) {
-		requires(parse, "initialization of variable-length arrays", Features_C23);
+		// TOOD GNU allows empty initializer here before C23.
+		requires(parse, "initializations of variable-length arrays", Features_C23);
 
 		expect(parse, Tok_OpenBrace);
 		expect(parse, Tok_CloseBrace);
@@ -1959,7 +1963,7 @@ static void initializeStaticDefinition (Parse *parse, OrdinaryIdentifier *ord, T
 		return;
 	}
 
-	if (typeSize(type, &parse->target) == 0)
+	if (isIncomplete(type))
 		parseerror(parse, init_token, "cannot initialize incomplete type %s", printTypeHighlighted(parse->arena, type));
 
 	dest.reloc_data = (MutableString) ALLOCN(parse->code_arena, char,
@@ -2017,7 +2021,7 @@ static Value parseIntrinsic (Parse *parse, Intrinsic i) {
 		expect(parse, Tok_CloseParen);
 
 		genStore(&parse->build, dest, genLoad(&parse->build, src, 24, false), false);
-		return (Value){{Kind_Void}};
+		return (Value) {{Kind_Void}};
 	}
 	case Intrinsic_Expect: {
 		Value a = parseExprAssignment(parse);
@@ -2026,6 +2030,13 @@ static Value parseIntrinsic (Parse *parse, Intrinsic i) {
 		expect(parse, Tok_CloseParen);
 		return a;
 	}
+	case Intrinsic_Alloca: {
+		IrRef size = coerce(parse, parseExprAssignment(parse), (Type){.kind = Kind_Basic, .basic = Int_long}, parse->pos);
+		expect(parse, Tok_CloseParen);
+		return (Value) {void_ptr_type,
+			genStackAllocVla(&parse->build, size),
+		};
+	};
 	case Intrinsic_Clz:
 	case Intrinsic_Clzll:
 	case Intrinsic_Ctz:
@@ -2034,7 +2045,7 @@ static Value parseIntrinsic (Parse *parse, Intrinsic i) {
 	case Intrinsic_Nanf:
 	case Intrinsic_Inff:
 	case Intrinsic_FrameAddress:
-	case Intrinsic_Alloca: {
+	{
 		eatMatchingParens(parse);
 		return immediateIntVal(parse, BASIC_INT, 0);
 	}
@@ -2279,7 +2290,7 @@ static void initializeFromValue (Parse *parse, InitializationDest dest, u32 offs
 		u32 dest_size = typeSize(type, &parse->target);
 		ref = genLoad(build, val.inst, src_size > dest_size ? dest_size : src_size, val.typ.qualifiers & Qualifier_Volatile);
 	} else {
-		ref = coerce(val, type, parse, NULL);
+		ref = coerce(parse, val, type, NULL);
 	}
 	Inst inst = build->ir.ptr[ref];
 	if (inst.kind != Ir_Constant && inst.kind != Ir_Reloc)
@@ -3106,7 +3117,7 @@ static Declaration parseDeclarator (Parse *parse, Type base_type, Namedness name
 					requires(parse, "variable length arrays", Features_C99);
 					array->kind = Kind_VLArray;
 					array->array.count = count_val.inst;
-					parseerror(parse, NULL, "TODO Support VLAs");
+// 					parseerror(parse, NULL, "TODO Support VLAs");
 				}
 			}
 
@@ -3280,7 +3291,7 @@ static OrdinaryIdentifier *define (
 		else if (!file_scope && storage != Storage_Extern)
 			parseerror(parse, type_token, "a function at block scope may only be specified extern");
 	} else {
-		if (storage != Storage_Extern && typeSize(decl.type, &parse->target) == 0 && decl.type.kind != Kind_UnsizedArray) {
+		if (storage != Storage_Extern && decl.type.kind != Kind_UnsizedArray && decl.type.kind != Kind_VLArray && isIncomplete(decl.type)) {
 			parseerror(parse, decl_token, "cannot define a variable with incomplete type %s",
 					printTypeHighlighted(parse->arena, decl.type));
 		}
@@ -3406,7 +3417,7 @@ static Value arithAdd (Parse *parse, const Token *primary, Value lhs, Value rhs)
 	assert(!isByref(lhs));
 	assert(!isByref(rhs));
 	if (lhs.typ.kind == Kind_Pointer || rhs.typ.kind == Kind_Pointer) {
-		return pointerAdd(&parse->build, lhs, rhs, parse, primary);
+		return pointerAdd(parse, lhs, rhs, primary);
 	} else {
 		Type common = arithmeticConversions(parse, primary, &lhs, &rhs);
 		IrRef inst;
@@ -3424,13 +3435,12 @@ static Value arithSub (Parse *parse, const Token *primary, Value lhs, Value rhs)
 	assert(!isByref(rhs));
 	IrBuild *build = &parse->build;
 	if (lhs.typ.kind == Kind_Pointer) {
-		u32 stride_const = typeSize(*lhs.typ.pointer, &parse->target);
 
-		if (stride_const == 0) {
+		IrRef stride = calcTypeSize(parse, *lhs.typ.pointer);
+		if (stride == IDX_NONE) {
 			parseerror(parse, primary, "cannot subtract from a pointer to incomplete type %s",
 				printTypeHighlighted(parse->arena, *lhs.typ.pointer));
 		}
-		IrRef stride = genImmediateInt(build, stride_const, parse->target.ptr_size);
 
 		if (rhs.typ.kind == Kind_Pointer) {
 			if (!typeCompatible(*lhs.typ.pointer, *rhs.typ.pointer))
@@ -3440,7 +3450,7 @@ static Value arithSub (Parse *parse, const Token *primary, Value lhs, Value rhs)
 			IrRef diff = genSub(build, lhs.inst, rhs.inst, Unsigned);
 			return (Value) {parse->target.ptrdiff, genDiv(build, diff, stride, Unsigned)};
 		} else {
-			IrRef idx = genMul(build, coercerval(rhs, parse->target.ptrdiff, parse, primary, false), stride, Signed);
+			IrRef idx = genMul(build, coercerval(parse, rhs, parse->target.ptrdiff, primary, false), stride, Signed);
 			// TODO Handle overflow.
 			return (Value) {lhs.typ, genSub(build, lhs.inst, idx, Unsigned)};
 		}
@@ -3572,7 +3582,7 @@ static Type arithmeticConversions (Parse *parse, const Token *primary, Value *a,
 			}
 		}
 	}
-	*a = (Value) {common, coercerval(*a, common, parse, primary, false)};
+	*a = (Value) {common, coercerval(parse, *a, common, primary, false)};
 
 	return common;
 }
@@ -3582,29 +3592,29 @@ static bool isZeroConstant (Parse *parse, Value v) {
 	return isIntegerType(v.typ) && tryIntConstant(parse, v, &val) && val == 0;
 }
 
-static Value pointerAdd (IrBuild *ir, Value lhs, Value rhs, Parse *op_parse, const Token *token) {
+static Value pointerAdd (Parse *parse, Value lhs, Value rhs, const Token *token) {
 	assert(!isByref(lhs));
 	assert(!isByref(rhs));
 	assert(lhs.typ.kind == Kind_Pointer || rhs.typ.kind == Kind_Pointer);
+	IrBuild *ir = &parse->build;
 
 	if (lhs.typ.kind == Kind_Pointer && rhs.typ.kind == Kind_Pointer)
-		parseerror(op_parse, token, "cannot add two pointers");
+		parseerror(parse, token, "cannot add two pointers");
 	Value ptr;
 	IrRef integer;
 	if (lhs.typ.kind == Kind_Pointer) {
 		ptr = lhs;
-		integer = coercerval(rhs, op_parse->target.ptrdiff, op_parse, token, false);
+		integer = coercerval(parse, rhs, parse->target.ptrdiff, token, false);
 	} else {
-		integer = coercerval(lhs, op_parse->target.ptrdiff, op_parse, token, false);
+		integer = coercerval(parse, lhs, parse->target.ptrdiff, token, false);
 		ptr = rhs;
 	}
-	u32 stride_const = typeSize(*ptr.typ.pointer, &op_parse->target);
-	if (stride_const == 0) {
-		parseerror(op_parse, token, "cannot add to a pointer to incomplete type %s",
-			printTypeHighlighted(op_parse->arena, *ptr.typ.pointer));
+	IrRef stride = calcTypeSize(parse, *ptr.typ.pointer);
+	if (stride == IDX_NONE) {
+		parseerror(parse, token, "cannot add to a pointer to incomplete type %s",
+			printTypeHighlighted(parse->arena, *ptr.typ.pointer));
 	}
 
-	IrRef stride = genImmediateInt(ir, stride_const, op_parse->target.ptr_size);
 	IrRef diff = genMul(ir, stride, integer, Unsigned);
 	return (Value) {ptr.typ, genAdd(ir, ptr.inst, diff, Unsigned)};
 }
@@ -3641,19 +3651,36 @@ static bool comparablePointers (Parse *parse, Value lhs, Value rhs) {
 
 static Value dereference (Parse *parse, Value v, const Token *primary) {
 	assert(v.typ.kind == Kind_Pointer);
-	if (isIncomplete(*v.typ.pointer)) {
+	Type inner = *v.typ.pointer;
+	if (!isAnyArray(inner) && isIncomplete(inner)) {
 		parseerror(parse, primary, "cannot dereference pointer to incomplete type %s",
-				printTypeHighlighted(parse->arena, *v.typ.pointer));
+				printTypeHighlighted(parse->arena, inner));
 	}
 
 
 	if (isByref(v))
 		v.inst = genLoad(&parse->build, v.inst, typeSize(v.typ, &parse->target), v.typ.qualifiers & Qualifier_Volatile);
-	v.typ = *v.typ.pointer;
+	v.typ = inner;
 	v.category = Ref_LValue;
 	return v;
 }
 
+
+static IrRef calcTypeSize (Parse *parse, Type t) {
+	if (t.kind == Kind_Array || t.kind == Kind_VLArray) {
+		IrRef size = calcTypeSize(parse, *t.array.inner);
+		IrRef count;
+		if (t.kind == Kind_VLArray)
+			count = t.array.count;
+		else
+			count = genImmediateInt(&parse->build, t.array.count, parse->target.ptr_size);
+		return genMul(&parse->build, count, size, Unsigned);
+	} else  {
+		u32 size = typeSize(t, &parse->target);
+		return genImmediateInt(&parse->build, size, parse->target.ptr_size);
+	}
+
+}
 
 static Value intPromote (Value val, Parse *p, const Token *primary) {
 	val = rvalue(val, p);
@@ -3670,9 +3697,9 @@ static Value intPromote (Value val, Parse *p, const Token *primary) {
 	const Type unsignedint = {Kind_Basic, .basic = Int_int | Int_unsigned};
 
 	if ((val.typ.basic & Int_unsigned) && (p->target.typesizes[val.typ.basic & ~Int_unsigned] == p->target.int_size))
-		return (Value) {unsignedint, coerce(val, unsignedint, p, primary)};
+		return (Value) {unsignedint, coerce(p, val, unsignedint, primary)};
 	else
-		return (Value) {BASIC_INT, coerce(val, BASIC_INT, p, primary)};
+		return (Value) {BASIC_INT, coerce(p, val, BASIC_INT, primary)};
 }
 
 static void needAssignableLval (Parse *parse, const Token *token, Value v) {
@@ -3719,8 +3746,8 @@ Value rvalue (Value v, Parse *parse) {
 	return v;
 }
 
-static IrRef coerce (Value v, Type t, Parse *p, const Token *primary) {
-	return coercerval(rvalue(v, p), t, p, primary, false);
+static IrRef coerce (Parse *p, Value v, Type t, const Token *primary) {
+	return coercerval(p, rvalue(v, p), t, primary, false);
 }
 
 static IrRef toBoolean (Parse *p, const Token *primary, Value v) {
@@ -3738,7 +3765,7 @@ static IrRef toBoolean (Parse *p, const Token *primary, Value v) {
 }
 
 // Performs implicit conversions on rvalues.
-static IrRef coercerval (Value v, Type t, Parse *p, const Token *primary, bool allow_casts) {
+static IrRef coercerval (Parse *p, Value v, Type t, const Token *primary, bool allow_casts) {
 	assert(!isByref(v));
 	IrBuild *build = &p->build;
 

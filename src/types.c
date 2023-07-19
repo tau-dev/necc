@@ -32,7 +32,7 @@ Type resolveType (Type t) {
 		t.nametagged->type : t;
 }
 
-// Result of 0 means incomplete type.
+// Returns 0 for incomplete types.
 u32 typeSize (Type t, const Target *target) {
 	switch (t.kind) {
 	case Kind_Enum_Named:

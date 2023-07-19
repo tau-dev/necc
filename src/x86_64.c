@@ -6,14 +6,9 @@
 
 /*
 
-Generates assembly in the flat assembler format.
+Generates assembly for the GNU assembler.
 C identifiers are prefixed with an underscore to disambiguate from
 instructions & registers.
-
-NOTE A StackAlloc of Constant size may be referenced across blocks,
-to allow jumps over definitions. Probably need to allocate these in a
-prepass.
-
 
 */
 
@@ -29,7 +24,7 @@ static char *insert = buf;
 typedef unsigned long ulong;
 typedef unsigned long long ullong;
 
-typedef u32 Storage;
+typedef i32 Storage;
 
 
 
@@ -66,7 +61,7 @@ typedef enum {
 
 
 typedef struct {
-	u32 storage;
+	i32 storage;
 	ParameterClass class;
 	u8 registers[8];
 } ParamInfo;
@@ -98,12 +93,13 @@ typedef struct {
 	u32 stack_allocated;
 
 	ParameterClass ret_class;
+	i32 return_pointer_storage;
 	bool is_vararg;
 
 	u32 vaarg_gp_offset;
 	u32 vaarg_fp_offset;
-	u32 vaarg_overflow_args;
-	u32 vaarg_reg_saves;
+	i32 vaarg_overflow_args;
+	i32 vaarg_reg_saves;
 	SPAN(ParamInfo) param_info;
 } Codegen;
 
@@ -240,7 +236,7 @@ const int gp_parameter_regs[] = {
 	R9_8,
 };
 static const u32 gp_parameter_regs_count = sizeof(gp_parameter_regs) / sizeof(gp_parameter_regs[0]);
-const u32 reg_save_area_size = 48 + 128;
+const i32 reg_save_area_size = 48 + 128;
 
 static const char* debug_prelude =
 	".set DW_TAG_compile_unit, 0x11\n"
@@ -371,6 +367,7 @@ static void emit(Codegen *c, const char *fmt, ...);
 static void emitString(String s);
 static void emitZString(const char *);
 static void emitInt(u64 i);
+static void emitIntSigned(i64 i);
 static void flushit(FILE *f);
 
 int splice_dest_order (const void *a, const void *b) {
@@ -670,19 +667,23 @@ static void emitFunctionForward (EmitParams params, u32 id) {
 		.storage = calloc(ir.len, sizeof(Storage)),
 		.module = module,
 		.param_info = ALLOCN(params.arena, ParamInfo, ir.params.len),
+		.return_pointer_storage = -8,
 		.ir = ir,
 	};
 
 	// Register-save area for the general purpose and the SSE parameter registers.
-	if (is_vararg)
+	if (is_vararg) {
 		c.stack_allocated += reg_save_area_size;
+		c.return_pointer_storage -= reg_save_area_size;
+	}
 
 	// A memory return uses up the first parameter register for the
 	// destination address.
 	u32 gp_params = mem_return;
 	u32 fp_params = 0;
-	if (mem_return)
+	if (mem_return) {
 		c.stack_allocated += 8;
+	}
 
 	// First mark parameters in order.
 	for (u32 i = 0; i < ir.params.len; i++) {
@@ -693,8 +694,8 @@ static void emitFunctionForward (EmitParams params, u32 id) {
 
 		c.param_info.ptr[i].class = class;
 		if (class.count > 0) {
-			c.param_info.ptr[i].storage = c.stack_allocated;
 			c.stack_allocated += 8 * class.count;
+			c.param_info.ptr[i].storage = -(i32)c.stack_allocated;
 
 			for (u32 j = 0; j < class.count; j++) {
 				if (class.registers[j] == Param_INTEGER) {
@@ -714,11 +715,11 @@ static void emitFunctionForward (EmitParams params, u32 id) {
 
 		if (inst.kind == Ir_Parameter)
 			continue;
-		c.storage[i] = c.stack_allocated;
 		c.stack_allocated += roundUp(inst.size);
-
 		if (inst.kind == Ir_StackAllocFixed)
 			c.stack_allocated += roundUp(inst.alloc.size);
+
+		c.storage[i] = -(i32)c.stack_allocated;
 	}
 
 	// Align stack to 16 bytes.
@@ -730,13 +731,13 @@ static void emitFunctionForward (EmitParams params, u32 id) {
 	emit(&c, " push R", RBP_8);
 	emit(&c, " mov R, R", RBP_8, RSP_8);
 	emit(&c, " sub R, I", RSP_8, c.stack_allocated);
-
-
 	if (mem_return)
-		emit(&c, " mov qword ptr [R+I], R", RSP_8, is_vararg ? reg_save_area_size : 0, RDI_8);
+		emit(&c, " mov qword ptr [R~I], R", RBP_8, c.return_pointer_storage, RDI_8);
+
+
 
 	// 16 bytes for rbp and return address.
-	u32 mem_params = c.stack_allocated + 16;
+	u32 mem_params_offset = 16;
 
 	// Copy regular parameters to the stack.
 	for (u32 i = 0; i < c.param_info.len; i++) {
@@ -748,31 +749,31 @@ static void emitFunctionForward (EmitParams params, u32 id) {
 
 				if (info.class.registers[j] == Param_INTEGER) {
 					Register reg = gp_parameter_regs[info.registers[j]];
-					emit(&c, " mov Z [R+I], R", sizeOp(size), RSP_8, info.storage + 8*j, registerSized(reg, size));
+					emit(&c, " mov Z [R~I], R", sizeOp(size), RBP_8, info.storage + 8*j, registerSized(reg, size));
 				} else {
 					assert(info.class.registers[j] == Param_SSE);
-					emit(&c, " movsZ [R+I], %xmmI", sizeFSuffix(size), RSP_8, info.storage + 8*j, (u32) info.registers[j]);
+					emit(&c, " movsZ [R~I], %xmmI", sizeFSuffix(size), RBP_8, info.storage + 8*j, (u32) info.registers[j]);
 				}
 			}
 		} else {
-			c.param_info.ptr[i].storage = mem_params;
-			mem_params += roundUp(ir.params.ptr[i].size);
+			c.param_info.ptr[i].storage = mem_params_offset;
+			mem_params_offset += roundUp(ir.params.ptr[i].size);
 		}
 	}
 
 	if (is_vararg) {
-		c.vaarg_reg_saves = 0;
+		c.vaarg_reg_saves = -reg_save_area_size;
 		c.vaarg_gp_offset = gp_params * 8;
 		c.vaarg_fp_offset = 48 + fp_params * 8;
-		c.vaarg_overflow_args = mem_params;
+		c.vaarg_overflow_args = mem_params_offset;
 
 		// Copy out the registers into the register save area.
 		for (u32 i = gp_params; i < gp_parameter_regs_count; i++)
-			emit(&c, " mov qword ptr [R+I], R", RSP_8, i*8, registerSized(gp_parameter_regs[i], I64));
+			emit(&c, " mov qword ptr [R~I], R", RBP_8, -reg_save_area_size + i*8, registerSized(gp_parameter_regs[i], I64));
 		emit(&c, " test R, R", RAX, RAX);
 		emit(&c, " je ..vaarg_no_float_args_I", id);
 		for (u32 i = 0; i < 8; i++)
-			emit(&c, " movaps xmmword ptr [R+I], %xmmI", RSP_8, 48 + i*16, i);
+			emit(&c, " movaps xmmword ptr [R~I], %xmmI", RBP_8, -reg_save_area_size + 48 + i*16, i);
 		emit(&c, "..vaarg_no_float_args_I:", id);
 	}
 
@@ -782,7 +783,7 @@ static void emitFunctionForward (EmitParams params, u32 id) {
 		Inst inst = ir.ptr[i];
 
 		if (inst.kind == Ir_StackAllocFixed) {
-			emit(&c, " lea R, [R+I]", RAX_8, RSP_8, c.storage[i]+8);
+			emit(&c, " lea R, [R~I]", RAX_8, RBP_8, c.storage[i]+8);
 			emit(&c, " mov #, R", i, RAX_8);
 		}
 	}
@@ -903,22 +904,22 @@ static void emitBlockForward (Codegen *c, Blocks blocks, u32 i) {
 	case Exit_Return:
 		if (exit.ret != IDX_NONE) {
 			if (c->ret_class.count == 0) {
-				emit(c, " mov R, qword ptr [R+I]", RAX_8, RSP_8, c->is_vararg ? reg_save_area_size : 0);
-				copyTo(c, RAX, 0, RSP, c->storage[exit.ret], valueSize(c, exit.ret));
+				emit(c, " mov R, qword ptr [R~I]", RAX_8, RBP_8, c->return_pointer_storage);
+				copyTo(c, RAX, 0, RBP, c->storage[exit.ret], valueSize(c, exit.ret));
 			} else {
 				u32 gp_returns = 0;
 				u32 fp_returns = 0;
 				for (u32 j = 0; j < c->ret_class.count; j++) {
 					u32 size = valueSize(c, exit.ret) - 8*j;
 					if (size > 8) size = 8;
-					u32 src = c->storage[exit.ret] + 8*j;
+					i32 src = c->storage[exit.ret] + 8*j;
 					if (c->ret_class.registers[j] == Param_INTEGER) {
 						int reg = gp_returns == 0 ? RAX_8 : RDX_8;
-						emit(c, " mov R, Z [R+I]", registerSized(reg, size), sizeOp(size), RSP_8, src);
+						emit(c, " mov R, Z [R~I]", registerSized(reg, size), sizeOp(size), RBP_8, src);
 						gp_returns++;
 					} else {
 						assert(c->ret_class.registers[j] == Param_SSE);
-						emit(c, " movsZ %xmmI, [R+I]", sizeFSuffix(size), fp_returns, RSP_8, src);
+						emit(c, " movsZ %xmmI, [R~I]", sizeFSuffix(size), fp_returns, RBP_8, src);
 						fp_returns++;
 					}
 				}
@@ -1032,7 +1033,7 @@ static void emitInstForward(Codegen *c, IrRef i) {
 	} break;
 	case Ir_Truncate: {
 		Register reg = registerSized(RAX, inst.size);
-		emit(c, " mov R, [R+I]", reg, RSP_8, c->storage[inst.unop]);
+		emit(c, " mov R, [R~I]", reg, RBP_8, c->storage[inst.unop]);
 		emit(c, " mov #, R", i, reg);
 	} break;
 	case Ir_SignExtend: {
@@ -1047,14 +1048,14 @@ static void emitInstForward(Codegen *c, IrRef i) {
 		emit(c, " mov #, R", i, registerSized(RAX, inst.size));
 	} break;
 	case Ir_Store: {
-		copyTo(c, loadTo(c, RAX, inst.mem.address), 0, RSP, c->storage[inst.mem.source], inst.size);
+		copyTo(c, loadTo(c, RAX, inst.mem.address), 0, RBP, c->storage[inst.mem.source], inst.size);
 	} break;
 	case Ir_Load: {
-		copyTo(c, RSP, c->storage[i], loadTo(c, RAX, inst.mem.address), 0, inst.size);
+		copyTo(c, RBP, c->storage[i], loadTo(c, RAX, inst.mem.address), 0, inst.size);
 	} break;
 	case Ir_Access: {
-		copyTo(c, RSP, c->storage[i],
-			RSP, c->storage[inst.binop.lhs] + inst.binop.rhs, inst.size);
+		copyTo(c, RBP, c->storage[i],
+			RBP, c->storage[inst.binop.lhs] + inst.binop.rhs, inst.size);
 	} break;
 	case Ir_Parameter: {
 		ParamInfo info = c->param_info.ptr[inst.unop];
@@ -1064,8 +1065,8 @@ static void emitInstForward(Codegen *c, IrRef i) {
 		assert(inst.size <= 8);
 		if (inst.size > 4 && inst.constant > INT32_MAX) {
 			// Wrapping unsigned to signed is undefined, but whatever.
-			emit(c, " mov Z [R+I], ~I", sizeOp(4), RSP_8, c->storage[i], (i32) inst.constant);
-			emit(c, " mov Z [R+I], ~I", sizeOp(4), RSP_8, c->storage[i] + 4, (i32) (inst.constant >> 32));
+			emit(c, " mov Z [R~I], ~I", sizeOp(4), RBP_8, c->storage[i], (i32) inst.constant);
+			emit(c, " mov Z [R~I], ~I", sizeOp(4), RBP_8, c->storage[i] + 4, (i32) (inst.constant >> 32));
 		} else {
 			emit(c, " mov #, ~I", i, (i32) inst.constant);
 		}
@@ -1085,8 +1086,8 @@ static void emitInstForward(Codegen *c, IrRef i) {
 		break;
 	case Ir_PhiOut: {
 		if (inst.phi_out.on_true != IDX_NONE) {
-			copyTo(c, RSP, c->storage[inst.phi_out.on_true],
-				RSP, c->storage[inst.phi_out.source],
+			copyTo(c, RBP, c->storage[inst.phi_out.on_true],
+				RBP, c->storage[inst.phi_out.source],
 				valueSize(c, inst.phi_out.source));
 		}
 	} break;
@@ -1162,8 +1163,8 @@ static void emitInstForward(Codegen *c, IrRef i) {
 				emit(c, " movabsq R, 0x43e0000000000000", RAX_8);
 			emit(c, " movd %xmm1, R", RAX_8);
 
-			emit(c, " movsZ %xmm0, [R+I]", fsuff, RSP_8, c->storage[inst.unop]);
-			emit(c, " comisZ %xmm0, %xmm1", fsuff, RSP_8, c->storage[inst.unop]);
+			emit(c, " movsZ %xmm0, [R~I]", fsuff, RBP_8, c->storage[inst.unop]);
+			emit(c, " comisZ %xmm0, %xmm1", fsuff);
 			emit(c, " jnb .f2u_negative_I_I", c->current_id, i);
 
 			// When below INT64_MAX, we can use the signed instruction.
@@ -1178,7 +1179,7 @@ static void emitInstForward(Codegen *c, IrRef i) {
 
 			emit(c, ".f2u_done_I_I:", c->current_id, i);
 		} else {
-			emit(c, " movsZ %xmm0, [R+I]", fsuff, RSP_8, c->storage[inst.unop]);
+			emit(c, " movsZ %xmm0, [R~I]", fsuff, RBP_8, c->storage[inst.unop]);
 			emit(c, " cvttsZ2si R, %xmm0", fsuff, RAX_8);
 		}
 		emit(c, " mov #, R", i, registerSized(RAX, inst.size));
@@ -1186,7 +1187,7 @@ static void emitInstForward(Codegen *c, IrRef i) {
 	case Ir_FloatToSInt: {
 		const char *fsuff = sizeFSuffix(c->ir.ptr[inst.unop].size);
 
-		emit(c, " movsZ %xmm0, [R+I]", fsuff, RSP_8, c->storage[inst.unop]);
+		emit(c, " movsZ %xmm0, [R~I]", fsuff, RBP_8, c->storage[inst.unop]);
 		emit(c, " cvttsZ2si R, %xmm0", fsuff, RAX_8);
 		emit(c, " mov #, R", i, registerSized(RAX, inst.size));
 	} break;
@@ -1196,9 +1197,9 @@ static void emitInstForward(Codegen *c, IrRef i) {
 
 		emit(c, " mov dword ptr [R], I", RAX_8, c->vaarg_gp_offset);
 		emit(c, " mov dword ptr [R+4], I", RAX_8, c->vaarg_fp_offset);
-		emit(c, " lea R, [R+I]", RDX_8, RSP_8, c->vaarg_overflow_args);
+		emit(c, " lea R, [R~I]", RDX_8, RBP_8, c->vaarg_overflow_args);
 		emit(c, " mov qword ptr [R+8], R", RAX_8, RDX_8);
-		emit(c, " lea R, [R+I]", RDX_8, RSP_8, c->vaarg_reg_saves);
+		emit(c, " lea R, [R~I]", RDX_8, RBP_8, c->vaarg_reg_saves);
 		emit(c, " mov qword ptr [R+16], R", RAX_8, RDX_8);
 	} break;
 	case Ir_VaArg: {
@@ -1238,7 +1239,7 @@ static void emitInstForward(Codegen *c, IrRef i) {
 				emit(c, " add R, qword ptr [R+16]", RDX_8, RAX_8);
 
 				emit(c, " mov R, qword ptr [R]", RDX_8, RDX_8);
-				emit(c, " mov qword ptr [R+I], R", RSP_8, c->storage[i] + j*8, RDX_8);
+				emit(c, " mov qword ptr [R~I], R", RBP_8, c->storage[i] + j*8, RDX_8);
 			}
 			emit(c, " jmp .vaarg_I_I_done", c->current_id, i);
 
@@ -1246,7 +1247,7 @@ static void emitInstForward(Codegen *c, IrRef i) {
 		}
 		emit(c, " mov R, qword ptr [R+8]", RDX_8, RAX_8);
 		emit(c, " add qword ptr [R+8], I", RAX_8, inst.size);
-		copyTo(c, RSP, c->storage[i], RDX, 0, inst.size);
+		copyTo(c, RBP, c->storage[i], RDX, 0, inst.size);
 
 		emit(c, ".vaarg_I_I_done:", c->current_id, i);
 	} break;
@@ -1270,7 +1271,7 @@ static void emitInstForward(Codegen *c, IrRef i) {
 		u32 gp_params = memory_return;
 		u32 fp_params = 0;
 
-		u32 stack_memory = 0;
+		u32 arg_stack_memory = 0;
 		ParameterClass *classes = malloc(args.len * sizeof(*classes));
 		for (u32 i = 0; i < args.len; i++) {
 			Argument arg = args.ptr[i];
@@ -1289,16 +1290,16 @@ static void emitInstForward(Codegen *c, IrRef i) {
 					// TODO Do small arguments need to be zero-extended?
 					if (class.registers[j] == Param_INTEGER) {
 						Register reg = registerSized(gp_parameter_regs[gp_params], size);
-						emit(c, " mov R, Z [R+I]", reg, sizeOp(size), RSP_8, c->storage[arg.arg_inst] + 8*j);
+						emit(c, " mov R, Z [R~I]", reg, sizeOp(size), RBP_8, c->storage[arg.arg_inst] + 8*j);
 						gp_params++;
 					} else {
 						assert(class.registers[j] == Param_SSE);
-						emit(c, " movsZ %xmmI, [R+I]", sizeFSuffix(size), fp_params, RSP_8, c->storage[arg.arg_inst] + 8*j);
+						emit(c, " movsZ %xmmI, [R~I]", sizeFSuffix(size), fp_params, RBP_8, c->storage[arg.arg_inst] + 8*j);
 						fp_params++;
 					}
 				}
 			} else {
-				stack_memory += param_size;
+				arg_stack_memory += param_size;
 			}
 		}
 
@@ -1307,38 +1308,38 @@ static void emitInstForward(Codegen *c, IrRef i) {
 			if (classes[i].count == 0) {
 				IrRef arg = args.ptr[i].arg_inst;
 				u16 param_size = valueSize(c, arg);
-				copyTo(c, RSP, -(i32)stack_memory + stack_filled, RSP, c->storage[arg], param_size);
+				copyTo(c, RSP, -(i32)arg_stack_memory + stack_filled, RBP, c->storage[arg], param_size);
 				stack_filled += param_size;
 			}
 		}
 
-		assert(stack_filled == stack_memory);
+		assert(stack_filled == arg_stack_memory);
 
-		if (stack_memory)
-			emit(c, " sub R, I", RSP_8, stack_memory);
+		if (arg_stack_memory)
+			emit(c, " sub R, I", RSP_8, arg_stack_memory);
 
 		if (inst.properties & Prop_Call_Vararg)
 			emit(c, " mov R, I", RAX_4, fp_params);
 
-		emit(c, " call qword ptr [R+I]", RSP_8, c->storage[inst.call.function_ptr] + stack_memory);
-		if (stack_memory)
-			emit(c, " add R, I", RSP_8, stack_memory);
+		emit(c, " call qword ptr [R~I]", RBP_8, c->storage[inst.call.function_ptr]);
+		if (arg_stack_memory)
+			emit(c, " add R, I", RSP_8, arg_stack_memory);
 
 		if (!memory_return && inst.size) {
 			u32 gp_returns = 0;
 			u32 fp_returns = 0;
 			for (u32 j = 0; j < ret_class.count; j++) {
-				u32 dest = c->storage[i] + 8*j;
+				i32 dest = c->storage[i] + 8*j;
 				u32 size = inst.size - 8*j;
 				if (size > 8) size = 8;
 
 				if (ret_class.registers[j] == Param_INTEGER) {
 					int reg = gp_returns == 0 ? RAX_8 : RDX_8;
-					emit(c, " mov Z [R+I], R", sizeOp(size), RSP_8, dest, registerSized(reg, size));
+					emit(c, " mov Z [R~I], R", sizeOp(size), RBP_8, dest, registerSized(reg, size));
 					gp_returns++;
 				} else {
 					assert(ret_class.registers[j] == Param_SSE);
-					emit(c, " movsZ [R+I], %xmmI", sizeFSuffix(size), RSP_8, dest, fp_returns);
+					emit(c, " movsZ [R~I], %xmmI", sizeFSuffix(size), RBP_8, dest, fp_returns);
 					fp_returns++;
 				}
 			}
@@ -1563,9 +1564,9 @@ static void emit (Codegen *c, const char *fmt, ...) {
 				memcpy(insert, size_op, len);
 				insert += len;
 			}
-			memcpy(insert, " [%rsp+", 7);
-			insert += 7;
-			emitInt(c->storage[ref]);
+			memcpy(insert, " [%rbp", 6);
+			insert += 6;
+			emitIntSigned(c->storage[ref]);
 			*insert++ = ']';
 		} break;
 		case 'I':
@@ -1577,25 +1578,10 @@ static void emit (Codegen *c, const char *fmt, ...) {
 		case '~': {
 			p++;
 			if (*p == 'I') {
-				i32 val = va_arg(args, i32);
-				if (val >= 0) {
-					*insert++ = '+';
-					emitInt(val);
-				} else {
-					*insert++ = '-';
-					emitInt(-(i64)val);
-				}
+				emitIntSigned(va_arg(args, i32));
 			} else {
 				assert(*p == 'L');
-				i64 val = va_arg(args, i64);
-				if (val >= 0) {
-					*insert++ = '+';
-					emitInt(val);
-				} else {
-					// TODO Will break for I64_MIN, which can not be inverted.
-					*insert++ = '-';
-					emitInt(-val);
-				}
+				emitIntSigned(va_arg(args, i64));
 			}
 		} break;
 		default:
@@ -1630,6 +1616,17 @@ static void emitInt (u64 i) {
 	while (place != 0) {
 		*insert++ = '0' + (i / place) % 10;
 		place /= 10;
+	}
+}
+
+static void emitIntSigned (i64 val) {
+	if (val >= 0) {
+		*insert++ = '+';
+		emitInt(val);
+	} else {
+		*insert++ = '-';
+		assert(val != INT64_MIN);
+		emitInt(-(i64)val);
 	}
 }
 

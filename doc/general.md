@@ -5,7 +5,6 @@
 * https://bellard.org/tcc/
 * https://github.com/jserv/mazucc
 * https://github.com/jserv/shecc
-* https://github.com/pret/agbcc
 * https://github.com/sheisc/ucc162.3
 * https://github.com/Fedjmike/fcc
 * https://github.com/jesings/JOECC

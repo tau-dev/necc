@@ -5,9 +5,10 @@
 
 
 IrRef genParameter(IrBuild *, u32 param_id);
-IrRef genStackAllocVLA(IrBuild *, IrRef size);
-IrRef genStackAllocNamed(IrBuild *, IrRef size, Declaration);
 IrRef genStackAllocFixed(IrBuild *, u32 size);
+IrRef genStackAllocNamed(IrBuild *, u32 size, Declaration);
+IrRef genStackAllocVla(IrBuild *, IrRef size);
+IrRef genStackAllocVlaNamed(IrBuild *, IrRef size, Declaration);
 // IrRef genReturn(IrBuild *);
 IrRef genAdd(IrBuild *, IrRef, IrRef, Signedness);
 IrRef genFAdd(IrBuild *, IrRef, IrRef);

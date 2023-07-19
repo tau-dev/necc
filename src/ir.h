@@ -152,7 +152,8 @@ typedef struct Inst {
 			u32 offset;
 		} unop_const;
 		struct {
-			u32 size; // IrRef for Ir_StackAllocVLA
+			u32 size; // Constant size for Ir_StackAllocFixed, IrRef for Ir_StackAllocVLA
+			// May be IDX_NONE or point to Declaration data.
 			u32 decl_data;
 		} alloc;
 		struct {

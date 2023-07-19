@@ -50,7 +50,6 @@ selfhost/%.o: src/%.c $(C_HDRS) bin/necc-dbg
 selfself/necc: $(SELFSELF_OBJS)
 	musl-gcc -static -g $^ -lm -o $@
 	diff selfhost/ selfself/
-	# TODO Add error message here: "Inherited codegen error: self-compiled executable self-compiling does not yield the same executable."
 
 selfself/%.o: src/%.c $(C_HDRS) selfhost/necc
 	./selfhost/necc $< -g -obj=$@ -std gnu -def MUSL_DIR=\"$(MUSL_DIR)\"
@@ -61,10 +60,11 @@ selfself/%.o: src/%.c $(C_HDRS) selfhost/necc
 		self run run-rel gdb lldb all
 
 clean:
-	@rm -f -r bin/*
-	@rm -f -r selfhost/*
-	@rm -f -r tests/bin/*
-	@mkdir -p $(REQUIRED_DIRS)
+	rm tests/runner
+	rm -f -r bin/*
+	rm -f -r selfhost/*
+	rm -f -r tests/bin/*
+	mkdir -p $(REQUIRED_DIRS)
 
 re: clean debug
 

@@ -80,8 +80,19 @@ IrRef genStackAllocNamed(IrBuild *build, IrRef size, Declaration decl) {
 	return append(build, (Inst) {Ir_StackAllocFixed, .size = PTR_SIZE, .alloc = {size, data}});
 }
 
-IrRef genStackAllocVLA (IrBuild *build, IrRef size) {
-	return append(build, (Inst) {Ir_StackAllocVLA, .size = PTR_SIZE, .alloc = {size}});
+IrRef genStackAllocVla (IrBuild *build, IrRef size) {
+	Inst *inst = build->ir.ptr;
+	if (inst[size].kind == Ir_Constant)
+		return genStackAllocFixed(build, inst[size].constant);
+	return append(build, (Inst) {Ir_StackAllocVLA, .size = PTR_SIZE, .alloc = {size, IDX_NONE}});
+}
+
+IrRef genStackAllocVlaNamed (IrBuild *build, IrRef size, Declaration decl) {
+	Inst *inst = build->ir.ptr;
+	if (inst[size].kind == Ir_Constant)
+		return genStackAllocNamed(build, inst[size].constant, decl);
+	u32 data = pushAuxData(&build->ir, &decl, sizeof decl);
+	return append(build, (Inst) {Ir_StackAllocVLA, .size = PTR_SIZE, .alloc = {size, data}});
 }
 
 void genReturnVal (IrBuild *build, IrRef val) {
