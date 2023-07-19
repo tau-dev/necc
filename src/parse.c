@@ -63,6 +63,10 @@ typedef struct {
 	MutableString reloc_data;
 } InitializationDest;
 
+static Location locationOf(const Parse *parse, const Token *tok) {
+	return parse->tokens.list.positions[tok - parse->tokens.list.tokens].source;
+}
+
 static void vcomperror (Log level, bool crash_on_error, const Tokenization *t, const Token *tok, const Token *parse_pos, const char *msg, va_list args) {
 	(void) parse_pos;
 	u32 idx = tok - t->list.tokens;
@@ -152,7 +156,7 @@ static inline void eatMatchingParens (Parse *parse) {
 }
 
 static inline void setLoc (Parse *parse, const Token *tok) {
-	parse->build.loc = parse->tokens.list.positions[tok - parse->tokens.list.tokens].source;
+	parse->build.loc = locationOf(parse, tok);
 }
 
 // Whether an identifier is expected to be on a declarator.
@@ -353,11 +357,19 @@ void popScope (Parse *parse, Scope replacement) {
 			if (!ord->is_used && parse->opt->warn_unused) {
 				if (ord->kind == Sym_Value_Auto) {
 					parsemsg(Log_Warn, parse, ord->decl_location, "‘%.*s’ is never used", STRING_PRINTAGE(def.ptr[i]->name));
-				} else if (ord->kind == Sym_Value_Static) {
+				} else if (ord->kind == Sym_Value_Static && ord->def_location &&
+						locationOf(parse, ord->def_location).file_id == 1)
+				{
 					StaticValue *val = &parse->module->ptr[ord->static_id];
 					if (!val->is_public && val->name.len && val->name.ptr[0] != '_')
 						parsemsg(Log_Warn, parse, ord->decl_location, "‘%.*s’ is never used", STRING_PRINTAGE(def.ptr[i]->name));
 				}
+			}
+			if (ord->kind == Sym_Value_Auto) {
+				IrBuild *build = &parse->build;
+				u32 inst = ord->value.inst;
+				if (build->ir.ptr[inst].kind == Ir_StackAllocVLA)
+					genStackDealloc(build, inst);
 			}
 			def.ptr[i]->ordinary = ord->shadowed;
 		}
@@ -2542,7 +2554,7 @@ static bool tryParseTypeBase (Parse *parse, Type *type, u8 *storage_dest) {
 		case Tok_Key_Enum: {
 			const Token *primary = parse->pos;
 			const Tokenization *tok = &parse->tokens;
-			Location loc = tok->list.positions[parse->pos - tok->list.tokens].source;
+			Location loc = locationOf(parse, parse->pos);
 			SourceFile *source = tok->files.ptr[loc.file_id];
 			parse->pos++;
 
@@ -2849,8 +2861,8 @@ static bool tryParseTypeBase (Parse *parse, Type *type, u8 *storage_dest) {
 static Type parseStructUnionBody(Parse *parse, bool is_struct) {
 	LIST(CompoundMember) members = {0};
 
+	Location loc = locationOf(parse, parse->pos - 2);
 	const Tokenization *tok = &parse->tokens;
-	Location loc = tok->list.positions[parse->pos - 2 - tok->list.tokens].source;
 	SourceFile *source = tok->files.ptr[loc.file_id];
 
 	u32 current_offset = 0;
@@ -3081,6 +3093,7 @@ static Declaration parseDeclarator (Parse *parse, Type base_type, Namedness name
 			parseerror(parse, NULL, func_in_arr);
 
 		while (tryEat(parse, Tok_OpenBracket)) {
+			const Token *open_bracket = parse->pos-1;
 			Type *inner = ALLOC(parse->code_arena, Type);
 			*inner = *pointed_type_level;
 			*pointed_type_level = (Type) {Kind_Array,
@@ -3108,16 +3121,16 @@ static Declaration parseDeclarator (Parse *parse, Type base_type, Namedness name
 				array->kind = Kind_UnsizedArray;
 			} else {
 				u64 count;
+
 				Value count_val = parseExprAssignment(parse);
-				if (tryIntConstant(parse, count_val, &count)) {
+				if (isIntegerType(count_val.typ) && tryIntConstant(parse, count_val, &count)) {
 					if (count > 1000000)
 						parseerror(parse, NULL, "%llu items is too big, for now", (unsigned long long) count);
 					array->array.count = count;
 				} else {
 					requires(parse, "variable length arrays", Features_C99);
 					array->kind = Kind_VLArray;
-					array->array.count = count_val.inst;
-// 					parseerror(parse, NULL, "TODO Support VLAs");
+					array->array.count = coerce(parse, count_val, parse->target.ptrdiff, open_bracket);
 				}
 			}
 
@@ -3156,8 +3169,7 @@ static inline void markDecl(const Parse *parse, const Token *tok, Declaration de
 	Options *opt = parse->opt;
 	if (!opt->any_decl_emit) return;
 
-	u32 idx = tok - parse->tokens.list.tokens;
-	Location loc = parse->tokens.list.positions[idx].source;
+	Location loc = locationOf(parse, tok);
 	SourceFile *source = parse->tokens.files.ptr[loc.file_id];
 	bool from_std = source->kind == Source_StandardHeader;
 

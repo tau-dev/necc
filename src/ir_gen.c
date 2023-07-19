@@ -95,6 +95,18 @@ IrRef genStackAllocVlaNamed (IrBuild *build, IrRef size, Declaration decl) {
 	return append(build, (Inst) {Ir_StackAllocVLA, .size = PTR_SIZE, .alloc = {size, data}});
 }
 
+IrRef genStackDealloc (IrBuild *build, IrRef allocation) {
+	IrRef inst = append(build, (Inst) {
+		Ir_StackDeallocVLA,
+		.mem = { .address = allocation, .ordered_after = build->insertion_block->last_store_op }
+	});
+	build->insertion_block->last_store_op = inst;
+
+	PUSH_A(build->block_arena, build->insertion_block->mem_instructions, inst);
+	PUSH_A(build->block_arena, build->insertion_block->ordered_instructions, inst);
+	return inst;
+}
+
 void genReturnVal (IrBuild *build, IrRef val) {
 	build->insertion_block->inst_end = build->ir.len;
 	build->insertion_block->exit = (Exit) {

@@ -90,7 +90,6 @@ typedef struct {
 
 	u16 *usage;
 	Storage *storage;
-	u32 stack_allocated;
 
 	ParameterClass ret_class;
 	i32 return_pointer_storage;
@@ -670,10 +669,11 @@ static void emitFunctionForward (EmitParams params, u32 id) {
 		.return_pointer_storage = -8,
 		.ir = ir,
 	};
+	u32 stack_allocated = 0;
 
 	// Register-save area for the general purpose and the SSE parameter registers.
 	if (is_vararg) {
-		c.stack_allocated += reg_save_area_size;
+		stack_allocated += reg_save_area_size;
 		c.return_pointer_storage -= reg_save_area_size;
 	}
 
@@ -682,7 +682,7 @@ static void emitFunctionForward (EmitParams params, u32 id) {
 	u32 gp_params = mem_return;
 	u32 fp_params = 0;
 	if (mem_return) {
-		c.stack_allocated += 8;
+		stack_allocated += 8;
 	}
 
 	// First mark parameters in order.
@@ -694,8 +694,8 @@ static void emitFunctionForward (EmitParams params, u32 id) {
 
 		c.param_info.ptr[i].class = class;
 		if (class.count > 0) {
-			c.stack_allocated += 8 * class.count;
-			c.param_info.ptr[i].storage = -(i32)c.stack_allocated;
+			stack_allocated += 8 * class.count;
+			c.param_info.ptr[i].storage = -(i32)stack_allocated;
 
 			for (u32 j = 0; j < class.count; j++) {
 				if (class.registers[j] == Param_INTEGER) {
@@ -715,22 +715,22 @@ static void emitFunctionForward (EmitParams params, u32 id) {
 
 		if (inst.kind == Ir_Parameter)
 			continue;
-		c.stack_allocated += roundUp(inst.size);
+		stack_allocated += roundUp(inst.size);
 		if (inst.kind == Ir_StackAllocFixed)
-			c.stack_allocated += roundUp(inst.alloc.size);
+			stack_allocated += roundUp(inst.alloc.size);
 
-		c.storage[i] = -(i32)c.stack_allocated;
+		c.storage[i] = -(i32)stack_allocated;
 	}
 
 	// Align stack to 16 bytes.
-	c.stack_allocated = (c.stack_allocated + 15) / 16 * 16;
+	stack_allocated = (stack_allocated + 15) / 16 * 16;
 
 
 	// No need to do callee-saves because those registers are never touched.
 
 	emit(&c, " push R", RBP_8);
 	emit(&c, " mov R, R", RBP_8, RSP_8);
-	emit(&c, " sub R, I", RSP_8, c.stack_allocated);
+	emit(&c, " sub R, I", RSP_8, stack_allocated);
 	if (mem_return)
 		emit(&c, " mov qword ptr [R~I], R", RBP_8, c.return_pointer_storage, RDI_8);
 
@@ -925,7 +925,6 @@ static void emitBlockForward (Codegen *c, Blocks blocks, u32 i) {
 				}
 			}
 		}
-// 		emit(c, " add rsp, I", c->stack_allocated);
 		emit(c, " mov R, R", RSP_8, RBP_8);
 		emit(c, " pop R", RBP_8);
 		emit(c, " ret");
@@ -1073,8 +1072,13 @@ static void emitInstForward(Codegen *c, IrRef i) {
 		break;
 	case Ir_StackAllocFixed:
 		break;
-	case Ir_StackAllocVLA:
-		unreachable;
+	case Ir_StackAllocVLA: {
+		emit(c, " sub R, #", RSP_8, inst.unop);
+		emit(c, " mov #, R", i, RSP_8);
+	} break;
+	case Ir_StackDeallocVLA: {
+		emit(c, " add R, #", RSP_8, c->ir.ptr[inst.unop].unop);
+	} break;
 	case Ir_Reloc:
 		assert(inst.size == 8);
 
@@ -1093,7 +1097,6 @@ static void emitInstForward(Codegen *c, IrRef i) {
 	} break;
 	case Ir_Copy: break;
 	case Ir_PhiIn: break;
-	case Ir_StackDeallocVLA: break;
 	case Ir_FCast: {
 		u32 source = c->ir.ptr[inst.unop].size;
 		const char *fsuff = sizeFSuffix(inst.size);
