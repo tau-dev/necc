@@ -59,6 +59,24 @@ typedef enum {
 	STACK_BEGIN = 0x4 << STORAGE_SIZE_OFFSET,
 } Register;
 
+typedef enum {
+	Param_MEM,
+	Param_NONE = Param_MEM,
+	Param_INTEGER,
+	Param_SSE,
+	// TODO There are more classes, such as SSEUP or X87.
+} ParameterEightbyteClass;
+
+typedef struct {
+	// If 0, this is passed in memory.
+	u8 count;
+	// Number of eightbytes that are passed in the xmm registers; the remaining count-sse_count are integers.
+	u8 sse_count;
+	u8 registers[8];
+} ParameterClass;
+ParameterClass classifyParam(const Target *target, Type type);
+
+
 
 typedef struct {
 	i32 storage;

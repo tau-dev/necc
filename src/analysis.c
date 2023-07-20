@@ -36,8 +36,9 @@ should be moved into a separate file at some point).
 			operand_var = &(inst).mem.address; operation;	\
 			operand_var = &(inst).mem.ordered_after; ordering_operation;	\
 			break;	\
-		case Ir_StackAllocVLA:	\
-			operand_var = &(inst).alloc.size; operation;	\
+		case Ir_StackDeallocVLA:	\
+			operand_var = &(inst).mem.address; operation;	\
+			operand_var = &(inst).mem.ordered_after; ordering_operation;	\
 			break;	\
 		case Ir_PhiOut:	\
 			operand_var = &(inst).phi_out.source; operation;	\

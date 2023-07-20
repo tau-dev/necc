@@ -343,7 +343,7 @@ static void lexwarning (SourceFile source, Location loc, const char *msg, ...) {
 	fprintf(stderr, ".\n");
 }
 
-static char lexEscapeCode(SourceFile *source, Location loc, const char **p);
+static u32 lexEscapeCode(SourceFile *source, Location loc, const char **p);
 static String processStringLiteral(SourceFile *file, Location loc, Arena *arena,String src);
 
 // TODO Trigraphs (trivial) and digraphs (annoying)
@@ -498,6 +498,8 @@ static Token getToken (Arena *str_arena, SourceFile source, Location *loc, Symbo
 		}
 		break;
 	case '\"': {
+		tok.literal_type = Int_char;
+	string:
 		pos++;
 		const char *begin = pos;
 		while (*pos && *pos != '\"') {
@@ -508,7 +510,8 @@ static Token getToken (Arena *str_arena, SourceFile source, Location *loc, Symbo
 			lexerror(source, *loc, "missing close paren");
 
 		String val = processStringLiteral(&source, *loc, str_arena, (String) {pos - begin, begin});
-		tok = (Token) {Tok_String, .val.symbol_idx = getSymbolId(syms, val)};
+		tok.kind = Tok_String;
+		tok.val.symbol_idx = getSymbolId(syms, val);
 	} break;
 	case '\'':
 	char_literal: {
@@ -548,30 +551,33 @@ static Token getToken (Arena *str_arena, SourceFile source, Location *loc, Symbo
 		// like decimal-type suffixes and digit separators anyways.
 		const char *start = pos;
 
-// 		bool is_hex = false;
-		if (pos[0] == '0' && pos[1] == 'x') {
-// 			is_hex = true;
-			pos += 2;
-			while (isHexDigit(*pos)) pos++;
-			if (*pos == '.' || *pos == 'p' || *pos == 'P') {
-				if (*pos == '.') {
-					pos++;
-					while (isHexDigit(*pos))
-						pos++;
-				}
-				if (*pos != 'p' && *pos != 'P')
-					lexerror(source, *loc, "hexadecimal floating point constant must have a 'p' suffix");
+		if (pos[0] == '0') {
+			pos++;
+			if (pos[0] == 'x') {
 				pos++;
-				if ((*pos == '-' || *pos == '+') && isDigit(pos[1]))
+				while (isHexDigit(*pos)) pos++;
+				if (*pos == '.' || *pos == 'p' || *pos == 'P') {
+					if (*pos == '.') {
+						pos++;
+						while (isHexDigit(*pos))
+							pos++;
+					}
+					if (*pos != 'p' && *pos != 'P')
+						lexerror(source, *loc, "hexadecimal floating point constant must have a 'p' suffix");
 					pos++;
-				while (isDigit(*pos)) pos++;
-				goto floating;
-			} else {
+					if ((*pos == '-' || *pos == '+') && isDigit(pos[1]))
+						pos++;
+					while (isDigit(*pos)) pos++;
+					goto floating;
+				}
+				goto integer;
+			} else if (pos[0] == 'b' || pos[0] == 'B') {
+				pos++;
+				while (*pos == '0' || *pos == '1' || *pos == '\'') pos++;
 				goto integer;
 			}
-		} else {
-			while (isDigit(*pos)) pos++;
 		}
+		while (isDigit(*pos)) pos++;
 
 
 		if (*pos == '.' || *pos == 'e' || *pos == 'E' || *pos == 'f' || *pos == 'F') {
@@ -639,9 +645,24 @@ static Token getToken (Arena *str_arena, SourceFile source, Location *loc, Symbo
 	case 'L':
 	case 'u':
 	case 'U':
-		if (pos[1] == '\'') {
+		if (pos[1] == '\'' || (pos[0] == 'u' && pos[1] == '8' && pos[2] == '\'')) {
+			if (pos[1] == '8')
+				pos++;
 			pos++;
 			goto char_literal;
+		}
+		if (pos[1] == '\"' || (pos[0] == 'u' && pos[1] == '8' && pos[2] == '\"')) {
+			tok.literal_type = Int_short | Int_unsigned;
+			if (pos[0] == 'u') {
+				if (pos[1] == '8') {
+					pos++;
+					tok.literal_type = Int_suchar | Int_unsigned;
+				}
+			} else if (pos[0] == 'U') {
+				tok.literal_type = Int_int | Int_unsigned;
+			}
+			pos++;
+			goto string;
 		}
 		FALLTHROUGH;
 	case '_':
@@ -2349,25 +2370,29 @@ static void markMacroDecl(FILE *dest, SourceFile source, Location loc, String ma
 
 
 
-static char lexEscapeCode(SourceFile *source, Location loc, const char **p) {
+static u32 lexEscapeCode(SourceFile *source, Location loc, const char **p) {
 	const char *pos = *p;
 	assert(pos[0] == '\\');
 	pos++;
-	int res;
+	u32 res;
 	if (pos[0] == 'x') {
-		if (!isHexDigit(pos[1]) || !isHexDigit(pos[2]))
+		pos++;
+		if (!isHexDigit(pos[0]))
 			lexerror(*source, loc, "invalid escape code");
-		res = hexToInt(pos[1])*16 + hexToInt(pos[2]);
-		if (res >= 128)
-			res -= 256;
-		pos += 2;
+		res = hexToInt(pos[0]);
+		while (isHexDigit(pos[1])) {
+			res = res * 16 + hexToInt(pos[1]);
+			pos++;
+		}
 	} else if (isOctDigit(pos[0])) {
 		res = pos[0] - '0';
-		while (isOctDigit(pos[1])) {
+		if (isOctDigit(pos[1])) {
 			res = res * 8 + pos[1] - '0';
-			if (res > 255)
-				lexerror(*source, loc, "invalid escape code");
 			pos++;
+			if (isOctDigit(pos[1])) {
+				res = res * 8 + pos[1] - '0';
+				pos++;
+			}
 		}
 	} else {
 		res = escape_codes[(uchar)pos[0]];

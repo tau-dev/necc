@@ -370,6 +370,9 @@ int main (int argc, char **args) {
 		assembly_out = tmp_asm;
 	}
 
+
+
+
 	if (stdinc) {
 		PUSH(paths.sys_include_dirs, zstr(MUSL_DIR "/arch/x86_64/"));
 		PUSH(paths.sys_include_dirs, zstr(MUSL_DIR "/arch/generic/"));
@@ -380,8 +383,9 @@ int main (int argc, char **args) {
 	PUSH(paths.user_include_dirs, input_directory);
 
 
-	PUSH(paths.system_macros, zstr("__STDC__"));
-	PUSH(paths.system_macros, zstr("__x86_64__"));
+	PUSH(paths.system_macros, zstr("__STDC__=1"));
+	PUSH(paths.system_macros, zstr("__x86_64__=1"));
+	PUSH(paths.system_macros, zstr("__STDC_IEC_559__=1"));
 
 
 	time_t compilation_time = time(NULL);
@@ -393,19 +397,19 @@ int main (int argc, char **args) {
 	char *date_text = ctime(&compilation_time);
 #endif
 
-	char date_macro_text[30] = "__DATE__=\"";
-	memcpy(date_macro_text+10, date_text+4, 6); // "Mmm dd" part
-	memcpy(date_macro_text+16, date_text+19, 5); // " yyyy" part
-	date_macro_text[21] = '\"';
-	PUSH(paths.system_macros, ((String) { 10 + 11, date_macro_text }));
+	char date_macro_text[30] = {0};
+	sprintf(date_macro_text, "__DATE__=\"%.*s %.*s\"",
+		6, date_text+4,   // "Mmm dd" part
+		4, date_text+20); // "yyyy" part
+	PUSH(paths.system_macros, zstr(date_macro_text));
 
-	char time_macro_text[30] = "__TIME__=\"";
-	memcpy(time_macro_text+10, date_text+11, 8); // "hh:mm:ss" part
-	time_macro_text[18] = '\"';
-	PUSH(paths.system_macros, ((String) { 10 + 8, time_macro_text }));
+	char time_macro_text[30] = {0};
+	sprintf(time_macro_text, "__TIME__=\"%.*s\"", 8, date_text+11);  // "hh:mm:ss" part
+	PUSH(paths.system_macros, zstr(time_macro_text));
 
 	if (options.target.version & Features_C23) {
-		PUSH(paths.system_macros, zstr("__STDC_VERSION__=202301L"));
+		PUSH(paths.system_macros, zstr("__STDC_VERSION__=202311L"));
+		PUSH(paths.system_macros, zstr("__STDC_IEC_60559_BFP__=202311L"));
 	} else if (options.target.version & Features_C11) {
 		PUSH(paths.system_macros, zstr("__STDC_VERSION__=201710L"));
 	} else if (options.target.version & Features_C99) {
@@ -414,21 +418,25 @@ int main (int argc, char **args) {
 
 
 	if (options.target.version & Features_C99) {
-		PUSH(paths.system_macros, zstr("__STDC_HOSTED__"));
+		PUSH(paths.system_macros, zstr("__STDC_HOSTED__=1"));
 	}
 
 	if (options.target.version & Features_C11) {
-		PUSH(paths.system_macros, zstr("__STDC_ANALYZABLE__"));
-		PUSH(paths.system_macros, zstr("__STDC_NO_ATOMICS__"));
-		PUSH(paths.system_macros, zstr("__STDC_NO_COMPLEX__"));
-		PUSH(paths.system_macros, zstr("__STDC_NO_THREADS__"));
+		PUSH(paths.system_macros, zstr("__STDC_ANALYZABLE__=1"));
+		PUSH(paths.system_macros, zstr("__STDC_NO_ATOMICS__=1"));
+		PUSH(paths.system_macros, zstr("__STDC_NO_COMPLEX__=1"));
+		PUSH(paths.system_macros, zstr("__STDC_NO_THREADS__=1"));
 	}
 
 	if (options.target.version & Features_GNU_Extensions) {
-		PUSH(paths.system_macros, zstr("unix"));
-		PUSH(paths.system_macros, zstr("__unix__"));
-		PUSH(paths.system_macros, zstr("__LITTLE_ENDIAN__"));
+		PUSH(paths.system_macros, zstr("unix=1"));
+		PUSH(paths.system_macros, zstr("__unix__=1"));
+		PUSH(paths.system_macros, zstr("__LITTLE_ENDIAN__=1"));
 	}
+
+
+
+
 
 	if (decls_out) options.emit_decls = openOut(decls_out);
 	if (all_decls_out) options.emit_all_decls = openOut(all_decls_out);

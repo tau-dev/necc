@@ -220,7 +220,7 @@ typedef struct Inst {
 	case Ir_FloatToUInt: \
 	case Ir_SIntToFloat: \
 	case Ir_UIntToFloat: \
-	case Ir_StackDeallocVLA: \
+	case Ir_StackAllocVLA: \
 	case Ir_VaArg
 
 #define UNOP_CONST_CASES \
