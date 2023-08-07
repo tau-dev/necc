@@ -96,7 +96,7 @@ static Name flags[] = {
 
 	{"o", F_GCC_Out, Param_Any},
 	{"c", F_GCC_Obj},
-	{"f", F_GCC_Flag, Param_Appended},
+	{"f", F_GCC_Flag, Param_Any},
 
 	{"O", F_OptSimple},
 	{"Oarith", F_OptArith},
@@ -351,7 +351,6 @@ int main (int argc, char **args) {
 
 			case F_GCC_Out:
 				gcc_out = arg_param;
-				fprintf(stderr, "emitting %s.\n", arg_param);
 				had_any_output = true;
 				break;
 			case F_GCC_Obj:
@@ -548,8 +547,15 @@ int main (int argc, char **args) {
 
 static void freeTokens (Tokenization tokens) {
 	// TODO Keep files open!
-	for (u32 i = 0; i < tokens.files.len; i++)
-		free(tokens.files.ptr[i]);
+	for (u32 i = 0; i < tokens.files.len; i++) {
+		SourceFile *file = tokens.files.ptr[i];
+		if (file) {
+			assert(file->idx == i);
+			free((char *)file->abs_name.ptr);
+			free((char *)file->plain_name.ptr);
+			free(file);
+		}
+	}
 	free(tokens.symbols.ptr);
 	free(tokens.list.tokens);
 	free(tokens.list.positions);
@@ -777,13 +783,13 @@ static void emitDeps (FILE *dest, const char *out_name, FileList files, bool emi
 	for (u32 i = 1; i < files.len; i++) {
 		SourceFile *f = files.ptr[i];
 		if (f->kind == Source_Regular || (f->kind == Source_StandardHeader && emit_system_files)) {
-			u32 elem_length = f->path.len + f->name.len + 1;
-			if (line_length + elem_length > max_line) {
+			String name = sourceName(f);
+			if (line_length + name.len > max_line) {
 				fprintf(dest, " \\\n ");
 				line_length = 1;
 			}
-			fprintf(dest, " %.*s%.*s", STRING_PRINTAGE(f->path), STRING_PRINTAGE(f->name));
-			line_length += elem_length;
+			fprintf(dest, " %.*s", STRING_PRINTAGE(name));
+			line_length += name.len + 1;
 		}
 	}
 	fprintf(dest, "\n");

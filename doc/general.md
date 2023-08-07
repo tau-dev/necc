@@ -3,6 +3,7 @@
 * https://github.com/rui314/chibicc
 * https://ladsoft.tripod.com/orange_c_compiler.html
 * https://bellard.org/tcc/
+* https://github.com/RealNeGate/Cuik
 * https://github.com/jserv/mazucc
 * https://github.com/jserv/shecc
 * https://github.com/sheisc/ucc162.3

@@ -2561,6 +2561,7 @@ static bool tryParseTypeBase (Parse *parse, Type *type, u8 *storage_dest, Attrib
 				base = body_type;
 			}
 
+			bases++;
 			modifiable = false;
 			parse->pos--;
 		} break;
@@ -2678,6 +2679,7 @@ static bool tryParseTypeBase (Parse *parse, Type *type, u8 *storage_dest, Attrib
 			}
 			assert(base.kind != Kind_Void);
 
+			bases++;
 			modifiable = false;
 			parse->pos--;
 		} break;
@@ -2744,6 +2746,14 @@ static bool tryParseTypeBase (Parse *parse, Type *type, u8 *storage_dest, Attrib
 			storages++;
 			break;
 		case Tok_Key_Inline:
+			// 6.7.4§3: An inline definition of a function with
+			// external linkage shall not contain a definition of a
+			// modifiable object with static or thread storage duration,
+			// and shall not contain a reference to an identifier with
+			// internal linkage.
+			// TODO
+			storage = Storage_Static;
+			break;
 		case Tok_Key_Noreturn:
 			// TODO
 			break;
@@ -2759,7 +2769,7 @@ static bool tryParseTypeBase (Parse *parse, Type *type, u8 *storage_dest, Attrib
 
 			// Hacky way to correctly accept re-typedefs.
 			// TODO Find a correct parser.
-			if (sym && sym->ordinary && sym->ordinary->kind == Sym_Typedef
+			if (sym && sym->ordinary && sym->ordinary->kind == Sym_Typedef && !bases
 				&& !(storage == Storage_Typedef &&
 					(parse->pos[1].kind == Tok_Semicolon || parse->pos[1].kind == Tok_Comma)))
 			{
@@ -3173,13 +3183,12 @@ static void emitDecl(FILE *dest, Arena *arena, SourceFile *source, Location loc,
 	char *type_name = printType(arena, decl.type);
 	char *kind_name = kind == DeclKind_Typedef ? "type" :
 			kind == DeclKind_Declaration ? "decl" : "def";
-
-	String name = decl.name->name;
-	fprintf(dest, "%.*s%.*s:%lu:%lu:%s:", STRING_PRINTAGE(source->path), STRING_PRINTAGE(source->name),
+	String source_name = sourceName(source);
+	fprintf(dest, "%.*s:%lu:%lu:%s:", STRING_PRINTAGE(source_name),
 			(unsigned long) loc.line, (unsigned long) loc.column, kind_name);
 	for (u32 i = 0; i < decl_scopes.len; i++)
 		fprintf(dest, "%.*s.", STRING_PRINTAGE(decl_scopes.ptr[i]));
-	fprintf(dest, "%.*s:%s\n", STRING_PRINTAGE(name), type_name);
+	fprintf(dest, "%.*s:%s\n", STRING_PRINTAGE(decl.name->name), type_name);
 }
 
 static inline void markDecl(const Parse *parse, const Token *tok, Declaration decl, DeclKind kind) {

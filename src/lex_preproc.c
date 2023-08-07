@@ -1,6 +1,16 @@
+#include "util.h"
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <errno.h>
+
+#ifdef HAVE_POSIX
+#include <stdlib.h>
+#endif
+
+#ifdef HAVE_WINDOWS
+#include <stdlib.h>
+#endif
 
 #include "lex_preproc.h"
 #include "arena.h"
@@ -350,6 +360,7 @@ static void lexwarning (SourceFile source, Location loc, const char *msg, ...) {
 
 static u32 lexEscapeCode(SourceFile *source, Location loc, const char **p);
 static String processStringLiteral(SourceFile *file, Location loc, Arena *arena,String src);
+static SourceFile *tryOpen(StringMap *sources, FileList *files, String path, String name);
 
 // TODO Trigraphs (trivial) and digraphs (annoying)
 // PERFORMANCE The current SoureFile is passed by-value to most helper functions, because I assumed I want to access it quickly. Turns out a lot of instructions are spent on copying it around
@@ -951,12 +962,10 @@ Tokenization lex (Arena *generated_strings, String input, LexParams params) {
 	String input_directory = {slash, input.ptr};
 	String filename = {input.len - slash, input.ptr + slash};
 
-	SourceFile *initial_source = readAllAlloc(input_directory, filename);
+	SourceFile *initial_source = tryOpen(&sources, &t.files, input_directory, filename);
 	if (initial_source == NULL)
 		generalFatal("could not open file \"%.*s\"", STRING_PRINTAGE(filename));
-	initial_source->idx = 1;
 
-	PUSH(t.files, initial_source);
 	const char *pos = initial_source->content.ptr;
 	SourceFile source = *initial_source;
 	Location loc = {source.idx, 1, 1};
@@ -1053,35 +1062,25 @@ Tokenization lex (Arena *generated_strings, String input, LexParams params) {
 				bool quoted;
 				String includefilename = includeFilename(expansion, &preproc_evaluation_buf, &quoted);
 
-				// TODO Need to normalize the path before lookup, or #pragma once will not work.
-				SourceFile *new_source = NULL;
-				void **already_loaded = mapGetOrCreate(&sources, includefilename);
-				if (*already_loaded) {
-					new_source = *already_loaded;
-					new_source->included_count++;
-				} else {
-					new_source = readAllAlloc(source.path, includefilename);
-					if (quoted && new_source == NULL) {
-						for (u32 i = 0; i < params.user_include_dirs.len; i++) {
-							new_source = readAllAlloc(params.user_include_dirs.ptr[i], includefilename);
-							if (new_source) break;
-						}
+				SourceFile *new_source = tryOpen(&sources, &t.files, source.plain_path, includefilename);
+				if (quoted && new_source == NULL) {
+					for (u32 i = 0; i < params.user_include_dirs.len; i++) {
+						new_source = tryOpen(&sources, &t.files,  params.user_include_dirs.ptr[i], includefilename);
+						if (new_source) break;
 					}
-					if (new_source == NULL) {
-						for (u32 i = 0; i < params.sys_include_dirs.len; i++) {
-							new_source = readAllAlloc(params.sys_include_dirs.ptr[i], includefilename);
-							if (new_source) {
-								new_source->kind = Source_StandardHeader;
-								break;
-							}
-						}
-					}
-					if (new_source == NULL)
-						lexerror(source, begin, "could not open include file \"%.*s\"", STRING_PRINTAGE(includefilename));
-					new_source->idx = t.files.len;
-					PUSH(t.files, new_source);
-					*already_loaded = new_source;
 				}
+				if (new_source == NULL) {
+					for (u32 i = 0; i < params.sys_include_dirs.len; i++) {
+						new_source = tryOpen(&sources, &t.files, params.sys_include_dirs.ptr[i], includefilename);
+						if (new_source) {
+							new_source->kind = Source_StandardHeader;
+							break;
+						}
+					}
+				}
+				if (new_source == NULL)
+					lexerror(source, begin, "could not open include file \"%.*s\"", STRING_PRINTAGE(includefilename));
+
 				if (includes_stack.len >= MAX_INCLUDES)
 					lexerror(source, begin, "exceeded maximum #include depth of %d", MAX_INCLUDES);
 				PUSH(includes_stack, ((Inclusion) {loc, pos}));
@@ -1209,7 +1208,7 @@ Tokenization lex (Arena *generated_strings, String input, LexParams params) {
 				continue;
 			}
 			non_macro_ident:;
-			resolveIdentToKeyword(&t, &tok, begin, source.name);
+			resolveIdentToKeyword(&t, &tok, begin, source.plain_name);
 		}
 		appendOneToken(&t.list, tok, (TokenLocation) {begin});
 
@@ -1314,7 +1313,7 @@ static bool expandInto (const ExpansionParams ex, TokenList *dest, bool is_argum
 						collapseMacroStack(ex.stack, &level_of_argument_source);
 						MacroToken paren = takeToken(ex, &level_of_argument_source);
 						if (paren.tok.kind != Tok_OpenParen) {
-							if (!is_argument) resolveIdentToKeyword(ex.tok, &t.tok, ex.expansion_start, ex.source.name);
+							if (!is_argument) resolveIdentToKeyword(ex.tok, &t.tok, ex.expansion_start, ex.source.plain_name);
 
 							appendOneToken(dest, t.tok, (TokenLocation) {
 								.source = t.loc, .macro = ex.expansion_start,
@@ -1369,7 +1368,7 @@ static bool expandInto (const ExpansionParams ex, TokenList *dest, bool is_argum
 			}
 		}
 
-		if (!is_argument && t.tok.kind == Tok_Identifier) resolveIdentToKeyword(ex.tok, &t.tok, ex.expansion_start, ex.source.name);
+		if (!is_argument && t.tok.kind == Tok_Identifier) resolveIdentToKeyword(ex.tok, &t.tok, ex.expansion_start, ex.source.plain_name);
 		collapseMacroStack(ex.stack, &level_of_argument_source);
 		appendOneToken(dest, t.tok, (TokenLocation) {
 			.source = t.loc,
@@ -1990,7 +1989,7 @@ static void preprocExpandLine (ExpansionParams params, TokenList *buf) {
 
 		}
 		non_macro_ident:
-		if (tok.kind == Tok_Identifier) resolveIdentToKeyword(params.tok, &tok, begin, params.source.name);
+		if (tok.kind == Tok_Identifier) resolveIdentToKeyword(params.tok, &tok, begin, params.source.plain_name);
 		appendOneToken(buf, tok, (TokenLocation) {begin});
 	}
 
@@ -2363,21 +2362,22 @@ static void predefineMacros (
 		u32 equals = 0;
 		while (equals < def.len && def.ptr[equals] != '=') equals++;
 		// TODO Without default "1", the name and content parsing would not need to be sparated.
-		source->name = def;
+		source->plain_name = def;
 		source->content = zstr("1");
 		if (equals < def.len) {
-			source->name.len = equals;
+			source->plain_name.len = equals;
 			equals++;
 			source->content = (String) {def.len - equals, def.ptr + equals};
 		}
 
 		Location loc = {source->idx, 1, 1};
-		defineMacro(arena, genrated_strings, symbols, source->name, source, &loc, source->content.ptr);
+		defineMacro(arena, genrated_strings, symbols, source->plain_name, source, &loc, source->content.ptr);
 	}
 }
 
 static void markMacroDecl(FILE *dest, SourceFile source, Location loc, String macro_name) {
-	fprintf(dest, "%.*s%.*s:%lu:%lu:macro:%.*s:\n", STRING_PRINTAGE(source.path), STRING_PRINTAGE(source.name),
+	String name = sourceName(&source);
+	fprintf(dest, "%.*s:%lu:%lu:macro:%.*s:\n", STRING_PRINTAGE(name),
 			(unsigned long) loc.line, (unsigned long) loc.column, STRING_PRINTAGE(macro_name));
 }
 
@@ -2454,6 +2454,64 @@ static void resolveSymbolIndicesToPointers (TokenList t, Symbol *syms) {
 	}
 }
 
+static SourceFile *tryOpen (StringMap *sources, FileList *files, String dir, String name) {
+	u32 full_len = dir.len + name.len;
+	char *full_path = malloc(full_len + 1);
+	memcpy(full_path, dir.ptr, dir.len);
+	memcpy(full_path + dir.len, name.ptr, name.len);
+	full_path[full_len] = 0;
+
+#ifdef HAVE_POSIX
+	char *resolved = realpath(full_path, NULL);
+	if (!resolved) {
+		free(full_path);
+		return NULL;
+	}
+#else
+#ifdef HAVE_WINDOWS
+	char *resolved = _fullpath(NULL, full_path, PATH_MAX);
+	free(full_path);
+	if (!resolved) {
+		free(full_path);
+		return NULL;
+	}
+#else
+	char *resolved = malloc(strlen(full_len + 1);
+	memcpy(resolved, full_path, full_len + 1);
+#endif // HAVE_WINDOWS
+#endif // HAVE_POSIX
+
+	String resolved_str = zstr(resolved);
+	void **entry = mapGetOrCreate(sources, resolved_str);
+	SourceFile *file = *entry;
+	if (file) {
+		free(full_path);
+		free(resolved);
+		file->included_count++;
+	} else {
+		file = readAllAlloc(resolved_str);
+		if (file) {
+			*entry = file;
+
+			u32 slash;
+			for (slash = full_len; slash > 0; slash--) {
+				if (full_path[slash-1] == '/')
+					break;
+			}
+			file->plain_name = (String) {full_len, full_path};
+			file->plain_path = (String) {slash, full_path};
+			file->idx = files->len;
+			PUSH(*files, file);
+		} else {
+			free(full_path);
+			free(resolved);
+			mapRemove(sources, entry);
+		}
+	}
+
+	return file;
+
+}
 
 
 
@@ -2579,8 +2637,8 @@ void emitPreprocessed (Tokenization *tok, FILE *dest) {
 		Location loc = sourceOf(list.positions[i]);
 		if (loc.file_id != prev.file_id) {
 			SourceFile *newfile = tok->files.ptr[loc.file_id];
-			fprintf(dest, "\n#line %llu \"%.*s%.*s\"\n", (ullong) loc.line,
-					STRING_PRINTAGE(newfile->path), STRING_PRINTAGE(newfile->name));
+			String name = sourceName(newfile);
+			fprintf(dest, "\n#line %llu \"%.*s\"\n", (ullong) loc.line, STRING_PRINTAGE(name));
 			prev = loc;
 		} else if (loc.line != prev.line) {
 			if (loc.line > prev.line && loc.line < prev.line + 6) { // Arbitrary.

@@ -1,4 +1,10 @@
 #pragma once
+#if defined(__unix__)
+#define HAVE_POSIX 1
+#define _POSIX_C_SOURCE 200809L
+#define _XOPEN_SOURCE 500
+#endif
+
 
 #include <stdlib.h>
 #include <assert.h>
@@ -7,6 +13,11 @@
 #include <stdbool.h>
 #include <stdarg.h>
 #include <stdio.h>
+
+
+#if defined(_WIN32)
+#define HAVE_WINDOWS 1
+#endif
 
 
 #define SPAN(type) struct { size_t len; type *ptr; }
@@ -123,8 +134,9 @@ typedef struct {
 } Location;
 
 typedef struct {
-	String name; // non-owning
-	String path; // non-owning
+	String abs_name; // owning
+	String plain_name; // owning, possibly null
+	String plain_path; // non-owning
 
 	String content; // non-owning, possibly co-allocated
 
@@ -154,13 +166,14 @@ void printto (char **insert, const char *end, const char *fmt, ...);
 
 void **mapGetOrCreate(StringMap *, String);
 void *mapGet(const StringMap *, String);
-void *mapRemove(StringMap *, String);
+void mapRemove(StringMap *, void **entry);
 void mapFree(StringMap *);
 
 bool eql(const char *, String);
 bool startsWith(const char *, String);
 String zstr(const char *);
-SourceFile *readAllAlloc(String source, String filename);
+SourceFile *readAllAlloc(String path_owning);
+String sourceName(SourceFile *source);
 bool isDirectory(const char *path);
 bool isFile(const char *path);
 

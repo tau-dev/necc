@@ -11,5 +11,4 @@ actually may lead to alignment problems and will need to be mended at
 some point.
 
 
-Inline functions should be defineable in multiple translation units.
-`#pragma once` fails when accessing a header through multiple paths.
+The `inline` specifier is not quite handled correctly.

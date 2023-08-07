@@ -78,15 +78,16 @@ static void printError (SourceFile source, Location loc, const char *msg, ...) {
 }
 
 
-static SourceFile *readFileData (FILE *f, long count, String path, String filename) {
+static SourceFile *readFileData (FILE *f, long count, String filename) {
 	char *data = malloc(sizeof(SourceFile) + count+2);
 	if (!data) return NULL;
 	char *content = data + sizeof(SourceFile);
 
 	size_t got = fread(content, 1, count, f);
 	const char *nullbyte = memchr(content, 0, got);
+
+	SourceFile source = { filename, .content = {got, content} };
 	if (nullbyte) {
-		SourceFile source = { filename, path, {got, content} };
 		Location null_loc = {0, 1, 1};
 		printError(source, null_loc, "file should not contain a null byte");
 	} else if (got == (size_t)count) {
@@ -97,41 +98,37 @@ static SourceFile *readFileData (FILE *f, long count, String path, String filena
 		}
 		content[count] = 0;
 		content[count+1] = 0; // The lexer sometimes wants to skip two characters at once.
+		source.content = (String) {count, content};
+
 		SourceFile *result = (SourceFile*) data;
-		*result = (SourceFile) {
-			.name = filename,
-			.path = path,
-			.content = (String) {count, content},
-		};
+		*result = source;
 		return result;
 	}
 	free(data);
 	return NULL;
 }
 
-SourceFile *readAllAlloc (String path, String filename) {
-	char *filename_z = malloc(path.len + filename.len + 1);
-	SourceFile *result = NULL;
+SourceFile *readAllAlloc (String filename) {
+	assert(filename.ptr[filename.len] == 0);
 
-	if (filename_z) {
-		if (path.len)
-			memcpy(filename_z, path.ptr, path.len);
-		memcpy(filename_z + path.len, filename.ptr, filename.len);
-		filename_z[path.len + filename.len] = 0;
-		FILE *f = NULL;
-		if (isFile(filename_z))
-			f = fopen(filename_z, "r");
-		if (f) {
-			if (fseek(f, 0, SEEK_END) == 0) {
-				long count = ftell(f);
-				if (count >= 0 && fseek(f, 0, SEEK_SET) == 0)
-					result = readFileData(f, count, path, filename);
-			}
-			fclose(f);
+	SourceFile *result = NULL;
+	FILE *f = NULL;
+
+	if (isFile(filename.ptr))
+		f = fopen(filename.ptr, "r");
+	if (f) {
+		if (fseek(f, 0, SEEK_END) == 0) {
+			long count = ftell(f);
+			if (count >= 0 && fseek(f, 0, SEEK_SET) == 0)
+				result = readFileData(f, count, filename);
 		}
-		free(filename_z);
+		fclose(f);
 	}
 	return result;
+}
+
+String sourceName (SourceFile *source) {
+	return source->plain_name.ptr ? source->plain_name : source->abs_name;
 }
 
 u64 strHash (String str) {
@@ -165,13 +162,14 @@ void printMsg (Log level, SourceFile source, Location loc) {
 	assert(loc.file_id == source.idx);
 	switch (source.kind) {
 	case Source_SystemDefinedMacro:
-		fprintf(stderr, "%s<system defined macro>%s %.*s:\t", BOLD, RESET, STRING_PRINTAGE(source.name));
+		fprintf(stderr, "%s<system defined macro>%s %.*s:\t", BOLD, RESET, STRING_PRINTAGE(source.plain_name));
 		break;
 	case Source_CommandLineMacro:
-		fprintf(stderr, "%s<command-line defined macro>%s %.*s:\t", BOLD, RESET, STRING_PRINTAGE(source.name));
+		fprintf(stderr, "%s<command-line defined macro>%s %.*s:\t", BOLD, RESET, STRING_PRINTAGE(source.plain_name));
 		break;
 	default: {
-		fprintf(stderr, "%s%.*s%.*s:%lu:%lu:%s\t", BOLD, STRING_PRINTAGE(source.path), STRING_PRINTAGE(source.name),
+		String name = sourceName(&source);
+		fprintf(stderr, "%s%.*s:%lu:%lu:%s\t", BOLD, STRING_PRINTAGE(name),
 			(unsigned long) loc.line, (unsigned long) loc.column, RESET);
 	}
 	}
@@ -335,16 +333,13 @@ void *mapGet (const StringMap *map, String str) {
 	return map->content[i];
 }
 
-void *mapRemove (StringMap *map, String str) {
-	u32 i = find(map, strHash(str), str);
-	if (i == FOUND_NONE)
-		return NULL;
+void mapRemove (StringMap *map, void **entry) {
+	if (!entry) return;
+	u32 i = entry - map->content;
 
-	void *prev = map->content[i];
 	map->headers[i] = SLOT_TOMBSTONE;
 	map->content[i] = NULL;
 	map->used--;
-	return prev;
 }
 
 

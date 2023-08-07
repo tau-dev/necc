@@ -18,7 +18,7 @@ instructions & registers.
 // Maximum amount of data expected to be emitted by a single call to emit().
 #define MAX_LINE 1000
 static char buf[BUF];
-static char *insert = buf;
+static char *insert;
 
 
 typedef unsigned long ulong;
@@ -401,6 +401,7 @@ void emitX64AsmSimple(EmitParams params) {
 		.emit_debug_info = params.emit_debug_info,
 		.target = params.target,
 	};
+	insert = buf;
 	Module module = params.module;
 
 // 	fprintf(params.out, ".intel_syntax\n\n");
@@ -537,11 +538,11 @@ void emitX64AsmSimple(EmitParams params) {
 		for (u32 i = 1; i < params.files.len; i++) {
 			SourceFile *file = params.files.ptr[i];
 			emit(&globals,
-				"	.string \"SS\"\n"
+				"	.string \"S\"\n"
 				"	.uleb128 0\n"
 				"	.uleb128 0\n"
 				"	.uleb128 0\n",
-				file->path, file->name);
+				file->abs_name);
 		}
 		emitZString(
 			"	.byte 0\n"
@@ -584,7 +585,10 @@ void emitX64AsmSimple(EmitParams params) {
 				"\n"
 				".line_end:\n");
 	}
-
+	free(line_marks.ptr);
+	line_marks.len = 0;
+	line_marks.capacity = 0;
+	line_marks.ptr = 0;
 	flushit(params.out);
 }
 

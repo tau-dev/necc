@@ -252,7 +252,8 @@ char *printTypeHighlighted (Arena *arena, Type t) {
 }
 
 void printTypeUnnamed(char **pos, const char *end, SourceFile *source, unsigned long line, unsigned long column) {
-	printto(pos, end, "[unnamed at %.*s line %lu column %lu]", STRING_PRINTAGE(source->name),
+	String name = sourceName(source);
+	printto(pos, end, "[unnamed at %.*s line %lu column %lu]", STRING_PRINTAGE(name),
 			(unsigned long) line, (unsigned long) column);
 }
 
