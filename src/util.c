@@ -28,6 +28,7 @@ const char *ifTerminal(const char *val) {
 
 // TODO Do not allow regular files.
 bool isDirectory(const char *path) {
+	assert(path);
 #ifdef __unix__
 	struct stat path_stat;
 	if (stat(path, &path_stat) == -1)

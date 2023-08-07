@@ -1095,7 +1095,7 @@ static void emitInstForward (Codegen *c, IrRef i) {
 		emit(c, " mov R, #", RSP_8, i);
 	} break;
 	case Ir_StackDeallocVLA: {
-		emit(c, " add #, R", c->ir.ptr[inst.unop].unop, RSP_8);
+		emit(c, " mov #, R", c->ir.ptr[inst.unop].unop, RSP_8);
 	} break;
 	case Ir_Reloc:
 		assert(inst.size == 8);
@@ -1323,6 +1323,7 @@ static void emitInstForward (Codegen *c, IrRef i) {
 				arg_stack_memory += param_size;
 			}
 		}
+		arg_stack_memory = (arg_stack_memory + 15) & 16;
 
 		u32 stack_filled = 0;
 		for (u32 i = 0; i < args.len; i++) {
@@ -1333,8 +1334,6 @@ static void emitInstForward (Codegen *c, IrRef i) {
 				stack_filled += param_size;
 			}
 		}
-
-		assert(stack_filled == arg_stack_memory);
 
 		if (arg_stack_memory)
 			emit(c, " sub $I, R", arg_stack_memory, RSP_8);
