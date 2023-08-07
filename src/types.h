@@ -146,15 +146,6 @@ typedef struct Declaration {
 	Symbol *name;
 } Declaration;
 
-typedef enum {
-	Attribute_Deprecated = 1,
-	Attribute_Fallthrough = 1 << 1,
-	Attribute_MaybeUnused = 1 << 2,
-	Attribute_Noreturn = 1 << 3,
-	Attribute_Nodiscard = 1 << 4,
-	Attribute_Unsequenced = 1 << 5,
-	Attribute_Reproducible = 1 << 6,
-} Attributes;
 typedef struct Target Target;
 
 Type resolveType(Type t);
@@ -177,6 +168,7 @@ void printTypeTail(Type t, char **insert, const char *end);
 
 #define BASIC_VOID ((Type) {Kind_Void})
 #define BASIC_INT ((Type) {Kind_Basic, .basic = Int_int})
+#define BASIC_LONG ((Type) {Kind_Basic, .basic = Int_long})
 // #define BASIC_CHAR ((Type) {Kind_Basic, .basic = Int_char})
 #define INT_SIZE I32
 

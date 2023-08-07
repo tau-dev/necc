@@ -1,7 +1,7 @@
-#include "analysis.h"
-#include "types.h"
-#include "parse.h"
-#include "emit.h"
+#include "../analysis.h"
+#include "../types.h"
+#include "../parse.h"
+#include "../emit.h"
 
 
 /*
@@ -43,9 +43,7 @@ typedef enum {
 	R13 = 0x00a,
 	R14 = 0x00b,
 	R15 = 0x00c,
-// rsp is reserved as stack pointer, rax and rdx are used for intermediate values
 	RDX = 0x00d,
-	GENERAL_PURPOSE_REGS_END = RDX,
 	RSP = 0x00e,
 	RAX = 0x00f,
 
@@ -913,8 +911,13 @@ static void emitBlockForward (Codegen *c, Blocks blocks, u32 i) {
 
 		for (u32 i = 0; i < cases.len; i++) {
 			u32 size = valueSize(c, exit.switch_.value);
-			assert(size <= 4);
-			emit(c, " cmpZ $L, #", sizeSuffix(size), cases.ptr[i].value & 0xffffffff, exit.switch_.value);
+			if (size == 8) {
+				emit(c, " movabsq $L, R", cases.ptr[i].value, RAX_8);
+				emit(c, " cmpq R, #", RAX_8, exit.switch_.value);
+			} else {
+				assert(size <= 4);
+				emit(c, " cmpZ $L, #", sizeSuffix(size), cases.ptr[i].value & 0xffffffff, exit.switch_.value);
+			}
 			emitJump(c, "je", cases.ptr[i].dest);
 		}
 		if (exit.switch_.default_case != next)
@@ -955,7 +958,7 @@ static void emitBlockForward (Codegen *c, Blocks blocks, u32 i) {
 }
 
 
-static void emitInstForward(Codegen *c, IrRef i) {
+static void emitInstForward (Codegen *c, IrRef i) {
 	assert(i != IDX_NONE);
 
 	Inst inst = c->ir.ptr[i];
@@ -1179,7 +1182,7 @@ static void emitInstForward(Codegen *c, IrRef i) {
 				emit(c, " mov $0x5f000000, R", RAX_8);
 			else
 				emit(c, " movabsq $0x43e0000000000000, R", RAX_8);
-			emit(c, " movd %xmm1, R", RAX_8);
+			emit(c, " movd R, %xmm1", RAX_8);
 
 			emit(c, " movsZ ~I(R), %xmm0", fsuff, c->storage[inst.unop], RBP_8);
 			emit(c, " comisZ %xmm1, %xmm0", fsuff);

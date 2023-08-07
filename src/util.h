@@ -53,6 +53,7 @@ typedef SPAN(char) MutableString;
 	} while (0);
 
 #define POP(list) (assert((list).len > 0), (list).ptr[--(list).len])
+#define LAST(list) ((list).ptr[(list).len-1])
 
 typedef LIST(String) StringList;
 

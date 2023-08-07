@@ -15,15 +15,21 @@
 #include "emit.h"
 
 
-Module module = {0};
 
 typedef struct {
 	const char *name;
 	u32 flag;
+	enum {
+		Param_None,
+		Param_Appended = 1,
+		Param_After = 2,
+		Param_Assigned = 4,
+		Param_Regular = Param_Assigned | Param_After,
+		Param_Any = Param_Appended | Param_After | Param_Assigned,
+	} param;
 } Name;
 
 typedef enum {
-	F_Unknown = -1,
 	F_Version,
 	F_Help,
 	F_Standard,
@@ -46,6 +52,10 @@ typedef enum {
 	F_EmitStdDecls,
 	F_Run,
 
+	F_GCC_Out,
+	F_GCC_Obj,
+	F_GCC_Flag,
+
 	F_OptSimple,
 	F_OptStoreLoad,
 	F_OptArith,
@@ -60,29 +70,33 @@ static Name flags[] = {
 	{"-help", F_Help},
 	{"v", F_Version},
 	{"version", F_Version},
-	{"D", F_Define},
-	{"def", F_Define},
+	{"D", F_Define, Param_Any},
+	{"def", F_Define, Param_Regular},
 	{"g", F_Debug},
 	{"debug", F_Debug},
-	{"std", F_Standard},
+	{"std", F_Standard, Param_Assigned},
 	{"crash", F_Crashing},
-	{"I", F_Include},
-	{"stdinc", F_StdInc},
+	{"I", F_Include, Param_Any},
+	{"stdinc", F_StdInc, Param_Regular},
 	{"nostdinc", F_NoStdInc},
 
 	{"run", F_Run},
-	{"ir", F_EmitIr},
-	{"pp", F_EmitPreproc},
-	{"as", F_EmitAssembly},
-	{"out", F_EmitExe},
-	{"obj", F_EmitObj},
-	{"M", F_EmitDeps},
-	{"deps", F_EmitDeps},
-	{"MM", F_EmitLocalDeps},
-	{"localdeps", F_EmitLocalDeps},
-	{"decls", F_EmitDecls},
-	{"all-decls", F_EmitAllDecls},
-	{"std-decls", F_EmitStdDecls},
+	{"ir", F_EmitIr, Param_Assigned},
+	{"pp", F_EmitPreproc, Param_Assigned},
+	{"as", F_EmitAssembly, Param_Assigned},
+	{"out", F_EmitExe, Param_Assigned},
+	{"obj", F_EmitObj, Param_Assigned},
+	{"M", F_EmitDeps, Param_Assigned},
+	{"deps", F_EmitDeps, Param_Assigned},
+	{"MM", F_EmitLocalDeps, Param_Assigned},
+	{"localdeps", F_EmitLocalDeps, Param_Assigned},
+	{"decls", F_EmitDecls, Param_Assigned},
+	{"all-decls", F_EmitAllDecls, Param_Assigned},
+	{"std-decls", F_EmitStdDecls, Param_Assigned},
+
+	{"o", F_GCC_Out, Param_Any},
+	{"c", F_GCC_Obj},
+	{"f", F_GCC_Flag, Param_Appended},
 
 	{"O", F_OptSimple},
 	{"Oarith", F_OptArith},
@@ -93,7 +107,6 @@ static Name flags[] = {
 	{"Werror", F_Werror},
 	{0}
 };
-
 
 const char *help_string = "Usage:\n"
 	"  %s [options] file...\n"
@@ -112,7 +125,7 @@ const char *help_string = "Usage:\n"
 	" -simple-types   Print types (in declaration lists or error messages) in an easier-to-parse left-to-right syntax. (TODO)\n"
 	" -Werr/-Werror   Fail the compilation if warnings are generated.\n"
 	"\n"
-	"The following output options write to stdout by default, or may be followed by ‘=<FILENAME>’ to specify an output file. Default: ‘-out=a.out’.\n"
+	"The following output options write to stdout by default (except for -out and -obj), or may be followed by ‘=<FILENAME>’ to specify an output file. Default: ‘-out=a.out’.\n"
 	" -out            Generate an executable.\n"
 	" -obj            Generate an object file.\n"
 	" -lib            Generate an archive. (TODO)\n"
@@ -127,6 +140,8 @@ const char *help_string = "Usage:\n"
 	"                   Declaration lists are a sequence of lines consisting of ‘<filename>:<line>:<column>:<def-kind>:<name>:<type>’,\n"
 	"                   where a non-top-level <name> is qualified by a ‘.’-separated path of its containers,\n"
 	"                   and <def-kind> is either ‘decl’, ‘def’, ‘type’ or ‘macro’.\n"
+	"\n"
+	"For compatibility purposes, the -c and -o flags are also available, with the same semantics as in GCC.\n"
 	"\n"
 	"Optimizations: (very rudimentary for now)\n"
 	" -O              Perform optimizations: -Omem1, -Oarith.\n"
@@ -154,35 +169,44 @@ static Name versions[] = {
 	{0}
 };
 
-static i32 find (const char *str, const Name *names) {
+static const Name *find (const char *str, const Name *names) {
 	while (names->name) {
-		if (strcmp(names->name, str) == 0)
-			return names->flag;
+		if (strcmp(names->name, str) == 0 || ((names->param & Param_Appended) && names->name[0] == str[0]))
+			return names;
 		names++;
 	}
-	return -1;
+	return NULL;
+}
+
+static void closeOut(FILE *f) {
+	if (f) fclose(f);
 }
 
 
 
-bool had_output = false;
-static const char *stdout_marker = "<stdout>";
+bool had_any_output = false;
+static const char *default_output = "<stdout>";
 
-static void setOut (const char **dest, char *f) {
+static void setOut (const char **dest, const char *f) {
 	static bool had_stdout = false;
-	if (f) {
-		*dest = f;
-	} else {
+	if (!f) {
+		// FIXME This isn't right for -out and -obj, which do not go to stdout by default.
 		if (had_stdout)
 			generalFatal("Only one output option can write to stdout; specify a destination file by appending ‘=<FILENAME>’");
 
-		*dest = stdout_marker;
+		f = default_output;
 		had_stdout = true;
 	}
-	had_output = true;
+	if (*dest)
+		generalFatal("Cannot output the same thing to multiple files (%s and %s)", *dest, f);
+	*dest = f;
+	had_any_output = true;
 }
+
 static FILE *openOut (const char *name) {
-	if (name == stdout_marker)
+	if (name == NULL)
+		return NULL;
+	if (name == default_output)
 		return stdout;
 	FILE *f = fopen(name, "w");
 	if (f == NULL)
@@ -212,61 +236,99 @@ Target target_x64_linux_gcc = {
 };
 
 static String checkIncludePath(Arena *, const char *path);
+static const char *sourceWithSuffix(Arena *arena, String source, const char *suffix);
 static const char *concat(Arena *arena, ...);
-static void emitDeps(const char *deps_out, const char *out_name, FileList files, bool emit_system_files);
+static void emitDeps(FILE *deps_out, const char *out_name, FileList files, bool emit_system_files);
+
+
+typedef struct {
+	const char *obj;
+	const char *assembly;
+	// These can be meaningfully concatenated for multiple compilation
+	// units, so they stay open.
+	FILE *ir;
+	FILE *preproc;
+	FILE *deps;
+	FILE *localdeps;
+	FILE *decls;
+	FILE *all_decls;
+	FILE *std_decls;
+
+	bool optimize_store_load;
+	bool optimize_memreduce;
+	bool optimize_arith;
+
+	Arena *arena;
+	LexParams lex_params;
+} CompileConfig;
+
+static void compile(String input, CompileConfig comp);
+static void setupPaths(LexParams *paths, bool stdinc);
 
 int main (int argc, char **args) {
-	String input = {0};
 	Arena arena = create_arena(256 * 1024);
 
 	Options options = {
 		.target = target_x64_linux_gcc,
-// 		.warn_on_wrapping = true,
 		.warn_char_subscript = true,
 		.warn_compare = true,
 	};
 
+	const char *exe_out = NULL;
+	const char *obj_out = NULL;
+
 	const char *ir_out = NULL;
 	const char *preproc_out = NULL;
 	const char *assembly_out = NULL;
-	const char *obj_out = NULL;
-	const char *exe_out = NULL;
 	const char *deps_out = NULL;
 	const char *localdeps_out = NULL;
 	const char *decls_out = NULL;
 	const char *all_decls_out = NULL;
 	const char *std_decls_out = NULL;
 
-	bool stdinc = true;
-	bool opt_store_load = false;
-	bool opt_memreduce = false;
-	bool opt_arith = false;
-	bool runit = false;
+	const char *gcc_out = NULL;
+	bool gcc_obj = false;
 
-	LexParams paths = {
-		.options = &options,
+	bool stdinc = true;
+	bool runit = false;
+	bool had_double_dash = false;
+
+	CompileConfig comp = {
+		.arena = &arena,
 	};
+	LexParams paths = {0};
+	StringList compile_inputs = {0};
+	StringList link_inputs = {0};
 
 	for (int i = 1; i < argc; i++) {
-		if (args[i][0] == '-') {
+		if (args[i][0] == '-' && !had_double_dash) {
 			if (args[i][1] == '-' && args[i][2] == 0) {
-				if (i + 2 < argc)
-					generalFatal("Cannot more than one input file at a time.");
-				if (i + 1 < argc)
-					input = zstr(args[i + 1]);
-				break;
+				had_double_dash = true;
+				continue;
 			}
 
-			char *direct_arg = NULL;
+			char *arg_param = NULL;
 			for (char *c = args[i]; *c; c++) {
 				if (*c == '=') {
 					*c = 0;
-					direct_arg = c + 1;
+					arg_param = c + 1;
 					break;
 				}
 			}
-			Flag flag = find(args[i] + 1, flags);
-			switch (flag) {
+
+			const Name *flag = find(args[i] + 1, flags);
+			if (flag == NULL) {
+				fprintf(stderr, "%swarning: %sIgnoring unknown flag %s.\n", YELLOW, RESET, args[i]);
+				continue;
+			}
+			if (arg_param && !(flag->param & Param_Assigned))
+				generalFatal("flag -%s does not take an =<parameter>", flag->name);
+			if (!arg_param && (flag->param & Param_Appended) && args[i][2])
+				arg_param = args[i] + 2;
+			if (!arg_param && (flag->param & Param_After))
+				arg_param = args[++i];
+
+			switch ((Flag) flag->flag) {
 			case F_Help:
 				fprintf(stderr, help_string, args[0]);
 				return 0;
@@ -275,86 +337,92 @@ int main (int argc, char **args) {
 				return 0;
 			case F_Crashing: options.crash_on_error = true; break;
 			case F_Debug: options.emit_debug = true; break;
-			case F_EmitIr: setOut(&ir_out, direct_arg); break;
-			case F_EmitPreproc: setOut(&preproc_out, direct_arg); break;
-			case F_EmitAssembly: setOut(&assembly_out, direct_arg); break;
-			case F_EmitObj: setOut(&obj_out, direct_arg); break;
-			case F_EmitExe: setOut(&exe_out, direct_arg); break;
-			case F_EmitDeps: setOut(&deps_out, direct_arg); break;
-			case F_EmitLocalDeps: setOut(&localdeps_out, direct_arg); break;
-			case F_EmitDecls: setOut(&decls_out, direct_arg); break;
-			case F_EmitAllDecls: setOut(&all_decls_out, direct_arg); break;
-			case F_EmitStdDecls: setOut(&std_decls_out, direct_arg); break;
+			case F_EmitIr: setOut(&ir_out, arg_param); break;
+			case F_EmitPreproc: setOut(&preproc_out, arg_param); break;
+			case F_EmitAssembly: setOut(&assembly_out, arg_param); break;
+			case F_EmitObj: setOut(&obj_out, arg_param); break;
+			case F_EmitExe: setOut(&exe_out, arg_param); break;
+			case F_EmitDeps: setOut(&deps_out, arg_param); break;
+			case F_EmitLocalDeps: setOut(&localdeps_out, arg_param); break;
+			case F_EmitDecls: setOut(&decls_out, arg_param); break;
+			case F_EmitAllDecls: setOut(&all_decls_out, arg_param); break;
+			case F_EmitStdDecls: setOut(&std_decls_out, arg_param); break;
 			case F_Run: runit = true; break;
+
+			case F_GCC_Out:
+				gcc_out = arg_param;
+				fprintf(stderr, "emitting %s.\n", arg_param);
+				had_any_output = true;
+				break;
+			case F_GCC_Obj:
+				gcc_obj = true;
+				had_any_output = true;
+				break;
+			case F_GCC_Flag:
+				break;
+
 			case F_Standard: {
-				const char *arg = direct_arg ? direct_arg : args[++i];
-				i32 v = find(arg, versions);
-				if (v == -1)
-					fprintf(stderr, "%swarning: %sIgnoring unknown version name %s\n", YELLOW, RESET, args[i]);
+				const Name *v = find(arg_param, versions);
+				if (v)
+					options.target.version = v->flag;
 				else
-					options.target.version = v;
+					fprintf(stderr, "%swarning: %sIgnoring unknown version name %s.\n", YELLOW, RESET, arg_param);
 			} break;
 			case F_Include: {
-				const char *arg = direct_arg ? direct_arg : args[++i];
-				PUSH(paths.user_include_dirs, checkIncludePath(&arena, arg));
+				PUSH(paths.user_include_dirs, checkIncludePath(&arena, arg_param));
 			} break;
-			case F_Define:
-				i++;
-				PUSH(paths.command_line_macros, zstr(args[i]));
-				break;
+			case F_Define: {
+				if (!arg_param)
+					generalFatal("supply a definition text for the macro");
+				PUSH(paths.command_line_macros, zstr(arg_param));
+			} break;
 			case F_StdInc: {
-				const char *arg = direct_arg ? direct_arg : args[++i];
-				PUSH(paths.sys_include_dirs, checkIncludePath(&arena, arg));
+				PUSH(paths.sys_include_dirs, checkIncludePath(&arena, arg_param));
 			} break;
 			case F_NoStdInc: stdinc = false; break;
 			case F_Werror: options.error_on_warnings = true; break;
 			case F_OptSimple:
-				opt_memreduce = true;
-				opt_arith = true;
+				comp.optimize_memreduce = true;
+				comp.optimize_arith = true;
 				break;
-			case F_OptStoreLoad: opt_store_load = true; break;
-			case F_OptArith: opt_arith = true; break;
-			case F_OptMemreduce: opt_memreduce = true; break;
+			case F_OptStoreLoad: comp.optimize_store_load = true; break;
+			case F_OptArith: comp.optimize_arith = true; break;
+			case F_OptMemreduce: comp.optimize_memreduce = true; break;
 
 			case F_OptMemreduceStrong:
-			case F_Unknown:
-				fprintf(stderr, "%swarning: %sIgnoring unknown flag %s\n", YELLOW, RESET, args[i]);
+				break;
 			}
 		} else {
-			if (input.len)
-				generalFatal("Cannot compile more than one input file at a time");
-			input = zstr(args[i]);
+			String name = zstr(args[i]);
+			if (name.ptr[name.len-2] == '.' && name.ptr[name.len-1] == 'c') {
+				PUSH(compile_inputs, name);
+			} else {
+				PUSH(link_inputs, name);
+			}
 		}
 	}
 
-	if (!input.len)
+	if (!compile_inputs.len && !link_inputs.len)
 		generalFatal("Please supply a file name. (Use \"-h\" to show usage information)");
 
-	if (!had_output)
+	if (compile_inputs.len > 1) {
+		if (obj_out && obj_out != default_output)
+			generalFatal("Cannot combine multiple inputs into one object file.");
+		if (assembly_out && assembly_out != default_output)
+			generalFatal("Cannot combine multiple inputs into one assembly file.");
+	}
+
+	if (gcc_obj)
+		obj_out = gcc_out ? gcc_out : default_output;
+	else if (gcc_out)
+		exe_out = gcc_out;
+
+	if (!had_any_output || exe_out == default_output)
 		exe_out = "./a.out";
 
-	i32 i;
-	for (i = input.len - 1; i >= 0; i--) {
-		if (input.ptr[i] == '/')
-			break;
-	}
-	i++;
-	String input_directory = {i, input.ptr};
-	String input_name = {input.len - i, input.ptr + i};
 
-	const char *obj_name = obj_out;
-	char obj_name_buf[1024];
-	if (!obj_name) {
-		obj_name = obj_name_buf;
-		u32 len = input_name.len;
-		if (input_name.ptr[len-2] == '.' && input_name.ptr[len-1] == 'c')
-			len -= 2;
-		memcpy(obj_name_buf, input_name.ptr, len);
-		memcpy(obj_name_buf + len, ".o", 3);
-	}
 
 	char tmp_exe[L_tmpnam] = {0};
-	char tmp_asm[L_tmpnam] = {0};
 
 	// tmpnam is not atomic, so this may (very rarely) collide with
 	// another process. tmpfile won't work as a replacement because this
@@ -365,171 +433,82 @@ int main (int argc, char **args) {
 		exe_out = tmp_exe;
 	}
 
-	if ((obj_out || exe_out) && !assembly_out) {
-		tmpnam(tmp_asm);
-		assembly_out = tmp_asm;
-	}
-
-
-
-
-	if (stdinc) {
-		PUSH(paths.sys_include_dirs, zstr(MUSL_DIR "/arch/x86_64/"));
-		PUSH(paths.sys_include_dirs, zstr(MUSL_DIR "/arch/generic/"));
-		PUSH(paths.sys_include_dirs, zstr(MUSL_DIR "/obj/include/"));
-		PUSH(paths.sys_include_dirs, zstr(MUSL_DIR "/include/"));
-		PUSH(paths.sys_include_dirs, zstr("/usr/include/"));
-	}
-	PUSH(paths.user_include_dirs, input_directory);
-
-
-	PUSH(paths.system_macros, zstr("__STDC__=1"));
-	PUSH(paths.system_macros, zstr("__x86_64__=1"));
-	PUSH(paths.system_macros, zstr("__STDC_IEC_559__=1"));
-
-
-	time_t compilation_time = time(NULL);
-#ifdef __STDC_LIB_EXT1__
-	char buf[26];
-	ctime_s(buf, 26, &compilation_time);
-	char *date_text = buf;
-#else
-	char *date_text = ctime(&compilation_time);
-#endif
-
-	char date_macro_text[30] = {0};
-	sprintf(date_macro_text, "__DATE__=\"%.*s %.*s\"",
-		6, date_text+4,   // "Mmm dd" part
-		4, date_text+20); // "yyyy" part
-	PUSH(paths.system_macros, zstr(date_macro_text));
-
-	char time_macro_text[30] = {0};
-	sprintf(time_macro_text, "__TIME__=\"%.*s\"", 8, date_text+11);  // "hh:mm:ss" part
-	PUSH(paths.system_macros, zstr(time_macro_text));
-
-	if (options.target.version & Features_C23) {
-		PUSH(paths.system_macros, zstr("__STDC_VERSION__=202311L"));
-		PUSH(paths.system_macros, zstr("__STDC_IEC_60559_BFP__=202311L"));
-	} else if (options.target.version & Features_C11) {
-		PUSH(paths.system_macros, zstr("__STDC_VERSION__=201710L"));
-	} else if (options.target.version & Features_C99) {
-		PUSH(paths.system_macros, zstr("__STDC_VERSION__=199901L"));
-	}
-
-
-	if (options.target.version & Features_C99) {
-		PUSH(paths.system_macros, zstr("__STDC_HOSTED__=1"));
-	}
-
-	if (options.target.version & Features_C11) {
-		PUSH(paths.system_macros, zstr("__STDC_ANALYZABLE__=1"));
-		PUSH(paths.system_macros, zstr("__STDC_NO_ATOMICS__=1"));
-		PUSH(paths.system_macros, zstr("__STDC_NO_COMPLEX__=1"));
-		PUSH(paths.system_macros, zstr("__STDC_NO_THREADS__=1"));
-	}
-
-	if (options.target.version & Features_GNU_Extensions) {
-		PUSH(paths.system_macros, zstr("unix=1"));
-		PUSH(paths.system_macros, zstr("__unix__=1"));
-		PUSH(paths.system_macros, zstr("__LITTLE_ENDIAN__=1"));
-	}
-
-
-
-
 
 	if (decls_out) options.emit_decls = openOut(decls_out);
 	if (all_decls_out) options.emit_all_decls = openOut(all_decls_out);
 	if (std_decls_out) options.emit_std_decls = openOut(std_decls_out);
 	options.any_decl_emit = decls_out || all_decls_out || std_decls_out;
 
+	paths.options = &options;
+	setupPaths(&paths, stdinc);
 
-	// The Real Work happens now.
-	Tokenization tokens = lex(&arena, input, paths);
+	comp.lex_params = paths;
 
-	const char *out_name = exe_out ? exe_out : obj_name;
-	if (deps_out)
-		emitDeps(deps_out, out_name, tokens.files, true);
-	if (localdeps_out)
-		emitDeps(localdeps_out, out_name, tokens.files, false);
-	if (preproc_out) {
-		FILE *dest = openOut(preproc_out);
-		emitPreprocessed(&tokens, dest);
-		fclose(dest);
-	}
+	comp.ir = openOut(ir_out);
+	comp.preproc = openOut(preproc_out);
+	comp.deps = openOut(deps_out);
+	comp.localdeps = openOut(localdeps_out);
+	comp.decls = openOut(decls_out);
+	comp.all_decls = openOut(all_decls_out);
+	comp.std_decls = openOut(std_decls_out);
 
-	if (!ir_out && !assembly_out && !obj_out && !exe_out &&
-		!decls_out && !all_decls_out && !std_decls_out)
-	{
-		return 0;
-	}
+	for (u32 i = 0; i < compile_inputs.len; i++) {
+		String input = compile_inputs.ptr[i];
 
-	parse(&arena, tokens, &options, &module);
-
-	if (options.emitted_warnings && options.error_on_warnings)
-		generalFatal("generated warnings");
-
-	if (!ir_out && !assembly_out && !obj_out && !exe_out)
-		return 0;
-
-	// Analyses and transformations
-	for (u32 i = 0; i < module.len; i++) {
-		StaticValue *val = &module.ptr[i];
-		if (val->def_state == Def_Defined && val->def_kind == Static_Function) {
-			Blocks linearized = {0};
-			scheduleBlocksStraight(&arena, val->function_ir.entry, &linearized);
-
-			if (opt_store_load) {
-				storeLoadPropagate(val->function_ir, linearized);
-			}
-			if (opt_memreduce) {
-				innerBlockPropagate(val->function_ir, linearized);
-			}
-			if (opt_arith) {
-				resolveCopies(val->function_ir, linearized);
-				u16 *uses = malloc(val->function_ir.len * 2);
-				calcUsage(val->function_ir, uses);
-				arithSimplify(val->function_ir, uses);
-				free(uses);
-			}
-			if (opt_store_load || opt_memreduce || opt_arith)
-				resolveCopies(val->function_ir, linearized);
-
-			// The output passes currently require decimated IR.
-			decimateIr(&val->function_ir, linearized);
-			free(linearized.ptr);
+		comp.assembly = assembly_out;
+		if ((obj_out || exe_out) && !assembly_out) {
+			char *tmp_asm = aalloc(&arena, L_tmpnam+3);
+			tmpnam(tmp_asm);
+			u32 len = strlen(tmp_asm);
+			memcpy(tmp_asm + len, ".s", 3);
+			comp.assembly = tmp_asm;
 		}
+
+		// Cannot emit to stdout when we need to link.
+		if ((obj_out || exe_out) && assembly_out == default_output)
+			comp.assembly = sourceWithSuffix(&arena, input, ".s");
+
+
+		comp.obj = obj_out;
+		if (obj_out == default_output)
+			comp.obj = sourceWithSuffix(&arena, input, ".o");
+
+		if (comp.obj || comp.assembly)
+			PUSH(link_inputs, zstr(comp.obj ? comp.obj : comp.assembly));
+
+		compile(input, comp);
 	}
 
-	EmitParams emit_params = {
-		.arena = &arena,
-		.module = module,
-		.target = &options.target,
-		.files = tokens.files,
-		.emit_debug_info = options.emit_debug,
-		.module_name = input,
-	};
-	// Output
-	if (ir_out) {
-		emit_params.out = openOut(ir_out);
-		emitIr(emit_params);
-		fclose(emit_params.out);
-	}
-
-	if (assembly_out) {
-		emit_params.out = openOut(assembly_out);
-		emitX64AsmSimple(emit_params);
-		fclose(emit_params.out);
-	}
-
-	if (obj_out) {
-		assert(assembly_out);
-		const char *cmd = concat(&arena, "musl-gcc -c -x assembler \"", assembly_out, "\" -o\"", obj_out, "\" > /dev/null", NULL);
-		if (system(cmd))
-			generalFatal("failed to assemble");
-	}
 	if (exe_out) {
-		const char *cmd = concat(&arena, "musl-gcc -static -lm  -x assembler \"", obj_out ? obj_out : assembly_out, "\" -o", exe_out, NULL);
+		assert(link_inputs.len);
+		// STYLE Will need to make some more string manipulation
+		// routines. Weird that I haven't needed them until now.
+		String base = zstr("musl-gcc -static -lm -o '");
+		u32 exe_out_len = strlen(exe_out);
+		u32 len = base.len + exe_out_len + 2 + 1;
+		for (u32 i = 0; i < link_inputs.len; i++)
+			len += link_inputs.ptr[i].len + 3;
+
+		char *p = aalloc(&arena, len);
+		const char *cmd = p;
+
+
+		memcpy(p, base.ptr, base.len);
+		p += base.len;
+		memcpy(p, exe_out, exe_out_len);
+		p += exe_out_len;
+		memcpy(p, "' ", 2);
+		p += 2;
+		for (u32 i = 0; i < link_inputs.len; i++) {
+			String input = link_inputs.ptr[i];
+			*p++ = ' ';
+			*p++ = '\'';
+			memcpy(p, input.ptr, input.len);
+			p += input.len;
+			*p++ = '\'';
+		}
+		*p = 0;
+
 		if (system(cmd)) {
 			if (obj_out)
 				generalFatal("failed to link object files");
@@ -538,18 +517,136 @@ int main (int argc, char **args) {
 		}
 	}
 
+	closeOut(comp.ir);
+	closeOut(comp.preproc);
+	closeOut(comp.deps);
+	closeOut(comp.localdeps);
+	closeOut(comp.decls);
+	closeOut(comp.all_decls);
+	closeOut(comp.std_decls);
+
 	if (runit) {
 		u32 len = strlen(exe_out)+1;
 		char *c = malloc(len);
 		memcpy(c, exe_out, len);
 		char *new_argv[2] = {c, NULL};
 		execve(exe_out, new_argv, NULL);
+		perror("");
+		generalFatal("could not run the generated executabe");
 	}
 
 	free_arena(&arena, "code");
 #ifndef NDEBUG
+	free(paths.user_include_dirs.ptr);
+	free(paths.sys_include_dirs.ptr);
+	free(paths.command_line_macros.ptr);
+	free(paths.system_macros.ptr);
+#endif
+
+	return 0;
+}
+
+static void freeTokens (Tokenization tokens) {
+	// TODO Keep files open!
 	for (u32 i = 0; i < tokens.files.len; i++)
 		free(tokens.files.ptr[i]);
+	free(tokens.symbols.ptr);
+	free(tokens.list.tokens);
+	free(tokens.list.positions);
+	free(tokens.files.ptr);
+}
+
+static void compile(String input, CompileConfig comp) {
+	Tokenization tokens = lex(comp.arena, input, comp.lex_params);
+
+	const char *out_name = sourceWithSuffix(comp.arena, input, ".o");
+	if (comp.deps)
+		emitDeps(comp.deps, out_name, tokens.files, true);
+	if (comp.localdeps)
+		emitDeps(comp.localdeps, out_name, tokens.files, false);
+	if (comp.preproc)
+		emitPreprocessed(&tokens, comp.preproc);
+
+	if (!comp.ir && !comp.assembly && !comp.obj &&
+		!comp.decls && !comp.all_decls && !comp.std_decls)
+	{
+		freeTokens(tokens);
+		return;
+	}
+
+	// TODO Preserve the old module to allow typechecking across
+	// compilation units that will be linked.
+
+	Module module = {0};
+	Options *options = comp.lex_params.options;
+	parse(comp.arena, tokens, options, &module);
+
+	if (options->emitted_warnings && options->error_on_warnings)
+		generalFatal("generated warnings");
+
+	if (!comp.ir && !comp.assembly && !comp.obj) {
+		freeTokens(tokens);
+		return;
+	}
+
+	// Analyses and transformations
+	for (u32 i = 0; i < module.len; i++) {
+		StaticValue *val = &module.ptr[i];
+		if (val->def_state == Def_Defined && val->def_kind == Static_Function) {
+			Blocks linearized = {0};
+			scheduleBlocksStraight(comp.arena, val->function_ir.entry, &linearized);
+
+			if (comp.optimize_store_load) {
+				storeLoadPropagate(val->function_ir, linearized);
+			}
+			if (comp.optimize_memreduce) {
+				innerBlockPropagate(val->function_ir, linearized);
+			}
+			if (comp.optimize_arith) {
+				resolveCopies(val->function_ir, linearized);
+				u16 *uses = malloc(val->function_ir.len * 2);
+				calcUsage(val->function_ir, uses);
+				arithSimplify(val->function_ir, uses);
+				free(uses);
+			}
+			if (comp.optimize_store_load || comp.optimize_memreduce || comp.optimize_arith)
+				resolveCopies(val->function_ir, linearized);
+			// The output passes currently require decimated IR.
+			decimateIr(&val->function_ir, linearized);
+			free(linearized.ptr);
+		}
+	}
+
+	EmitParams emit_params = {
+		.arena = comp.arena,
+		.module = module,
+		.target = &options->target,
+		.files = tokens.files,
+		.emit_debug_info = options->emit_debug,
+		.module_name = input,
+	};
+	// Output
+	if (comp.ir) {
+		emit_params.out = comp.ir;
+		emitIr(emit_params);
+	}
+
+	if (comp.assembly) {
+		emit_params.out = openOut(comp.assembly);
+		emitX64AsmSimple(emit_params);
+		closeOut(emit_params.out);
+	}
+
+	if (comp.obj) {
+		assert(comp.assembly);
+		const char *cmd = concat(comp.arena, "musl-gcc -c -x assembler '", comp.assembly, "'"
+				" -o'", comp.obj, "' > /dev/null", NULL);
+
+		if (system(cmd))
+			generalFatal("failed to assemble");
+	}
+
+
 	for (u32 i = 0; i < module.len; i++) {
 		StaticValue *val = &module.ptr[i];
 		if (val->def_kind == Static_Variable)
@@ -558,19 +655,72 @@ int main (int argc, char **args) {
 			free(val->function_ir.ptr);
 	}
 
-	free(tokens.symbols.ptr);
-	free(tokens.list.tokens);
-	free(tokens.list.positions);
-	free(tokens.files.ptr);
-
-	free(paths.user_include_dirs.ptr);
-	free(paths.sys_include_dirs.ptr);
-	free(paths.command_line_macros.ptr);
-	free(paths.system_macros.ptr);
-#endif
-	return 0;
+	freeTokens(tokens);
 }
 
+
+static void setupPaths(LexParams *paths, bool stdinc) {
+	if (stdinc) {
+		PUSH(paths->sys_include_dirs, zstr(MUSL_DIR "/arch/x86_64/"));
+		PUSH(paths->sys_include_dirs, zstr(MUSL_DIR "/arch/generic/"));
+		PUSH(paths->sys_include_dirs, zstr(MUSL_DIR "/obj/include/"));
+		PUSH(paths->sys_include_dirs, zstr(MUSL_DIR "/include/"));
+		PUSH(paths->sys_include_dirs, zstr("/usr/include/"));
+	}
+
+	PUSH(paths->system_macros, zstr("__STDC__=1"));
+	PUSH(paths->system_macros, zstr("__x86_64__=1"));
+	PUSH(paths->system_macros, zstr("__STDC_IEC_559__=1"));
+
+
+	time_t compilation_time = time(NULL);
+#ifdef __STDC_LIB_EXT1__
+	static char buf[26];
+	ctime_s(buf, 26, &compilation_time);
+	char *date_text = buf;
+#else
+	char *date_text = ctime(&compilation_time);
+#endif
+
+	static char date_macro_text[30] = {0};
+	sprintf(date_macro_text, "__DATE__=\"%.*s %.*s\"",
+		6, date_text+4,   // "Mmm dd" part
+		4, date_text+20); // "yyyy" part
+	PUSH(paths->system_macros, zstr(date_macro_text));
+
+	static char time_macro_text[30] = {0};
+	sprintf(time_macro_text, "__TIME__=\"%.*s\"", 8, date_text+11);  // "hh:mm:ss" part
+	PUSH(paths->system_macros, zstr(time_macro_text));
+
+	Options options = *paths->options;
+	if (options.target.version & Features_C23) {
+		PUSH(paths->system_macros, zstr("__STDC_VERSION__=202311L"));
+		PUSH(paths->system_macros, zstr("__STDC_IEC_60559_BFP__=202311L"));
+	} else if (options.target.version & Features_C11) {
+		PUSH(paths->system_macros, zstr("__STDC_VERSION__=201710L"));
+	} else if (options.target.version & Features_C99) {
+		PUSH(paths->system_macros, zstr("__STDC_VERSION__=199901L"));
+	}
+
+
+	if (options.target.version & Features_C99) {
+		PUSH(paths->system_macros, zstr("__STDC_HOSTED__=1"));
+	}
+
+	if (options.target.version & Features_C11) {
+		PUSH(paths->system_macros, zstr("__STDC_ANALYZABLE__=1"));
+		PUSH(paths->system_macros, zstr("__STDC_NO_ATOMICS__=1"));
+		PUSH(paths->system_macros, zstr("__STDC_NO_COMPLEX__=1"));
+		PUSH(paths->system_macros, zstr("__STDC_NO_THREADS__=1"));
+	}
+
+	if (options.target.version & Features_GNU_Extensions) {
+		PUSH(paths->system_macros, zstr("__GNUC__=4"));
+		PUSH(paths->system_macros, zstr("unix=1"));
+		PUSH(paths->system_macros, zstr("__unix__=1"));
+		PUSH(paths->system_macros, zstr("__LITTLE_ENDIAN__=1"));
+	}
+}
 
 static String checkIncludePath (Arena *arena, const char *path) {
 	if (!isDirectory(path))
@@ -583,6 +733,17 @@ static String checkIncludePath (Arena *arena, const char *path) {
 	c[len] = '/';
 	c[len+1] = 0;
 	return (String) {len + 1, c};
+}
+
+static const char *sourceWithSuffix (Arena *arena, String input, const char *suffix) {
+	u32 len = input.len;
+	u32 suffix_len = strlen(suffix) + 1;
+	if (len > 2 && input.ptr[len-2] == '.' && input.ptr[len-1] == 'c')
+		len -= 2;
+	char *name = aalloc(arena, len + suffix_len);
+	memcpy(name, input.ptr, len);
+	memcpy(name + len, suffix, suffix_len);
+	return name;
 }
 
 static const char *concat (Arena *arena, ...) {
@@ -608,9 +769,8 @@ static const char *concat (Arena *arena, ...) {
 	return joined;
 }
 
-static void emitDeps (const char *deps_out, const char *out_name, FileList files, bool emit_system_files) {
+static void emitDeps (FILE *dest, const char *out_name, FileList files, bool emit_system_files) {
 	const u32 max_line = 80;
-	FILE *dest = openOut(deps_out);
 
 	fprintf(dest, "%s:", out_name);
 	u32 line_length = strlen(out_name) + 1;
@@ -627,6 +787,5 @@ static void emitDeps (const char *deps_out, const char *out_name, FileList files
 		}
 	}
 	fprintf(dest, "\n");
-	fclose(dest);
 }
 

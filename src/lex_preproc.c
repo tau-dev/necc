@@ -175,12 +175,17 @@ Keyword intrinsics[] = {
 	{"__builtin_inff", Intrinsic_Inff},
 
 	{"__builtin_clz", Intrinsic_Clz},
+	{"__builtin_clzl", Intrinsic_Clzll}, // lul
 	{"__builtin_clzll", Intrinsic_Clzll},
 	{"__builtin_ctz", Intrinsic_Ctz},
+	{"__builtin_ctzl", Intrinsic_Ctzll},
 	{"__builtin_ctzll", Intrinsic_Ctzll},
+
 	{"__builtin_expect", Intrinsic_Expect},
 	{"__builtin_frame_address", Intrinsic_FrameAddress},
 	{"__builtin_alloca", Intrinsic_Alloca},
+	{"__builtin_offsetof", Intrinsic_Offsetof},
+	{"__builtin_constant_p", Intrinsic_ConstantP},
 };
 
 #define MAX_TOKENS 4096
@@ -902,7 +907,7 @@ static void loadKeywords (Tokenization *tok, Keyword *keys, u32 count) {
 	}
 }
 
-Tokenization lex (Arena *generated_strings, String filename, LexParams params) {
+Tokenization lex (Arena *generated_strings, String input, LexParams params) {
 	typedef struct {
 		Location loc;
 		const char *pos;
@@ -938,7 +943,15 @@ Tokenization lex (Arena *generated_strings, String filename, LexParams params) {
 
 	// Used so that an invalid file index can be discriminated.
 	PUSH(t.files, NULL);
-	SourceFile *initial_source = readAllAlloc(STRING_EMPTY, filename);
+
+
+	u32 slash = input.len - 1;
+	while (slash > 0 && input.ptr[slash-1] != '/') slash--;
+
+	String input_directory = {slash, input.ptr};
+	String filename = {input.len - slash, input.ptr + slash};
+
+	SourceFile *initial_source = readAllAlloc(input_directory, filename);
 	if (initial_source == NULL)
 		generalFatal("could not open file \"%.*s\"", STRING_PRINTAGE(filename));
 	initial_source->idx = 1;
@@ -1047,7 +1060,8 @@ Tokenization lex (Arena *generated_strings, String filename, LexParams params) {
 					new_source = *already_loaded;
 					new_source->included_count++;
 				} else {
-					if (quoted) {
+					new_source = readAllAlloc(source.path, includefilename);
+					if (quoted && new_source == NULL) {
 						for (u32 i = 0; i < params.user_include_dirs.len; i++) {
 							new_source = readAllAlloc(params.user_include_dirs.ptr[i], includefilename);
 							if (new_source) break;
@@ -1218,7 +1232,10 @@ Tokenization lex (Arena *generated_strings, String filename, LexParams params) {
 		if (t.symbols.ptr[i].macro)
 			free(t.symbols.ptr[i].macro->tokens.ptr);
 	}
+
 	free(map.entries);
+	map = (SymbolMap) {0};
+
 	free_arena(&macro_arena, "macros");
 	mapFree(&sources);
 	return t;
@@ -1297,12 +1314,8 @@ static bool expandInto (const ExpansionParams ex, TokenList *dest, bool is_argum
 						collapseMacroStack(ex.stack, &level_of_argument_source);
 						MacroToken paren = takeToken(ex, &level_of_argument_source);
 						if (paren.tok.kind != Tok_OpenParen) {
-							// FIXME Cannot convert to keyword here: the
-							// token may still form a valid macro call
-							// in an enclosing expansion.
-							// Keywordification can only happen at the
-							// lexer top-level.
-							resolveIdentToKeyword(ex.tok, &t.tok, ex.expansion_start, ex.source.name);
+							if (!is_argument) resolveIdentToKeyword(ex.tok, &t.tok, ex.expansion_start, ex.source.name);
+
 							appendOneToken(dest, t.tok, (TokenLocation) {
 								.source = t.loc, .macro = ex.expansion_start,
 							});
@@ -1325,7 +1338,6 @@ static bool expandInto (const ExpansionParams ex, TokenList *dest, bool is_argum
 				}
 			}
 
-			resolveIdentToKeyword(ex.tok, &t.tok, ex.expansion_start, ex.source.name);
 		} else {
 			non_macro:
 			if (t.tok.kind == Tok_EOF) {
@@ -1357,6 +1369,7 @@ static bool expandInto (const ExpansionParams ex, TokenList *dest, bool is_argum
 			}
 		}
 
+		if (!is_argument && t.tok.kind == Tok_Identifier) resolveIdentToKeyword(ex.tok, &t.tok, ex.expansion_start, ex.source.name);
 		collapseMacroStack(ex.stack, &level_of_argument_source);
 		appendOneToken(dest, t.tok, (TokenLocation) {
 			.source = t.loc,
@@ -1464,11 +1477,6 @@ static MacroToken takeToken (const ExpansionParams ex, u32 *marker) {
 				if (followed_by_concat)
 					return concatenate(ex, t, marker);
 				else {
-					// PERFORMANCE Are multiple branches in the hot path really necessary?
-					// STYLE Copypasta from the lex loop
-
-					if (t.tok.kind == Tok_Identifier)
-						resolveIdentToKeyword(ex.tok, &t.tok, ex.expansion_start, ex.source.name);
 					return t;
 				}
 			}
@@ -1632,7 +1640,7 @@ static void appendOneToken (TokenList *t, Token tok, TokenLocation pos) {
 	t->count++;
 }
 
-inline static void resolveIdentToKeyword(Tokenization *t, Token *tok, Location loc, String name) {
+inline static void resolveIdentToKeyword (Tokenization *t, Token *tok, Location loc, String name) {
 	int keyword = t->symbols.ptr[tok->val.symbol_idx].keyword;
 	if (!keyword)
 		return;
@@ -1978,18 +1986,23 @@ static void preprocExpandLine (ExpansionParams params, TokenList *buf) {
 				}));
 				expandInto(sub, buf, false);
 				continue;
-			} else {
-				non_macro_ident:
-				tok.kind = Tok_IntegerReplaced;
-				tok.literal_type = Int_int;
-				tok.val.integer = 0;
-				if (sym->keyword == Tok_Key_True)
-					tok.val.integer = 1;
-				else if (sym->keyword == Tok_Key_Line)
-					tok.val.integer = begin.line;
 			}
+
 		}
+		non_macro_ident:
+		if (tok.kind == Tok_Identifier) resolveIdentToKeyword(params.tok, &tok, begin, params.source.name);
 		appendOneToken(buf, tok, (TokenLocation) {begin});
+	}
+
+	for (u32 i = 0; i < buf->count; i++) {
+		Token *tok = &buf->tokens[i];
+		if (tok->kind == Tok_Identifier || (tok->kind >= Tok_Key_First && tok->kind <= Tok_Key_Last)) {
+			tok->kind = Tok_IntegerReplaced;
+			tok->literal_type = Int_int;
+			tok->val.integer = 0;
+			if (tok->kind == Tok_Key_True)
+				tok->val.integer = 1;
+		}
 	}
 	*params.src = pos;
 	appendOneToken(buf, (Token) {Tok_EOF}, (TokenLocation) {*params.loc});
@@ -2565,8 +2578,9 @@ void emitPreprocessed (Tokenization *tok, FILE *dest) {
 	for (u32 i = 0; i < list.count-1; i++) {
 		Location loc = sourceOf(list.positions[i]);
 		if (loc.file_id != prev.file_id) {
-			String newfile = tok->files.ptr[loc.file_id]->name;
-			fprintf(dest, "\n#line %llu \"%.*s\"\n", (ullong) loc.line, STRING_PRINTAGE(newfile));
+			SourceFile *newfile = tok->files.ptr[loc.file_id];
+			fprintf(dest, "\n#line %llu \"%.*s%.*s\"\n", (ullong) loc.line,
+					STRING_PRINTAGE(newfile->path), STRING_PRINTAGE(newfile->name));
 			prev = loc;
 		} else if (loc.line != prev.line) {
 			if (loc.line > prev.line && loc.line < prev.line + 6) { // Arbitrary.

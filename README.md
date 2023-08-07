@@ -11,7 +11,7 @@ point of self-hosting, [and can already run some random C projects I found](doc/
 
 ### Building
 
-necc uses the [musl](https://musl.libc.org/) standard library, and
+Necc uses the [musl](https://musl.libc.org/) standard library, and
 currently invokes the GNU assembler as well as musl-gcc for assembly and
 linking.
 
@@ -19,3 +19,8 @@ To build the project, set MUSL\_DIR to the path containing your musl
 installation's include, arch and obj directories, and run GNU `make`;
 the binaries are put into bin/. To execute the tests, run `make test`.
 
+---
+
+Necc is covered by the [BSD 3-clause Clear license](LICENSE). Some files
+in this repository are redistributed from other projects; the applicable
+licenses are contained in the respective files or directories.

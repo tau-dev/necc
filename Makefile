@@ -1,5 +1,5 @@
-C_SRCS := $(wildcard src/*.c)
-C_HDRS := $(wildcard src/*.h)
+C_SRCS := $(wildcard src/*.c) $(wildcard src/*/*.c)
+C_HDRS := $(wildcard src/*.h) $(wildcard src/*/*.h)
 
 C_FLAGS := -lm -std=c11 -Werror -Wall -Wextra -Wno-unused-command-line-argument -pedantic -Wpedantic -Wno-missing-field-initializers \
 	-DMUSL_DIR=\"$(MUSL_DIR)\"
@@ -12,7 +12,8 @@ OBJS := $(patsubst src/%.c,bin/%.o,$(C_SRCS))
 SELFHOST_OBJS := $(patsubst src/%.c,selfhost/%.o,$(C_SRCS))
 SELFSELF_OBJS := $(patsubst src/%.c,selfself/%.o,$(C_SRCS))
 
-REQUIRED_DIRS := bin tests/bin selfhost selfself
+SRC_DIRS := $(sort $(dir $(wildcard src/*/)))
+REQUIRED_DIRS := bin tests/bin selfhost selfself $(patsubst src/%,bin/%,$(SRC_DIRS))
 
 debug: bin/necc-dbg
 
@@ -63,6 +64,7 @@ clean:
 	rm tests/runner
 	rm -f -r bin/*
 	rm -f -r selfhost/*
+	rm -f -r selfself/*
 	rm -f -r tests/bin/*
 	mkdir -p $(REQUIRED_DIRS)
 
@@ -72,11 +74,13 @@ printvars:
 	@echo "Sources: $(C_SRCS)"
 	@echo "Objs: $(OBJS)"
 	@echo "Headers: $(C_HDRS)"
+	@echo "Source Directories: $(SRC_DIRS)"
+	@echo "Required Directories: $(REQUIRED_DIRS)"
 
 lldb: bin/necc-dbg
 	@lldb ./bin/necc-dbg -- test.c
 
 gdb: bin/necc-dbg
-	@gdb --args $^ test.c
+	@gdb --args $^ crash.c
 
 $(shell mkdir -p $(REQUIRED_DIRS))

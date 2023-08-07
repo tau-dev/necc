@@ -114,10 +114,57 @@ typedef enum {
 	Intrinsic_Clzll,
 	Intrinsic_Ctz,
 	Intrinsic_Ctzll,
+
 	Intrinsic_Expect,
 	Intrinsic_FrameAddress,
 	Intrinsic_Alloca,
+	Intrinsic_Offsetof,
+	Intrinsic_ConstantP,
 } Intrinsic;
+
+
+typedef struct {
+	// attribute declaration before case or default label
+	int Attribute_Fallthrough: 1;
+	// declaration, member, enumerator
+	int Attribute_MaybeUnused: 1;
+	// declaration, member, enumerator, label
+	int Attribute_Deprecated: 1;
+	// function
+	int Attribute_Noreturn: 1;
+	// function, definition of a struct/union/enum
+	int Attribute_Nodiscard: 1;
+	// function declarator, type specifier that has a function type
+	int Attribute_Unsequenced: 1;
+	int Attribute_Reproducible: 1;
+
+	// function
+	int Attribute_Constructor: 1;
+	int Attribute_Destructor: 1;
+	// external declaration
+	int Attribute_Weak: 1;
+
+	// struct member
+	int Attribute_Packed: 1;
+	// variable, struct member
+	u32 Attribute_Aligned;
+	// declaration
+	Type mode;
+
+	// variable, type, function
+	enum {
+		Visibility_default,
+		Visibility_hidden,
+		Visibility_internal,
+		Visibility_protected,
+	} Attribute_Visibility;
+
+
+	// declaration
+	Symbol *Attribute_Alias;
+	// automatic variable
+	Symbol *Attribute_Cleanup;
+} Attributes;
 
 typedef struct Tokenization Tokenization;
 u64 evalPreprocExpression(Tokenization tokens, Arena *arena, Options *opt, const Token **pos);
