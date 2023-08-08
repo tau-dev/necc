@@ -11,6 +11,8 @@ fun(int first, ...)
 	va_start(va, first);
 	c = va_arg(va, double);
 	va_end(va);
+	if (first)
+		fun(0, 33.0);
 
 	return c;
 }
@@ -18,5 +20,6 @@ fun(int first, ...)
 int
 main()
 {
-	return fun(1, 33.0);
+	fun(1, 33.0, 1, 1, 1, 1, 1, 1, 1);
+	return fun(1, 33.0, 1, 1, 1, 1, 1, 1);
 }

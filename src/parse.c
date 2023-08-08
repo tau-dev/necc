@@ -413,7 +413,7 @@ static void needAssignableLval(Parse *, const Token *, Value v);
 static void needScalar(Parse *, const Token *, Type t);
 static void discardValue(Parse *, const Token *, Value v);
 static IrRef coerce(Parse *, Value v, Type t, const Token *);
-static IrRef toBoolean(Parse *, const Token *, Value v);
+static IrRef toBoolean(Parse *, const Token *, Value v, u32 res_size);
 static IrRef coercerval(Parse *, Value v, Type t, const Token *, bool allow_casts);
 static Value immediateIntVal(Parse *, Type typ, u64 val);
 static inline void removeEnumness(Parse *, Type *t);
@@ -572,11 +572,13 @@ static Block *getLabeledBlock (Parse *parse, Symbol *sym) {
 static void parseStatement (Parse *parse, bool *had_non_declaration) {
 	IrBuild *build = &parse->build;
 	bool labeled = false;
-	Token t = *parse->pos;
-	bool is_declaration = false;
 
 	Attributes attr = {0};
 	parseAttributes(parse, &attr);
+
+	Token t = *parse->pos;
+	bool is_declaration = false;
+
 
 	while ((t.kind == Tok_Identifier && parse->pos[1].kind == Tok_Colon)
 		|| t.kind == Tok_Key_Case || t.kind == Tok_Key_Default)
@@ -670,7 +672,7 @@ static void parseStatement (Parse *parse, bool *had_non_declaration) {
 		expect(parse, Tok_CloseParen);
 		expect(parse, Tok_Semicolon);
 
-		genBranch(build, toBoolean(parse, primary, condition));
+		genBranch(build, toBoolean(parse, primary, condition, 1));
 		build->insertion_block->exit.branch.on_true = parse->current_loop_head;
 		build->insertion_block->exit.branch.on_false = parse->current_loop_switch_exit;
 
@@ -695,7 +697,7 @@ static void parseStatement (Parse *parse, bool *had_non_declaration) {
 		Value condition = parseExpression(parse);
 		expect(parse, Tok_CloseParen);
 		Block *head_end = build->insertion_block;
-		genBranch(build, toBoolean(parse, primary, condition));
+		genBranch(build, toBoolean(parse, primary, condition, 1));
 		head_end->exit.branch.on_false = parse->current_loop_switch_exit;
 		head_end->exit.branch.on_true = startNewBlock(build, zstr("while_body"));
 
@@ -726,7 +728,7 @@ static void parseStatement (Parse *parse, bool *had_non_declaration) {
 		Block *to_tail = parse->current_loop_head;
 
 		if (!tryEat(parse, Tok_Semicolon)) {
-			IrRef cond = toBoolean(parse, primary, parseExpression(parse));
+			IrRef cond = toBoolean(parse, primary, parseExpression(parse), 1);
 			expect(parse, Tok_Semicolon);
 
 			genBranch(build, cond);
@@ -769,7 +771,7 @@ static void parseStatement (Parse *parse, bool *had_non_declaration) {
 		expect(parse, Tok_OpenParen);
 		Value condition = parseExpression(parse);
 		expect(parse, Tok_CloseParen);
-		genBranch(build, toBoolean(parse, primary, condition));
+		genBranch(build, toBoolean(parse, primary, condition, 1));
 		Block *head = build->insertion_block;
 
 		head->exit.branch.on_true = startNewBlock(build, zstr("if_true"));
@@ -994,7 +996,7 @@ static Value parseExprConditional (Parse *parse) {
 		IrBuild *build = &parse->build;
 		Block *head = build->insertion_block;
 
-		IrRef ir = toBoolean(parse, primary, cond);
+		IrRef ir = toBoolean(parse, primary, cond, 1);
 
 		// Some hacks to allow constant expressions.
 		// TODO Figure out a way to fold this purely in the IR
@@ -1064,11 +1066,12 @@ static Value parseExprConditional (Parse *parse) {
 static Value parseExprOr (Parse *parse) {
 	Value lhs = parseExprAnd(parse);
 	const Token *primary = parse->pos;
+	const u16 int_size = parse->target.int_size;
 
 	if (parse->pos->kind == Tok_DoublePipe)
-		lhs = rvalue(lhs, parse);
+		lhs = (Value) {BASIC_INT, toBoolean(parse, parse->pos, lhs, int_size)};
+
 	while (tryEat(parse, Tok_DoublePipe)) {
-		const u16 int_size = parse->target.int_size;
 		IrBuild *build = &parse->build;
 		Block *head = build->insertion_block;
 
@@ -1076,23 +1079,22 @@ static Value parseExprOr (Parse *parse) {
 		Inst inst = build->ir.ptr[lhs.inst];
 		// TODO Really need constant folding for branches to avoid this kind of stuff
 		if (inst.kind == Ir_Constant || inst.kind == Ir_Reloc) {
-			IrRef res;
 			if (inst.kind == Ir_Reloc || inst.constant != 0) {
 				Type t = parseValueType(parse, parseExprAnd);
 				(void) t; // TODO Typecheck.
-				res = genImmediateInt(build, 1, int_size);
 			} else {
-				res = toBoolean(parse, primary, parseExprAnd(parse));
+				lhs = (Value) {BASIC_INT,
+					toBoolean(parse, primary, parseExprAnd(parse), int_size)
+				};
 			}
-			lhs = (Value) {BASIC_INT, res};
 		} else {
 			IrRef constant = genPhiOut(build, genImmediateInt(build, 1, int_size));
-			genBranch(build, toBoolean(parse, primary, lhs));
+			genBranch(build, toBoolean(parse, primary, lhs, 1));
 			head->exit.branch.on_false = startNewBlock(build, STRING_EMPTY);
 
 			Value rhs = parseExprAnd(parse);
 
-			IrRef rhs_val = genPhiOut(build, toBoolean(parse, primary, rhs));
+			IrRef rhs_val = genPhiOut(build, toBoolean(parse, primary, rhs, int_size));
 			Block *join = newBlock(&parse->build, STRING_EMPTY);
 			genJump(build, join);
 			head->exit.branch.on_true = join;
@@ -1110,10 +1112,12 @@ static Value parseExprOr (Parse *parse) {
 static Value parseExprAnd (Parse *parse) {
 	Value lhs = parseExprBitOr(parse);
 	const Token *primary = parse->pos;
+	const u16 int_size = parse->target.int_size;
+
 	if (parse->pos->kind == Tok_DoubleAmpersand)
-		lhs = rvalue(lhs, parse);
+		lhs = (Value) {BASIC_INT, toBoolean(parse, parse->pos, lhs, int_size)};
+
 	while (tryEat(parse, Tok_DoubleAmpersand)) {
-		const u16 int_size = parse->target.int_size;
 		IrBuild *build = &parse->build;
 		Block *head = build->insertion_block;
 
@@ -1121,23 +1125,22 @@ static Value parseExprAnd (Parse *parse) {
 		Inst inst = build->ir.ptr[lhs.inst];
 		// TODO Really need constant folding for branches to avoid this kind of stuff
 		if (inst.kind == Ir_Constant || inst.kind == Ir_Reloc) {
-			IrRef res;
 			if (inst.kind == Ir_Reloc || inst.constant != 0) {
-				res = toBoolean(parse, primary, parseExprBitOr(parse));
+				lhs = (Value) {BASIC_INT,
+					toBoolean(parse, primary, parseExprBitOr(parse), int_size)
+				};
 			} else {
 				Type t = parseValueType(parse, parseExprBitOr);
 				(void) t; // TODO Typecheck.
-				res = genImmediateInt(build, 0, int_size);
 			}
-			lhs = (Value) {BASIC_INT, res};
 		} else {
 			IrRef constant = genPhiOut(build, genImmediateInt(build, 0, int_size));
-			genBranch(build, toBoolean(parse, primary, lhs));
+			genBranch(build, toBoolean(parse, primary, lhs, 1));
 			head->exit.branch.on_true = startNewBlock(build, STRING_EMPTY);
 
 			Value rhs = parseExprBitOr(parse);
 
-			IrRef rhs_val = genPhiOut(build, toBoolean(parse, primary, rhs));
+			IrRef rhs_val = genPhiOut(build, toBoolean(parse, primary, rhs, int_size));
 			Block *join = newBlock(&parse->build, STRING_EMPTY);
 			genJump(build, join);
 			head->exit.branch.on_false = join;
@@ -1562,6 +1565,7 @@ static Value parseExprPostfix (Parse *parse) {
 			parse->pos++;
 
 			if (arrow) {
+				v = rvalue(v, parse);
 				if (v.typ.kind != Kind_Pointer)
 					parseerror(parse, NULL, "the arrow %s->%s operator expects a pointer value. You may want to use a regular dot", BOLD, RESET);
 				v = dereference(parse, v, primary);
@@ -1574,11 +1578,6 @@ static Value parseExprPostfix (Parse *parse) {
 			if (isByref(v)) {
 				IrRef offset = genImmediateInt(build, member.offset, typeSize(parse->target.intptr, &parse->target));
 				v.inst = genAdd(build, v.inst, offset, Unsigned);
-
-				if (isAnyArray(member.type)) {
-					v.typ = (Type) {Kind_Pointer, .pointer = member.type.array.inner};
-					v.category = Ref_RValue;
-				}
 			} else {
 				assert(!isAnyArray(member.type) && "TODO Rvalue arrays");
 				v.inst = genAccess(build, v.inst, member.offset, typeSize(v.typ, &parse->target));
@@ -2053,6 +2052,8 @@ static Value parseIntrinsic (Parse *parse, Intrinsic i) {
 	case Intrinsic_Clzll:
 	case Intrinsic_Ctz:
 	case Intrinsic_Ctzll:
+	case Intrinsic_Popcount:
+	case Intrinsic_Popcountll:
 	case Intrinsic_Nanf:
 	case Intrinsic_Inff:
 	case Intrinsic_FrameAddress:
@@ -2769,7 +2770,7 @@ static bool tryParseTypeBase (Parse *parse, Type *type, u8 *storage_dest, Attrib
 
 			// Hacky way to correctly accept re-typedefs.
 			// TODO Find a correct parser.
-			if (sym && sym->ordinary && sym->ordinary->kind == Sym_Typedef && !bases
+			if (sym && sym->ordinary && sym->ordinary->kind == Sym_Typedef && !bases && !longness[0] && !shortness
 				&& !(storage == Storage_Typedef &&
 					(parse->pos[1].kind == Tok_Semicolon || parse->pos[1].kind == Tok_Comma)))
 			{
@@ -2945,7 +2946,7 @@ static Type parseStructUnionBody(Parse *parse, bool is_struct) {
 				u64 bitsize;
 				if (!tryIntConstant(parse, parseExpression(parse), &bitsize))
 					parseerror(parse, colon, "the width of a bit field must be a constant integer expression");
-				parsemsg(Log_Warn, parse, colon, "TODO bit-fields");
+// 				parsemsg(Log_Warn, parse, colon, "TODO bit-fields");
 			}
 
 			// TODO Support VLAs
@@ -3721,7 +3722,6 @@ static Value dereference (Parse *parse, Value v, const Token *primary) {
 				printTypeHighlighted(parse->arena, inner));
 	}
 
-
 	if (isByref(v))
 		v.inst = genLoad(&parse->build, v.inst, typeSize(v.typ, &parse->target), v.typ.qualifiers & Qualifier_Volatile);
 	v.typ = inner;
@@ -3814,7 +3814,7 @@ static IrRef coerce (Parse *p, Value v, Type t, const Token *primary) {
 	return coercerval(p, rvalue(v, p), t, primary, false);
 }
 
-static IrRef toBoolean (Parse *p, const Token *primary, Value v) {
+static IrRef toBoolean (Parse *p, const Token *primary, Value v, u32 res_size) {
 	IrBuild *build = &p->build;
 	v = rvalue(v, p);
 	removeEnumness(p, &v.typ);
@@ -3825,7 +3825,7 @@ static IrRef toBoolean (Parse *p, const Token *primary, Value v) {
 	u32 size = typeSize(v.typ, &p->target);
 	IrRef zero = genImmediateInt(build, 0, size);
 
-	return genNot(build, genEquals(build, rvalue(v, p).inst, zero, p->target.int_size, v.typ.kind == Kind_Float));
+	return genNot(build, genEquals(build, rvalue(v, p).inst, zero, res_size, v.typ.kind == Kind_Float));
 }
 
 // Performs implicit conversions on rvalues.
@@ -3841,7 +3841,7 @@ static IrRef coercerval (Parse *p, Value v, Type t, const Token *primary, bool a
 	if (typeCompatible(t, v.typ))
 		return v.inst;
 	if (t.kind == Kind_Basic && t.basic == Int_bool)
-		return toBoolean(p, primary, v);
+		return toBoolean(p, primary, v, 1);
 
 	// Integer conversions
 	if (t.kind == Kind_Basic) {

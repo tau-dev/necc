@@ -114,6 +114,8 @@ typedef enum {
 	Intrinsic_Clzll,
 	Intrinsic_Ctz,
 	Intrinsic_Ctzll,
+	Intrinsic_Popcount,
+	Intrinsic_Popcountll,
 
 	Intrinsic_Expect,
 	Intrinsic_FrameAddress,

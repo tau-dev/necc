@@ -189,7 +189,10 @@ Keyword intrinsics[] = {
 	{"__builtin_clzll", Intrinsic_Clzll},
 	{"__builtin_ctz", Intrinsic_Ctz},
 	{"__builtin_ctzl", Intrinsic_Ctzll},
-	{"__builtin_ctzll", Intrinsic_Ctzll},
+	{"__builtin_ctzl", Intrinsic_Ctzll},
+	{"__builtin_popcount", Intrinsic_Popcount},
+	{"__builtin_popcountl", Intrinsic_Popcountll},
+	{"__builtin_popcountll", Intrinsic_Popcountll},
 
 	{"__builtin_expect", Intrinsic_Expect},
 	{"__builtin_frame_address", Intrinsic_FrameAddress},
@@ -1062,7 +1065,9 @@ Tokenization lex (Arena *generated_strings, String input, LexParams params) {
 				bool quoted;
 				String includefilename = includeFilename(expansion, &preproc_evaluation_buf, &quoted);
 
-				SourceFile *new_source = tryOpen(&sources, &t.files, source.plain_path, includefilename);
+				SourceFile *new_source = NULL;
+				if (quoted)
+					new_source = tryOpen(&sources, &t.files, source.plain_path, includefilename);
 				if (quoted && new_source == NULL) {
 					for (u32 i = 0; i < params.user_include_dirs.len; i++) {
 						new_source = tryOpen(&sources, &t.files,  params.user_include_dirs.ptr[i], includefilename);
@@ -1169,7 +1174,6 @@ Tokenization lex (Arena *generated_strings, String input, LexParams params) {
 				if (t.symbols.ptr[tok.val.symbol_idx].name.len != 0)
 					lexerror(source, begin, "unknown preprocessor directive");
 			}
-			first_line_in_file = false;
 			continue;
 		}
 		first_line_in_file = false;
@@ -1844,7 +1848,7 @@ static IfClass skipToElseIfOrEnd (SourceFile source, Location *loc, const char *
 			while (isSpace(*pos) && *pos != '\n') pos++;
 
 			const char *begin = pos;
-			while (*pos && !isSpace(*pos)) pos++;
+			while (*pos && isAlnum(*pos)) pos++;
 			String directive = {pos - begin, begin};
 			if (eql("if", directive) || eql("ifdef", directive) || eql("ifndef", directive)) {
 				while (*pos && *pos != '\n') pos++;
@@ -2361,8 +2365,12 @@ static void predefineMacros (
 
 		u32 equals = 0;
 		while (equals < def.len && def.ptr[equals] != '=') equals++;
+
 		// TODO Without default "1", the name and content parsing would not need to be sparated.
-		source->plain_name = def;
+
+		char *name = malloc(equals);
+		memcpy(name, def.ptr, equals);
+		source->plain_name = (String) {equals, name};
 		source->content = zstr("1");
 		if (equals < def.len) {
 			source->plain_name.len = equals;

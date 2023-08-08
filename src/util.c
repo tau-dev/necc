@@ -155,6 +155,15 @@ SourceLocation findSourcePos (const char *source, const char *pos) {
 	return (SourceLocation) {line, col};
 }
 
+void strAppend (DynString *str, String a) {
+	if (str->len + a.len > str->capacity) {
+		str->capacity = str->capacity * 3 / 2 + a.len;
+		str->ptr = realloc(str->ptr, str->capacity);
+	}
+	if (a.len)
+		memcpy(str->ptr + str->len, a.ptr, a.len);
+	str->len += a.len;
+}
 
 static Log plainLevel (Log l) { return l & ~Log_Fatal & ~Log_Noexpand; }
 

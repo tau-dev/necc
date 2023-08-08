@@ -51,6 +51,7 @@ typedef enum {
 	F_EmitAllDecls,
 	F_EmitStdDecls,
 	F_Run,
+	F_LinkLib,
 
 	F_GCC_Out,
 	F_GCC_Obj,
@@ -74,7 +75,7 @@ static Name flags[] = {
 	{"def", F_Define, Param_Regular},
 	{"g", F_Debug},
 	{"debug", F_Debug},
-	{"std", F_Standard, Param_Assigned},
+	{"std", F_Standard, Param_Assigned | Param_After},
 	{"crash", F_Crashing},
 	{"I", F_Include, Param_Any},
 	{"stdinc", F_StdInc, Param_Regular},
@@ -94,6 +95,7 @@ static Name flags[] = {
 	{"all-decls", F_EmitAllDecls, Param_Assigned},
 	{"std-decls", F_EmitStdDecls, Param_Assigned},
 
+	{"l", F_LinkLib, Param_Any},
 	{"o", F_GCC_Out, Param_Any},
 	{"c", F_GCC_Obj},
 	{"f", F_GCC_Flag, Param_Any},
@@ -299,6 +301,7 @@ int main (int argc, char **args) {
 	LexParams paths = {0};
 	StringList compile_inputs = {0};
 	StringList link_inputs = {0};
+	StringList link_libraries = {0};
 
 	for (int i = 1; i < argc; i++) {
 		if (args[i][0] == '-' && !had_double_dash) {
@@ -348,6 +351,9 @@ int main (int argc, char **args) {
 			case F_EmitAllDecls: setOut(&all_decls_out, arg_param); break;
 			case F_EmitStdDecls: setOut(&std_decls_out, arg_param); break;
 			case F_Run: runit = true; break;
+			case F_LinkLib:
+				PUSH(link_libraries, zstr(arg_param));
+				break;
 
 			case F_GCC_Out:
 				gcc_out = arg_param;
@@ -361,6 +367,8 @@ int main (int argc, char **args) {
 				break;
 
 			case F_Standard: {
+				if (!arg_param)
+					generalFatal("supply a standard version to use");
 				const Name *v = find(arg_param, versions);
 				if (v)
 					options.target.version = v->flag;
@@ -480,35 +488,21 @@ int main (int argc, char **args) {
 
 	if (exe_out) {
 		assert(link_inputs.len);
-		// STYLE Will need to make some more string manipulation
-		// routines. Weird that I haven't needed them until now.
-		String base = zstr("musl-gcc -static -lm -o '");
-		u32 exe_out_len = strlen(exe_out);
-		u32 len = base.len + exe_out_len + 2 + 1;
-		for (u32 i = 0; i < link_inputs.len; i++)
-			len += link_inputs.ptr[i].len + 3;
-
-		char *p = aalloc(&arena, len);
-		const char *cmd = p;
-
-
-		memcpy(p, base.ptr, base.len);
-		p += base.len;
-		memcpy(p, exe_out, exe_out_len);
-		p += exe_out_len;
-		memcpy(p, "' ", 2);
-		p += 2;
+		DynString cmd = {0};
+		strAppend(&cmd, zstr("musl-gcc -static -lm -o '"));
+		strAppend(&cmd, zstr(exe_out));
 		for (u32 i = 0; i < link_inputs.len; i++) {
-			String input = link_inputs.ptr[i];
-			*p++ = ' ';
-			*p++ = '\'';
-			memcpy(p, input.ptr, input.len);
-			p += input.len;
-			*p++ = '\'';
+			strAppend(&cmd, zstr("' '"));
+			strAppend(&cmd, link_inputs.ptr[i]);
 		}
-		*p = 0;
+		for (u32 i = 0; i < link_libraries.len; i++) {
+			strAppend(&cmd, zstr("' -l'"));
+			strAppend(&cmd, link_libraries.ptr[i]);
+		}
 
-		if (system(cmd)) {
+		strAppend(&cmd, (String) {2, "'"});
+
+		if (system(cmd.ptr)) {
 			if (obj_out)
 				generalFatal("failed to link object files");
 			else
@@ -721,7 +715,6 @@ static void setupPaths(LexParams *paths, bool stdinc) {
 	}
 
 	if (options.target.version & Features_GNU_Extensions) {
-		PUSH(paths->system_macros, zstr("__GNUC__=4"));
 		PUSH(paths->system_macros, zstr("unix=1"));
 		PUSH(paths->system_macros, zstr("__unix__=1"));
 		PUSH(paths->system_macros, zstr("__LITTLE_ENDIAN__=1"));

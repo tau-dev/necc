@@ -1327,7 +1327,7 @@ static void emitInstForward (Codegen *c, IrRef i) {
 				arg_stack_memory += param_size;
 			}
 		}
-		arg_stack_memory = (arg_stack_memory + 15) & 16;
+		arg_stack_memory = (arg_stack_memory + 15) / 16 * 16;
 
 		u32 stack_filled = 0;
 		for (u32 i = 0; i < args.len; i++) {

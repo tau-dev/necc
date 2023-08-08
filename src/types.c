@@ -186,6 +186,8 @@ bool typeCompatible (Type a, Type b) {
 	case Kind_Array:
 		return a.array.count == b.array.count &&
 				typeCompatible(*a.array.inner, *b.array.inner);
+	case Kind_UnsizedArray:
+		return typeCompatible(*a.array.inner, *b.array.inner);
 	default:
 		unreachable;
 	}

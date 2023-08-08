@@ -6,6 +6,11 @@
 #endif
 
 
+#if defined(_WIN32)
+#define HAVE_WINDOWS 1
+#endif
+
+
 #include <stdlib.h>
 #include <assert.h>
 #include <string.h>
@@ -15,21 +20,9 @@
 #include <stdio.h>
 
 
-#if defined(_WIN32)
-#define HAVE_WINDOWS 1
-#endif
-
-
 #define SPAN(type) struct { size_t len; type *ptr; }
-typedef SPAN(const char) String;
-typedef SPAN(char) MutableString;
 #define SPAN_EQL(a, b) (sizeof(*(a).ptr) == sizeof(*(b).ptr) && (a).len == (b).len && memcmp((a).ptr, (b).ptr, sizeof(*(a).ptr) * (a).len) == 0)
-// #define STRING(text) (String) { .len = strlen(text), .ptr = text }
-#define STRING_EMPTY ((String) {0})
 #define ARRAY_SPAN(arr) {sizeof(arr)/sizeof((arr)[0]), (arr)}
-
-// Generate arguments for printf("%.*s", ...);
-#define STRING_PRINTAGE(str) ((int) (str).len), ((str).ptr)
 
 
 #define LIST(type) struct { size_t capacity; size_t len; type *ptr; }
@@ -53,7 +46,7 @@ typedef SPAN(char) MutableString;
 	} while (0);
 #define PUSH_A(arena, list, value) \
 	do { \
-		if ((list).len >= (list).capacity) {\
+		if ((list).len >= (list).capacity) { \
 			(list).capacity = (list).len * 2 + 4; \
 			void *new = aalloc(arena, sizeof(*(list).ptr) * (list).capacity); \
 			if ((list).ptr) memcpy(new, (list).ptr, sizeof(*(list).ptr) * (list).len); \
@@ -63,33 +56,37 @@ typedef SPAN(char) MutableString;
 		(list).len++; \
 	} while (0);
 
+
 #define POP(list) (assert((list).len > 0), (list).ptr[--(list).len])
 #define LAST(list) ((list).ptr[(list).len-1])
 
+#define STRING_EMPTY ((String) {0})
+// Generate arguments for printf("%.*s", ...);
+#define STRING_PRINTAGE(str) ((int) (str).len), ((str).ptr)
+
+typedef SPAN(const char) String;
+typedef SPAN(char) MutableString;
 typedef LIST(String) StringList;
+typedef LIST(char) DynString;
+
+void strAppend(DynString *str, String s);
+
 
 
 // #define CHECK(a, msg) do { if (!(a)) {puts("error: " msg); exit(EXIT_FAILURE); } } while(0)
 #define unreachable (assert(!"unreachable"))
 
 
-
 #if (__STDC_VERSION__ >= 201904L) || (defined(_MSC_VER) && (_MSC_VER >= 1911) && (_MSVC_LANG >= 201703L))
-
-#define FALLTHROUGH [[fallthrough]]
-#define nodiscard [[nodiscard]]
-#define STATIC_ASSERT static_assert
-
+ #define FALLTHROUGH [[fallthrough]]
+ #define nodiscard [[nodiscard]]
+ #define STATIC_ASSERT static_assert
 #elif defined(__GNUC__)
-
-#define FALLTHROUGH __attribute__((fallthrough))
-#define nodiscard __attribute__((warn_unused_result))
-
+ #define FALLTHROUGH __attribute__((fallthrough))
+ #define nodiscard __attribute__((warn_unused_result))
 #else
-
-#define FALLTHROUGH
-#define nodiscard
-
+ #define FALLTHROUGH
+ #define nodiscard
 #endif
 
 
