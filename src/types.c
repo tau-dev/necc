@@ -53,7 +53,7 @@ u32 typeSize (Type t, const Target *target) {
 	case Kind_Struct: {
 		u32 max_alignment = 1;
 		u32 tightsize = 0;
-		for (u32 i = 0; i < t.compound.members.len; i++) {
+		foreach (i, t.compound.members) {
 			CompoundMember member = t.compound.members.ptr[i];
 			u32 align = typeAlignment(member.type, target);
 			if (align > max_alignment)
@@ -135,7 +135,7 @@ bool fnTypeCompatible (FunctionType a, FunctionType b) {
 	if (a.parameters.len != b.parameters.len)
 		return false;
 
-	for (u32 u = 0; u < a.parameters.len; u++)
+	foreach (u, a.parameters)
 		if (!typeCompatible(a.parameters.ptr[u].type, b.parameters.ptr[u].type))
 			return false;
 	return true;
@@ -407,7 +407,7 @@ void printTypeTail (Type t, char **pos, const char *end) {
 		break;
 	case Kind_Function:
 		printto(pos, end, "(");
-		for (size_t i = 0; i < t.function.parameters.len; i++) {
+		foreach (i, t.function.parameters) {
 			Declaration param = t.function.parameters.ptr[i];
 
 			printComplete(pos, end, param.type, param.name ? param.name->name : STRING_EMPTY);

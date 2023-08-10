@@ -174,7 +174,7 @@ typedef enum {
 	DeclKind_Typedef,
 } DeclKind;
 
-static Declaration parseDeclarator(Parse *, Type base_type, Namedness);
+static Declaration parseDeclarator(Parse *, Type base_type, Namedness, Attributes *attr);
 static inline void markDecl(const Parse *, const Token *, Declaration, DeclKind);
 static inline void markDeclScopeBegin(String name);
 static inline void markDeclScopeEnd();
@@ -267,7 +267,7 @@ void parse (Arena *code_arena, Tokenization tokens, Options *opt, Module *module
 
 			Attributes declarator_attr = attr;
 			parseAttributes(&parse, &declarator_attr);
-			Declaration decl = parseDeclarator(&parse, base_type, Decl_Named);
+			Declaration decl = parseDeclarator(&parse, base_type, Decl_Named, &declarator_attr);
 			parseAttributes(&parse, &declarator_attr);
 
 
@@ -295,7 +295,7 @@ void parse (Arena *code_arena, Tokenization tokens, Options *opt, Module *module
 				parse.current_func_id = IDX_NONE;
 				parse.scope_depth = 0;
 
-				StaticValue *val = &parse.module->ptr[ord->static_id];
+				StaticValue *val = &module->ptr[ord->static_id];
 				val->def_state = Def_Defined;
 				val->function_ir = parse.build.ir;
 
@@ -315,8 +315,8 @@ void parse (Arena *code_arena, Tokenization tokens, Options *opt, Module *module
 		}
 	}
 
-	for (u32 i = 0; i < module->len; i++) {
-		StaticValue *val = &parse.module->ptr[i];
+	foreach (i, *module) {
+		StaticValue *val = &module->ptr[i];
 		if (val->def_state == Def_Tentative) {
 			initializeStaticToZero(&parse, val);
 		} else if (val->is_used && val->def_state == Def_Undefined && !val->is_public)
@@ -356,7 +356,7 @@ Scope pushScope (Parse *parse) {
 void popScope (Parse *parse, Scope replacement) {
 	Scope def = parse->current_scope;
 
-	for (u32 i = 0; i < def.len; i++) {
+	foreach (i, def) {
 		OrdinaryIdentifier *ord = def.ptr[i]->ordinary;
 		assert(!ord || ord->scope_depth <= parse->scope_depth);
 		if (ord && ord->scope_depth == parse->scope_depth) {
@@ -491,7 +491,7 @@ void parseFunction (Parse *parse, Symbol *symbol) {
 		sym->value = (Value) {param.type, slot, Ref_LValue};
 	}
 
-	Symbol *func___sym = parse->tokens.special_identifiers[Special___func__];
+	Symbol *func___sym = parse->tokens.special_identifiers[Special_func];
 	char *terminated = aalloc(parse->code_arena, name.len + 1);
 	memcpy(terminated, name.ptr, name.len);
 	terminated[name.len] = 0;
@@ -527,7 +527,7 @@ void parseFunction (Parse *parse, Symbol *symbol) {
 
 	popScope(parse, enclosing);
 
-	for (u32 i = 0; i < parse->func_goto_labels.len; i++) {
+	foreach (i, parse->func_goto_labels) {
 		Symbol *sym = parse->func_goto_labels.ptr[i];
 		Block *b = sym->label.block;
 		if (b && b->exit.kind == Exit_None)
@@ -875,7 +875,8 @@ static void parseStatement (Parse *parse, bool *had_non_declaration) {
 
 		do {
 			const Token *decl_token = parse->pos;
-			Declaration decl = parseDeclarator(parse, base_type, Decl_Named);
+			Attributes declarator_attr = attr;
+			Declaration decl = parseDeclarator(parse, base_type, Decl_Named, &declarator_attr);
 
 			const Token *definer = NULL;
 			if (parse->pos->kind == Tok_Equal)
@@ -992,74 +993,82 @@ static Value parseExprConditional (Parse *parse) {
 	Value cond = parseExprOr(parse);
 
 	const Token *primary = parse->pos;
-	if (tryEat(parse, Tok_Question)) {
-		IrBuild *build = &parse->build;
-		Block *head = build->insertion_block;
+	if (!tryEat(parse, Tok_Question))
+		return cond;
 
-		IrRef ir = toBoolean(parse, primary, cond, 1);
+	IrBuild *build = &parse->build;
+	Block *head = build->insertion_block;
 
-		// Some hacks to allow constant expressions.
-		// TODO Figure out a way to fold this purely in the IR
-		Inst inst = build->ir.ptr[ir];
-		if (inst.kind == Ir_Constant) {
-			Value res;
-			if (inst.constant) {
-				res = parseExprAssignment(parse);
-				expect(parse, Tok_Colon);
-				Block *b = build->insertion_block;
-				startNewBlock(build, zstr("dummy"));
-				parseExprConditional(parse);
-				build->insertion_block = b;
-			} else {
-				Block *b = build->insertion_block;
-				startNewBlock(build, zstr("dummy"));
-				parseExprAssignment(parse);
-				expect(parse, Tok_Colon);
-				build->insertion_block = b;
-				res = parseExprConditional(parse);
-			}
-			return res;
+	IrRef ir = toBoolean(parse, primary, cond, 1);
+
+	// Some hacks to allow constant expressions.
+	// TODO Figure out a way to fold this purely in the IR
+	Inst inst = build->ir.ptr[ir];
+	if (inst.kind == Ir_Constant) {
+		Value res;
+		if (inst.constant) {
+			res = parseExprAssignment(parse);
+			expect(parse, Tok_Colon);
+			Block *b = build->insertion_block;
+			startNewBlock(build, zstr("dummy"));
+			parseExprConditional(parse);
+			build->insertion_block = b;
+		} else {
+			Block *b = build->insertion_block;
+			startNewBlock(build, zstr("dummy"));
+			parseExprAssignment(parse);
+			expect(parse, Tok_Colon);
+			build->insertion_block = b;
+			res = parseExprConditional(parse);
 		}
+		return res;
+	}
 
-		// This has to generate instructions out of block
-		// order—because the two expressions need to be joined after
-		// both types are known. Maybe the reordering pass really is
-		// necessary.
+	// This has to generate instructions out of block
+	// order—because the two expressions need to be joined after
+	// both types are known. Maybe the reordering pass really is
+	// necessary.
 
-		genBranch(build, ir);
-		head->exit.branch.on_true = startNewBlock(build, STRING_EMPTY);
-		Value lhs = rvalue(parseExprAssignment(parse), parse);
-		Block *true_branch = build->insertion_block;
+	genBranch(build, ir);
+	head->exit.branch.on_true = startNewBlock(build, STRING_EMPTY);
+	Value lhs = rvalue(parseExprAssignment(parse), parse);
+	Block *true_branch = build->insertion_block;
 
-		const Token *colon = parse->pos;
-		expect(parse, Tok_Colon);
+	const Token *colon = parse->pos;
+	expect(parse, Tok_Colon);
 
-		head->exit.branch.on_false = startNewBlock(build, STRING_EMPTY);
-		Value rhs = rvalue(parseExprConditional(parse), parse);
+	head->exit.branch.on_false = startNewBlock(build, STRING_EMPTY);
+	Value rhs = rvalue(parseExprConditional(parse), parse);
 
-		Type common;
-		if (typeCompatible(lhs.typ, rhs.typ))
-			common = lhs.typ;
-		else if (comparablePointers(parse, lhs, rhs))
-			// For function-null comparison
-			common = lhs.typ.kind == Kind_Pointer ? lhs.typ : rhs.typ;
-		else // This can only generate an extension instruction, which will be reordered into the right block.
-			common = arithmeticConversions(parse, colon, &rhs, &lhs);
+	Type common;
+	if (typeCompatible(lhs.typ, rhs.typ))
+		common = lhs.typ;
+	else if (comparablePointers(parse, lhs, rhs))
+		// For function-null comparison
+		common = lhs.typ.kind == Kind_Pointer ? lhs.typ : rhs.typ;
+	else // This can only generate an extension instruction, which will be reordered into the right block.
+		common = arithmeticConversions(parse, colon, &rhs, &lhs);
 
-		IrRef src_r = genPhiOut(build, coercerval(parse, rhs, common, colon, true));
+	if (common.kind == Kind_Void) {
 		Block *join = newBlock(&parse->build, STRING_EMPTY);
 		genJump(build, join);
-
 		build->insertion_block = true_branch;
-		IrRef src_l = genPhiOut(build, coercerval(parse, lhs, common, colon, true));
 		genJump(build, join);
-
-		IrRef dest = genPhiIn(build, typeSize(common, &parse->target));
-		setPhiOut(build, src_l, dest, IDX_NONE);
-		setPhiOut(build, src_r, dest, IDX_NONE);
-		cond = (Value) {common, dest};
+		return (Value) {BASIC_VOID};
 	}
-	return cond;
+
+	IrRef src_r = genPhiOut(build, coercerval(parse, rhs, common, colon, true));
+	Block *join = newBlock(&parse->build, STRING_EMPTY);
+	genJump(build, join);
+
+	build->insertion_block = true_branch;
+	IrRef src_l = genPhiOut(build, coercerval(parse, lhs, common, colon, true));
+	genJump(build, join);
+
+	IrRef dest = genPhiIn(build, typeSize(common, &parse->target));
+	setPhiOut(build, src_l, dest, IDX_NONE);
+	setPhiOut(build, src_r, dest, IDX_NONE);
+	return (Value) {common, dest};
 }
 
 
@@ -2270,7 +2279,7 @@ u32 findDesignatedMemberIdx (Parse *parse, Type type) {
 	}
 	Members members = type.compound.members;
 	Symbol *sym = expect(parse, Tok_Identifier).val.symbol;
-	for (u32 idx = 0; idx < members.len; idx++) {
+	foreach (idx, members) {
 		if (members.ptr[idx].name == sym)
 			return idx;
 	}
@@ -2376,8 +2385,8 @@ static bool tryParseTypeName (Parse *parse, Type *type, u8 *storage_dest) {
 	if (!tryParseTypeBase(parse, &base, storage_dest, &attr))
 		return false;
 
-	Declaration decl = parseDeclarator(parse, base, Decl_Abstract);
-	parseAttributes(parse, &attr);
+	Declaration decl = parseDeclarator(parse, base, Decl_Abstract, &attr);
+
 	*type = decl.type;
 	return true;
 }
@@ -2545,7 +2554,7 @@ static bool tryParseTypeBase (Parse *parse, Type *type, u8 *storage_dest, Attrib
 							prev.compound.members.len == body_type.compound.members.len)
 						{
 							equal = true;
-							for (u32 i = 0; i < prev.compound.members.len; i++) {
+							foreach (i, prev.compound.members) {
 								if (!typeCompatible(prev.compound.members.ptr[i].type, body_type.compound.members.ptr[i].type)) {
 									equal = false;
 									break;
@@ -2900,8 +2909,8 @@ static Type parseStructUnionBody(Parse *parse, bool is_struct) {
 			continue;
 
 		u8 storage;
-		Attributes field_attr;
-		Type base = parseTypeBase(parse, &storage, &field_attr);
+		Attributes field_base_attr;
+		Type base = parseTypeBase(parse, &storage, &field_base_attr);
 		if (storage != Storage_Unspecified)
 			parseerror(parse, begin, "members cannot specify storage");
 
@@ -2915,7 +2924,7 @@ static Type parseStructUnionBody(Parse *parse, bool is_struct) {
 			u32 offset = 0;
 			if (is_struct)
 				offset = addMemberOffset(&current_offset, t, &parse->target);
-			for (u32 i = 0; i < t.compound.members.len; i++) {
+			foreach (i, t.compound.members) {
 				// TODO Check that the last member is not a flexible array.
 				CompoundMember m = t.compound.members.ptr[i];
 				m.offset += offset;
@@ -2928,9 +2937,10 @@ static Type parseStructUnionBody(Parse *parse, bool is_struct) {
 			const Token *begin = parse->pos;
 			bool bare_colon = tryEat(parse, Tok_Colon);
 
+			Attributes field_attr = field_base_attr;
 			Declaration decl;
 			if (!bare_colon)
-				decl = parseDeclarator(parse, base, Decl_Named);
+				decl = parseDeclarator(parse, base, Decl_Named, &field_attr);
 
 			if (bare_colon || tryEat(parse, Tok_Colon)) {
 				const Token *colon = parse->pos - 1;
@@ -2982,10 +2992,11 @@ static Type parseStructUnionBody(Parse *parse, bool is_struct) {
 	};
 }
 
-u8 parseQualifiers (Parse *parse) {
+u8 parseQualifiers (Parse *parse, Attributes *attr) {
 	u8 qual = 0;
 	while (true) {
 		u8 new = 0;
+		parseAttributes(parse, attr);
 		TokenKind tok = parse->pos->kind;
 		if (tok == Tok_Key_Const)
 			new = Qualifier_Const;
@@ -3023,29 +3034,29 @@ static bool allowedNoDeclarator (Parse *parse, Type base_type) {
 	}
 }
 
-static Declaration parseDeclarator (Parse *parse, Type base_type, Namedness named) {
+static Declaration parseDeclarator (Parse *parse, Type base_type, Namedness named, Attributes *attr) {
 	Declaration decl = {
 		.type = base_type,
 	};
 
+	// FIXME Fix the associativity of the attributes. Put the relevant attrubutes on the types.
+	parseAttributes(parse, attr);
+
 	if (decl.type.kind == Kind_Function && tryEat(parse, Tok_Asterisk)) {
 		decl.type.kind = Kind_FunctionPtr;
-		Attributes dummy = {0};
-		parseAttributes(parse, &dummy);
-		decl.type.qualifiers = parseQualifiers(parse);
+		decl.type.qualifiers = parseQualifiers(parse, attr);
 	}
 
 	while (parse->pos->kind == Tok_Asterisk) {
 		parse->pos++;
 
 		Attributes dummy = {0};
-		parseAttributes(parse, &dummy);
 
 		Type *ptr = ALLOC(parse->code_arena, Type);
 		*ptr = decl.type;
 
 		decl.type = (Type) {Kind_Pointer,
-			.qualifiers = parseQualifiers(parse),
+			.qualifiers = parseQualifiers(parse, &dummy),
 			.pointer = ptr,
 		};
 	}
@@ -3098,7 +3109,7 @@ static Declaration parseDeclarator (Parse *parse, Type base_type, Namedness name
 				u8 storage;
 				Attributes attr = {0};
 				Type param_type = parseTypeBase(parse, &storage, &attr);
-				Declaration param_decl = parseDeclarator(parse, param_type, Decl_PossiblyAbstract);
+				Declaration param_decl = parseDeclarator(parse, param_type, Decl_PossiblyAbstract, &attr);
 				if (isAnyArray(param_decl.type)) {
 					param_decl.type.kind = Kind_Pointer;
 					param_decl.type.pointer = param_decl.type.array.inner;
@@ -3122,10 +3133,12 @@ static Declaration parseDeclarator (Parse *parse, Type base_type, Namedness name
 
 		while (tryEat(parse, Tok_OpenBracket)) {
 			const Token *open_bracket = parse->pos-1;
+
+			Attributes attr = {0};
 			Type *inner = ALLOC(parse->code_arena, Type);
 			*inner = *pointed_type_level;
 			*pointed_type_level = (Type) {Kind_Array,
-				.qualifiers = parseQualifiers(parse),
+				.qualifiers = parseQualifiers(parse, &attr),
 				.array.inner = inner,
 			};
 			Type *array = pointed_type_level;
@@ -3171,9 +3184,11 @@ static Declaration parseDeclarator (Parse *parse, Type base_type, Namedness name
 	if (begin_inner) {
 		const Token *end = parse->pos;
 		parse->pos = begin_inner;
-		decl = parseDeclarator(parse, decl.type, named);
+
+		decl = parseDeclarator(parse, decl.type, named, attr);
 		parse->pos = end;
 	}
+	parseAttributes(parse, attr);
 
 	return decl;
 }
@@ -3187,7 +3202,7 @@ static void emitDecl(FILE *dest, Arena *arena, SourceFile *source, Location loc,
 	String source_name = sourceName(source);
 	fprintf(dest, "%.*s:%lu:%lu:%s:", STRING_PRINTAGE(source_name),
 			(unsigned long) loc.line, (unsigned long) loc.column, kind_name);
-	for (u32 i = 0; i < decl_scopes.len; i++)
+	foreach (i, decl_scopes)
 		fprintf(dest, "%.*s.", STRING_PRINTAGE(decl_scopes.ptr[i]));
 	fprintf(dest, "%.*s:%s\n", STRING_PRINTAGE(decl.name->name), type_name);
 }
@@ -3218,7 +3233,8 @@ static inline void markDeclScopeEnd() {
 static void parseTypedefDecls(Parse *parse, Type base_type) {
 	do {
 		const Token *begin = parse->pos;
-		Declaration decl = parseDeclarator(parse, base_type, Decl_Named);
+		Attributes attr = {0};
+		Declaration decl = parseDeclarator(parse, base_type, Decl_Named, &attr);
 		// TODO Error on overwriting
 		bool new;
 		OrdinaryIdentifier *ident = genOrdSymbol(parse, decl.name, &new);

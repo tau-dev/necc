@@ -59,6 +59,7 @@
 
 #define POP(list) (assert((list).len > 0), (list).ptr[--(list).len])
 #define LAST(list) ((list).ptr[(list).len-1])
+#define foreach(i, list) for (u32 i = 0; i < (list).len; i++)
 
 #define STRING_EMPTY ((String) {0})
 // Generate arguments for printf("%.*s", ...);
@@ -141,6 +142,9 @@ typedef struct {
 	// root file is 1, predefined macros come after that, then inclulded
 	// files.
 	u32 idx;
+	// ID of the include directory this was found in. Required for
+	// #include_next.
+	u16 next_include_index;
 
 	u32 included_count;
 	SourceKind kind;

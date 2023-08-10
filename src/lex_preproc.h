@@ -150,7 +150,8 @@ typedef enum {
 } TokenKind;
 
 typedef enum {
-	Special___func__,
+	Special_func,
+	Special_VA_ARGS,
 	Special_memcpy,
 	Special_malloc,
 

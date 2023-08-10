@@ -406,7 +406,7 @@ void emitX64AsmSimple(EmitParams params) {
 
 // 	fprintf(params.out, ".intel_syntax\n\n");
 
-	for (u32 i = 0; i < module.len; i++) {
+	foreach (i, module) {
 		StaticValue reloc = module.ptr[i];
 		if (reloc.name.len == 0) {
 			assert(reloc.def_state != Def_Undefined);
@@ -430,7 +430,7 @@ void emitX64AsmSimple(EmitParams params) {
 
 	emit(&globals, ".text\n"
 		".exec_base:");
-	for (u32 i = 0; i < module.len; i++) {
+	foreach (i, module) {
 		StaticValue reloc = module.ptr[i];
 		if (reloc.def_kind == Static_Function && reloc.def_state != Def_Undefined) {
 			emitLabel(module, i);
@@ -443,7 +443,7 @@ void emitX64AsmSimple(EmitParams params) {
 
 	emit(&globals, "\n\n"
 		".data");
-	for (u32 i = 0; i < module.len; i++) {
+	foreach (i, module) {
 		StaticValue reloc = module.ptr[i];
 		if (reloc.def_kind == Static_Variable
 			&& !(reloc.type.qualifiers & Qualifier_Const)
@@ -456,7 +456,7 @@ void emitX64AsmSimple(EmitParams params) {
 
 	emit(&globals, "\n\n"
 		".section .rodata\n");
-	for (u32 i = 0; i < module.len; i++) {
+	foreach (i, module) {
 		StaticValue reloc = module.ptr[i];
 		if (reloc.def_kind == Static_Variable
 			&& (reloc.type.qualifiers & Qualifier_Const)
@@ -492,7 +492,7 @@ void emitX64AsmSimple(EmitParams params) {
 			"	.quad .exec_base\n"
 			"	.quad .exec_end\n");
 
-		for (u32 i = 0; i < module.len; i++) {
+		foreach (i, module) {
 			StaticValue reloc = module.ptr[i];
 			if (reloc.def_kind == Static_Function && reloc.def_state != Def_Undefined) {
 				String name = reloc.name;
@@ -535,6 +535,7 @@ void emitX64AsmSimple(EmitParams params) {
 			"	# include_directories\n"
 			"	.byte 0\n" // TODO
 			"	# file_names\n");
+
 		for (u32 i = 1; i < params.files.len; i++) {
 			SourceFile *file = params.files.ptr[i];
 			emit(&globals,
@@ -554,7 +555,7 @@ void emitX64AsmSimple(EmitParams params) {
 			);
 
 		Location prev = {0};
-		for (u32 i = 0; i < line_marks.len; i++) {
+		foreach (i, line_marks) {
 			DebugMark m = line_marks.ptr[i];
 			Location loc = module.ptr[m.id].function_ir.locations[m.inst];
 
@@ -615,7 +616,7 @@ static void emitData (Codegen *c, Module module, String data, References referen
 	}
 
 	u32 pos = 0;
-	for (u32 i = 0; i < references.len; i++) {
+	foreach (i, references) {
 		Reference ref = references.ptr[i];
 		assert(ref.splice_pos >= pos);
 		emitDataLine(c->out, ref.splice_pos - pos, data.ptr + pos);
@@ -705,7 +706,7 @@ static void emitFunctionForward (EmitParams params, u32 id) {
 	}
 
 	// First mark parameters in order.
-	for (u32 i = 0; i < ir.params.len; i++) {
+	foreach (i, ir.params) {
 		ParameterClass class = classifyParam(c.target, ir.params.ptr[i].type);
 		u32 gp_count = class.count - class.sse_count;
 		if (gp_count > gp_parameter_regs_count - gp_params || class.sse_count > 8 - fp_params)
@@ -729,7 +730,7 @@ static void emitFunctionForward (EmitParams params, u32 id) {
 	}
 
 
-	for (u32 i = 0; i < ir.len; i++) {
+	foreach (i, ir) {
 		Inst inst = ir.ptr[i];
 
 		if (inst.kind == Ir_Parameter)
@@ -759,7 +760,7 @@ static void emitFunctionForward (EmitParams params, u32 id) {
 	u32 mem_params_offset = 16;
 
 	// Copy regular parameters to the stack.
-	for (u32 i = 0; i < c.param_info.len; i++) {
+	foreach (i, c.param_info) {
 		ParamInfo info = c.param_info.ptr[i];
 		if (info.class.count) {
 			for (u32 j = 0; j < info.class.count; j++) {
@@ -798,7 +799,7 @@ static void emitFunctionForward (EmitParams params, u32 id) {
 
 
 	// Initialize the StackAllocs.
-	for (u32 i = 0; i < ir.len; i++) {
+	foreach (i, ir) {
 		Inst inst = ir.ptr[i];
 
 		if (inst.kind == Ir_StackAllocFixed) {
@@ -807,7 +808,7 @@ static void emitFunctionForward (EmitParams params, u32 id) {
 		}
 	}
 
-	for (u32 i = 0; i < linearized.len; i++) {
+	foreach (i, linearized) {
 		emitBlockForward(&c, linearized, i);
 	}
 	free(linearized.ptr);
@@ -900,7 +901,7 @@ static void emitBlockForward (Codegen *c, Blocks blocks, u32 i) {
 		emitJump(c, "jnz", exit.branch.on_true);
 
 
-		for (u32 k = 0; k < false_phis.len; k++) {
+		foreach (k, false_phis) {
 			Inst inst  = c->ir.ptr[false_phis.ptr[k]];
 			emit(c, " mov R, #",
 				loadTo(c, RAX, inst.phi_out.source), inst.phi_out.on_false);
@@ -913,7 +914,7 @@ static void emitBlockForward (Codegen *c, Blocks blocks, u32 i) {
 		assert(!false_phis.len);
 		Cases cases = exit.switch_.cases;
 
-		for (u32 i = 0; i < cases.len; i++) {
+		foreach (i, cases) {
 			u32 size = valueSize(c, exit.switch_.value);
 			if (size == 8) {
 				emit(c, " movabsq $L, R", cases.ptr[i].value, RAX_8);
@@ -1298,7 +1299,7 @@ static void emitInstForward (Codegen *c, IrRef i) {
 
 		u32 arg_stack_memory = 0;
 		ParameterClass *classes = malloc(args.len * sizeof(*classes));
-		for (u32 i = 0; i < args.len; i++) {
+		foreach (i, args) {
 			Argument arg = args.ptr[i];
 			u16 param_size = valueSize(c, arg.arg_inst);
 			ParameterClass class = classifyParam(c->target, arg.type);
@@ -1330,7 +1331,7 @@ static void emitInstForward (Codegen *c, IrRef i) {
 		arg_stack_memory = (arg_stack_memory + 15) / 16 * 16;
 
 		u32 stack_filled = 0;
-		for (u32 i = 0; i < args.len; i++) {
+		foreach (i, args) {
 			if (classes[i].count == 0) {
 				IrRef arg = args.ptr[i].arg_inst;
 				u16 param_size = valueSize(c, arg);
@@ -1678,7 +1679,7 @@ static void classifyMembers(const Target *target, ParameterClass *dest, u8 offse
 	case Kind_Struct:
 	case Kind_Union: {
 		Members m = type.compound.members;
-		for (u32 i = 0; i < m.len; i++)
+		foreach (i, m)
 			classifyMembers(target, dest, offset + m.ptr[i].offset, m.ptr[i].type);
 	} return;
 	case Kind_Array: {

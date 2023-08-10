@@ -83,6 +83,7 @@ struct Symbol {
 	int keyword;
 	int directive;
 	Macro *macro;
+	u32 macro_param;
 
 	OrdinaryIdentifier *ordinary;
 	NameTaggedType *nametagged;

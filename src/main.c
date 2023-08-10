@@ -324,10 +324,10 @@ int main (int argc, char **args) {
 				fprintf(stderr, "%swarning: %sIgnoring unknown flag %s.\n", YELLOW, RESET, args[i]);
 				continue;
 			}
+			if ((flag->param & Param_Appended) && args[i][2])
+				arg_param = args[i] + 2;
 			if (arg_param && !(flag->param & Param_Assigned))
 				generalFatal("flag -%s does not take an =<parameter>", flag->name);
-			if (!arg_param && (flag->param & Param_Appended) && args[i][2])
-				arg_param = args[i] + 2;
 			if (!arg_param && (flag->param & Param_After))
 				arg_param = args[++i];
 
@@ -459,7 +459,7 @@ int main (int argc, char **args) {
 	comp.all_decls = openOut(all_decls_out);
 	comp.std_decls = openOut(std_decls_out);
 
-	for (u32 i = 0; i < compile_inputs.len; i++) {
+	foreach (i, compile_inputs) {
 		String input = compile_inputs.ptr[i];
 
 		comp.assembly = assembly_out;
@@ -489,13 +489,13 @@ int main (int argc, char **args) {
 	if (exe_out) {
 		assert(link_inputs.len);
 		DynString cmd = {0};
-		strAppend(&cmd, zstr("musl-gcc -static -lm -o '"));
+		strAppend(&cmd, zstr("gcc -static -lm -o '"));
 		strAppend(&cmd, zstr(exe_out));
-		for (u32 i = 0; i < link_inputs.len; i++) {
+		foreach (i, link_inputs) {
 			strAppend(&cmd, zstr("' '"));
 			strAppend(&cmd, link_inputs.ptr[i]);
 		}
-		for (u32 i = 0; i < link_libraries.len; i++) {
+		foreach (i, link_libraries) {
 			strAppend(&cmd, zstr("' -l'"));
 			strAppend(&cmd, link_libraries.ptr[i]);
 		}
@@ -541,7 +541,7 @@ int main (int argc, char **args) {
 
 static void freeTokens (Tokenization tokens) {
 	// TODO Keep files open!
-	for (u32 i = 0; i < tokens.files.len; i++) {
+	foreach (i, tokens.files) {
 		SourceFile *file = tokens.files.ptr[i];
 		if (file) {
 			assert(file->idx == i);
@@ -590,7 +590,7 @@ static void compile(String input, CompileConfig comp) {
 	}
 
 	// Analyses and transformations
-	for (u32 i = 0; i < module.len; i++) {
+	foreach (i, module) {
 		StaticValue *val = &module.ptr[i];
 		if (val->def_state == Def_Defined && val->def_kind == Static_Function) {
 			Blocks linearized = {0};
@@ -639,7 +639,7 @@ static void compile(String input, CompileConfig comp) {
 
 	if (comp.obj) {
 		assert(comp.assembly);
-		const char *cmd = concat(comp.arena, "musl-gcc -c -x assembler '", comp.assembly, "'"
+		const char *cmd = concat(comp.arena, "gcc -c -x assembler '", comp.assembly, "'"
 				" -o'", comp.obj, "' > /dev/null", NULL);
 
 		if (system(cmd))
@@ -647,7 +647,7 @@ static void compile(String input, CompileConfig comp) {
 	}
 
 
-	for (u32 i = 0; i < module.len; i++) {
+	foreach (i, module) {
 		StaticValue *val = &module.ptr[i];
 		if (val->def_kind == Static_Variable)
 			free(val->value_references.ptr);
@@ -661,11 +661,9 @@ static void compile(String input, CompileConfig comp) {
 
 static void setupPaths(LexParams *paths, bool stdinc) {
 	if (stdinc) {
-		PUSH(paths->sys_include_dirs, zstr(MUSL_DIR "/arch/x86_64/"));
-		PUSH(paths->sys_include_dirs, zstr(MUSL_DIR "/arch/generic/"));
-		PUSH(paths->sys_include_dirs, zstr(MUSL_DIR "/obj/include/"));
-		PUSH(paths->sys_include_dirs, zstr(MUSL_DIR "/include/"));
+		PUSH(paths->sys_include_dirs, zstr(GLIBC_DIR "/include/"));
 		PUSH(paths->sys_include_dirs, zstr("/usr/include/"));
+		PUSH(paths->sys_include_dirs, zstr(GLIBC_DIR "/include-fixed/"));
 	}
 
 	PUSH(paths->system_macros, zstr("__STDC__=1"));
@@ -773,7 +771,7 @@ static void emitDeps (FILE *dest, const char *out_name, FileList files, bool emi
 
 	fprintf(dest, "%s:", out_name);
 	u32 line_length = strlen(out_name) + 1;
-	for (u32 i = 1; i < files.len; i++) {
+	foreach (i, files) {
 		SourceFile *f = files.ptr[i];
 		if (f->kind == Source_Regular || (f->kind == Source_StandardHeader && emit_system_files)) {
 			String name = sourceName(f);

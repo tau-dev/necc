@@ -2,7 +2,7 @@ C_SRCS := $(wildcard src/*.c) $(wildcard src/*/*.c)
 C_HDRS := $(wildcard src/*.h) $(wildcard src/*/*.h)
 
 C_FLAGS := -lm -std=c11 -Werror -Wall -Wextra -Wno-unused-command-line-argument -pedantic -Wpedantic -Wno-missing-field-initializers \
-	-DMUSL_DIR=\"$(MUSL_DIR)\"
+	-DMUSL_DIR=\"$(MUSL_DIR)\" -DGLIBC_DIR=\"$(GLIBC_DIR)\"
 # C_DBG_FLAGS := -g -O0
 C_DBG_FLAGS := -g -O0 -fsanitize=address -fsanitize=undefined
 # C_REL_FLAGS := -fstrict-aliasing -g -w -fno-omit-frame-pointer -O3 -flto=auto -DNDEBUG
@@ -13,7 +13,7 @@ SELFHOST_OBJS := $(patsubst src/%.c,selfhost/%.o,$(C_SRCS))
 SELFSELF_OBJS := $(patsubst src/%.c,selfself/%.o,$(C_SRCS))
 
 SRC_DIRS := $(sort $(dir $(wildcard src/*/)))
-REQUIRED_DIRS := bin tests/bin selfhost selfself $(patsubst src/%,bin/%,$(SRC_DIRS))
+REQUIRED_DIRS := bin tests/bin selfhost selfself $(patsubst src/%,bin/%,$(SRC_DIRS)) $(patsubst src/%,selfhost/%,$(SRC_DIRS)) $(patsubst src/%,selfself/%,$(SRC_DIRS))
 
 debug: bin/necc-dbg
 
@@ -42,18 +42,18 @@ bin/necc: $(C_SRCS) $(C_HDRS)
 	$(CC) $(C_SRCS) $(C_FLAGS) $(C_REL_FLAGS) -o $@
 
 selfhost/necc: $(SELFHOST_OBJS)
-	musl-gcc -static -g $^ -lm -o $@
+	$(CC) -static -g $^ -lm -o $@
 
 selfhost/%.o: src/%.c $(C_HDRS) bin/necc-dbg
-	./bin/necc-dbg $< -g -obj=$@ -std gnu -def MUSL_DIR=\"$(MUSL_DIR)\"
+	./bin/necc-dbg -crash $< -g -obj=$@ -std gnu -def MUSL_DIR=\"$(MUSL_DIR)\" -def GLIBC_DIR=\"$(GLIBC_DIR)\"
 
 
 selfself/necc: $(SELFSELF_OBJS)
-	musl-gcc -static -g $^ -lm -o $@
+	$(CC) -static -g $^ -lm -o $@
 	diff selfhost/ selfself/
 
 selfself/%.o: src/%.c $(C_HDRS) selfhost/necc
-	./selfhost/necc $< -g -obj=$@ -std gnu -def MUSL_DIR=\"$(MUSL_DIR)\"
+	./selfhost/necc $< -g -obj=$@ -std gnu -def MUSL_DIR=\"$(MUSL_DIR)\" -def GLIBC_DIR=\"$(GLIBC_DIR)\"
 
 
 
