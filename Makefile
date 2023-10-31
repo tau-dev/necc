@@ -1,10 +1,12 @@
+include config
+
 C_SRCS := $(wildcard src/*.c) $(wildcard src/*/*.c)
 C_HDRS := $(wildcard src/*.h) $(wildcard src/*/*.h)
 
-C_FLAGS := -lm -std=c11 -Werror -Wall -Wextra -Wno-unused-command-line-argument -pedantic -Wpedantic -Wno-missing-field-initializers \
+C_FLAGS+= -lm -std=c11 -Werror -Wall -Wextra -Wno-unused-command-line-argument -Wno-unused-function -pedantic -Wpedantic -Wno-missing-field-initializers \
 	-DMUSL_DIR=\"$(MUSL_DIR)\" -DGLIBC_DIR=\"$(GLIBC_DIR)\"
 # C_DBG_FLAGS := -g -O0
-C_DBG_FLAGS := -g -O0 -fsanitize=address -fsanitize=undefined
+C_DBG_FLAGS+= -g -O0 -fsanitize=address -fsanitize=undefined
 # C_REL_FLAGS := -fstrict-aliasing -g -w -fno-omit-frame-pointer -O3 -flto=auto -DNDEBUG
 C_REL_FLAGS := -fstrict-aliasing -g -w -fno-omit-frame-pointer -O1
 
@@ -14,6 +16,12 @@ SELFSELF_OBJS := $(patsubst src/%.c,selfself/%.o,$(C_SRCS))
 
 SRC_DIRS := $(sort $(dir $(wildcard src/*/)))
 REQUIRED_DIRS := bin tests/bin selfhost selfself $(patsubst src/%,bin/%,$(SRC_DIRS)) $(patsubst src/%,selfhost/%,$(SRC_DIRS)) $(patsubst src/%,selfself/%,$(SRC_DIRS))
+
+
+
+
+
+
 
 debug: bin/necc-dbg
 
@@ -25,7 +33,9 @@ selfs: selfself/necc
 
 all: debug release selfs
 
-test: bin/necc-dbg bin/necc tests/runner selfs
+test: bin/necc-dbg bin/necc tests/runner testcases selfs
+
+testcases:
 	@./tests/runner
 
 
@@ -58,10 +68,10 @@ selfself/%.o: src/%.c $(C_HDRS) selfhost/necc
 
 
 .PHONY: debug release re clean printvars \
-		self run run-rel gdb lldb all
+		self run run-rel gdb lldb all test testcases
 
 clean:
-	rm tests/runner
+	rm -f tests/runner
 	rm -f -r bin/*
 	rm -f -r selfhost/*
 	rm -f -r selfself/*

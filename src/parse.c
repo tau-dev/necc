@@ -177,7 +177,7 @@ typedef enum {
 static Declaration parseDeclarator(Parse *, Type base_type, Namedness, Attributes *attr);
 static inline void markDecl(const Parse *, const Token *, Declaration, DeclKind);
 static inline void markDeclScopeBegin(String name);
-static inline void markDeclScopeEnd();
+static inline void markDeclScopeEnd(void);
 
 static nodiscard bool allowedNoDeclarator(Parse *, Type base_type);
 // static Declaration parseDeclarator (Parse* parse, const Token **tok, Type base_type);
@@ -453,10 +453,9 @@ void parseFunction (Parse *parse, Symbol *symbol) {
 	};
 	build->ir.entry = startNewBlock(build, zstr("entry"));
 	String name = symbol->name;
-	bool is_main = eql("main", name);
+	bool is_main = symbol == parse->tokens.special_identifiers[Special_main];
 	if (is_main) {
-		if (func_type.rettype->kind != Kind_Basic || func_type.rettype->basic != Int_int)
-		{
+		if (func_type.rettype->kind != Kind_Basic || func_type.rettype->basic != Int_int) {
 			parseerror(parse, parse->pos, "the return type of function main() must be %s", printTypeHighlighted(parse->arena, BASIC_INT));
 		}
 	}
@@ -466,8 +465,8 @@ void parseFunction (Parse *parse, Symbol *symbol) {
 	Scope enclosing = pushScope(parse);
 	setLoc(parse, parse->pos);
 
-	for (u32 i = 0; i < param_count; i++) {
-		Declaration param = parse->current_func_type.parameters.ptr[i];
+	foreach (i, func_type.parameters) {
+		Declaration param = func_type.parameters.ptr[i];
 
 		if (param.name == NULL) {
 			requires(parse, "unnamed parameters", Features_C23);
@@ -1401,8 +1400,6 @@ static Value parseExprPrefix (Parse *parse) {
 	}
 	case Tok_Ampersand: {
 		Value v = parseExprPrefix(parse);
-		// TODO Structs and unions will be handeled byref even if they
-		// are not lvalues; mark this somehow.
 
 		if (v.typ.kind == Kind_Function) {
 			v.typ.kind = Kind_FunctionPtr;
@@ -1431,7 +1428,9 @@ static Value parseExprPrefix (Parse *parse) {
 
 		Type res_type = parse->target.ptrdiff;
 		res_type.basic |= Int_unsigned;
-		return immediateIntVal(parse, res_type, typeSize(typ, &parse->target));
+		return (Value) {parse->target.ptrdiff,
+			.inst = calcTypeSize(parse, typ),
+		};
 	}
 	case Tok_Plus:
 	case Tok_Minus: {
@@ -1681,7 +1680,7 @@ static Value parseExprBase (Parse *parse) {
 	case Tok_Identifier: {
 		OrdinaryIdentifier *ident = t.val.symbol->ordinary;
 		if (ident == NULL)
-			parseerror(parse, NULL, "undefined identifier ‘%.*s’", STRING_PRINTAGE(t.val.symbol->name));
+			parseerror(parse, NULL, "undeclared identifier ‘%.*s’", STRING_PRINTAGE(t.val.symbol->name));
 		ident->is_used = true;
 
 		switch (ident->kind) {
@@ -2334,14 +2333,14 @@ static void initializeFromValue (Parse *parse, InitializationDest dest, u32 offs
 			Inst loadfrom = parse->build.ir.ptr[inst.mem.address];
 			// Load value from a constant static.
 			// Ugly hack, need to represent a loaded Reloc in the IR.
-			StaticValue *val = &parse->module->ptr[loadfrom.reloc.id];
-			if (val->def_kind != Static_Variable || !(val->type.qualifiers & Qualifier_Const))
-				parseerror(parse, NULL, "TODO: ???");
+			StaticValue *init_val = &parse->module->ptr[loadfrom.reloc.id];
+			if (init_val->def_kind != Static_Variable || !(init_val->type.qualifiers & Qualifier_Const))
+				parseerror(parse, NULL, "expected a static initializer");
 
 			// TODO This does not yet copy references from the static value.
 			memcpy(
 				dest.reloc_data.ptr + offset,
-				val->value_data.ptr + loadfrom.reloc.offset,
+				init_val->value_data.ptr + loadfrom.reloc.offset,
 				inst.size
 			);
 		} else {
@@ -2502,6 +2501,12 @@ static bool tryParseTypeBase (Parse *parse, Type *type, u8 *storage_dest, Attrib
 				named = parse->pos->val.symbol;
 				parse->pos++;
 			}
+
+			// TODO: 6.2.1§7: Structure, union, and enumeration tags
+			// have scope that begins just after the appearance of the
+			// tag in a type specifier that declares the tag.
+
+
 			// A tagged struct or union type followed by its definition
 			// or by a semicolon declares that type tag into the
 			// scope; other usage may refer to an existing type.
@@ -2891,7 +2896,7 @@ static bool tryParseTypeBase (Parse *parse, Type *type, u8 *storage_dest, Attrib
 	return true;
 }
 
-static Type parseStructUnionBody(Parse *parse, bool is_struct) {
+static Type parseStructUnionBody (Parse *parse, bool is_struct) {
 	LIST(CompoundMember) members = {0};
 
 	Location loc = locationOf(parse, parse->pos - 2);
@@ -3156,7 +3161,7 @@ static Declaration parseDeclarator (Parse *parse, Type base_type, Namedness name
 			}
 
 			if (tryEat(parse, Tok_Asterisk)) {
-				parseerror(parse, NULL, "TODO Support ‘variable length array of unspecified size’, whatever that may be");
+				parseerror(parse, open_bracket, "TODO Support ‘variable length array of unspecified size’, whatever that may be");
 				array->kind = Kind_UnsizedArray;
 			} else if (parse->pos->kind == Tok_CloseBracket) {
 				array->kind = Kind_UnsizedArray;
@@ -3166,10 +3171,12 @@ static Declaration parseDeclarator (Parse *parse, Type base_type, Namedness name
 				Value count_val = parseExprAssignment(parse);
 				if (isIntegerType(count_val.typ) && tryIntConstant(parse, count_val, &count)) {
 					if (count > 1000000)
-						parseerror(parse, NULL, "%llu items is too big, for now", (unsigned long long) count);
+						parseerror(parse, open_bracket, "%llu items is too big, for now", (unsigned long long) count);
 					array->array.count = count;
 				} else {
 					requires(parse, "variable length arrays", Features_C99);
+					if (parse->current_func_id == IDX_NONE)
+						parseerror(parse, open_bracket, "file-scope arrays must have known size");
 					array->kind = Kind_VLArray;
 					array->array.count = coerce(parse, count_val, parse->target.ptrdiff, open_bracket);
 				}
@@ -3195,7 +3202,7 @@ static Declaration parseDeclarator (Parse *parse, Type base_type, Namedness name
 
 
 static StringList decl_scopes = {0};
-static void emitDecl(FILE *dest, Arena *arena, SourceFile *source, Location loc, Declaration decl, DeclKind kind) {
+static void emitDecl (FILE *dest, Arena *arena, SourceFile *source, Location loc, Declaration decl, DeclKind kind) {
 	char *type_name = printType(arena, decl.type);
 	char *kind_name = kind == DeclKind_Typedef ? "type" :
 			kind == DeclKind_Declaration ? "decl" : "def";
@@ -3207,7 +3214,7 @@ static void emitDecl(FILE *dest, Arena *arena, SourceFile *source, Location loc,
 	fprintf(dest, "%.*s:%s\n", STRING_PRINTAGE(decl.name->name), type_name);
 }
 
-static inline void markDecl(const Parse *parse, const Token *tok, Declaration decl, DeclKind kind) {
+static inline void markDecl (const Parse *parse, const Token *tok, Declaration decl, DeclKind kind) {
 	Options *opt = parse->opt;
 	if (!opt->any_decl_emit) return;
 
@@ -3223,14 +3230,14 @@ static inline void markDecl(const Parse *parse, const Token *tok, Declaration de
 		emitDecl(opt->emit_std_decls, parse->arena, source, loc, decl, kind);
 }
 
-static inline void markDeclScopeBegin(String name) {
+static inline void markDeclScopeBegin (String name) {
 	PUSH(decl_scopes, name);
 }
-static inline void markDeclScopeEnd() {
+static inline void markDeclScopeEnd (void) {
 	decl_scopes.len--;
 }
 
-static void parseTypedefDecls(Parse *parse, Type base_type) {
+static void parseTypedefDecls (Parse *parse, Type base_type) {
 	do {
 		const Token *begin = parse->pos;
 		Attributes attr = {0};

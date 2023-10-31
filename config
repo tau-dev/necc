@@ -1,0 +1,3 @@
+CC = gcc
+GLIBC_DIR := /usr/lib/gcc/x86_64-pc-linux-gnu/13.2.1
+

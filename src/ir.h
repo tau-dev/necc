@@ -39,7 +39,7 @@ typedef struct {
 	Location *locations;
 
 	LIST(char) aux_data;
-	SPAN(Parameter) params;
+	LIST(Parameter) params;
 	Block *entry;
 } IrList;
 

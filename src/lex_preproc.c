@@ -143,6 +143,9 @@ Keyword standard_keywords[] = {
 
 	{"__FILE__", Tok_Key_File},
 	{"__LINE__", Tok_Key_Line},
+
+	{"__const", Tok_Key_Const},
+	{"__const__", Tok_Key_Const},
 };
 
 Keyword c99_keywords[] = {
@@ -167,6 +170,7 @@ Keyword c23_keywords[] = {
 };
 
 Keyword special_identifiers[] = {
+	{"main", Special_main},
 	{"__func__", Special_func},
 	{"__VA_ARGS__", Special_VA_ARGS},
 	{"memcpy", Special_memcpy},
@@ -1898,6 +1902,8 @@ static IfClass skipToElseIfOrEnd (SourceFile source, Location *loc, const char *
 				// TODO Check that the line ends after the directive.
 				result = If_End;
 				break;
+			} else {
+				while (*pos && *pos != '\n') pos++;
 			}
 			pos--;
 		} else if (!isSpace(*pos)) {
@@ -1905,8 +1911,19 @@ static IfClass skipToElseIfOrEnd (SourceFile source, Location *loc, const char *
 				pos++;
 				newLine(loc);
 				line_begin = pos + 1;
-			} else
+			} else if (pos[0] == '/' && pos[1] == '*') {
+				while (*pos && !(pos[0] == '*' && pos[1] == '/')) {
+					if (*pos == '\n') {
+						at_start_of_line = true;
+						newLine(loc);
+						line_begin = pos + 1;
+					}
+					pos++;
+				}
+				if (*pos) pos++;
+			} else {
 				at_start_of_line = false;
+			}
 		}
 		if (*pos)
 			pos++;
@@ -2010,7 +2027,7 @@ static void preprocExpandLine (ExpansionParams params, TokenList *buf) {
 				}
 
 				PUSH(*params.stack, ((Replacement) {
-					sym->macro,
+					params.tok->symbols.ptr[tok.val.symbol_idx].macro,
 					.loc = begin,
 					.toks = arguments,
 				}));

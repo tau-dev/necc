@@ -12,15 +12,15 @@ typedef enum {
 
 
 typedef enum {
-// 	Features_C89 = 0x1,
-	Features_C99 = 0x2,
-	Features_C11 = 0x4,
-	Features_C23 = 0x8,
-	Features_GNU_Extensions = 0x10,
-	Features_MSVC_Extensions = 0x20,
+// 	Features_C89 = 1,
+	Features_C99 = 1 << 1,
+	Features_C11 = 1 << 2,
+	Features_C23 = 1 << 3,
+	Features_GNU_Extensions = 1 << 4,
+	Features_MSVC_Extensions = 1 << 5,
 
-	Features_OldStyleDefinitions = 0x40,
-	Features_DefaultInt = 0x80,
+	Features_OldStyleDefinitions = 1 << 6,
+	Features_DefaultInt = 1 << 7,
 } Features;
 
 typedef enum {

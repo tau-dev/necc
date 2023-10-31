@@ -7,6 +7,8 @@ Missing a lot of pragmas; need to unify `_Pragma("...")` and
 `#pragma` spellings. https://en.cppreference.com/w/c/preprocessor/impl
 
 # Parser
+
+Biggest missing thing: bit-fields!
 Does not yet support old-style declarations.
 Need to review where trailing commas are and aren't allowed.
 

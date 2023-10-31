@@ -244,8 +244,8 @@ static void emitDeps(FILE *deps_out, const char *out_name, FileList files, bool 
 
 
 typedef struct {
-	const char *obj;
-	const char *assembly;
+	// Output paths.
+
 	// These can be meaningfully concatenated for multiple compilation
 	// units, so they stay open.
 	FILE *ir;
@@ -255,7 +255,12 @@ typedef struct {
 	FILE *decls;
 	FILE *all_decls;
 	FILE *std_decls;
+	// These two are specific to a compilation unit, so the FILEs are
+	// managed by compile().
+	const char *obj;
+	const char *assembly;
 
+	// Other options.
 	bool optimize_store_load;
 	bool optimize_memreduce;
 	bool optimize_arith;
@@ -480,8 +485,11 @@ int main (int argc, char **args) {
 		if (obj_out == default_output)
 			comp.obj = sourceWithSuffix(&arena, input, ".o");
 
-		if (comp.obj || comp.assembly)
-			PUSH(link_inputs, zstr(comp.obj ? comp.obj : comp.assembly));
+		if (comp.obj) {
+			PUSH(link_inputs, zstr(comp.obj));
+		} else if (comp.assembly) {
+			PUSH(link_inputs, zstr(comp.assembly));
+		}
 
 		compile(input, comp);
 	}
@@ -517,6 +525,15 @@ int main (int argc, char **args) {
 	closeOut(comp.decls);
 	closeOut(comp.all_decls);
 	closeOut(comp.std_decls);
+	free_arena(&arena, "code");
+
+#ifndef NDEBUG
+	free(paths.user_include_dirs.ptr);
+	free(paths.sys_include_dirs.ptr);
+	free(paths.command_line_macros.ptr);
+	free(paths.system_macros.ptr);
+#endif
+
 
 	if (runit) {
 		u32 len = strlen(exe_out)+1;
@@ -524,17 +541,10 @@ int main (int argc, char **args) {
 		memcpy(c, exe_out, len);
 		char *new_argv[2] = {c, NULL};
 		execve(exe_out, new_argv, NULL);
-		perror("");
-		generalFatal("could not run the generated executabe");
-	}
 
-	free_arena(&arena, "code");
-#ifndef NDEBUG
-	free(paths.user_include_dirs.ptr);
-	free(paths.sys_include_dirs.ptr);
-	free(paths.command_line_macros.ptr);
-	free(paths.system_macros.ptr);
-#endif
+		perror("");
+		generalFatal("could not run the generated executable");
+	}
 
 	return 0;
 }

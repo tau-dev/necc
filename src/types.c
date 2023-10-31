@@ -354,7 +354,7 @@ void printTypeHead (Type t, char **pos, const char *end) {
 #ifdef NDEBUG
 		printto(pos, end, "(*");
 #else
-		printto(pos, end, "(fn*");
+		printto(pos, end, "(*fn");
 #endif
 		break;
 	case Kind_Array:

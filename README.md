@@ -18,10 +18,11 @@ pretty soon, I'll get around to writing the necessary logic for these
 parameters, and then Necc shouldn't be requiring anything other than
 binutils and a standard library anymore.
 
-To build the project, set GLIBC\_DIR to the path containing your glibc's
-include directory (`/usr/lib/gcc/x86_64-pc-linux-gnu/13.2.1` on my
-machine) and run GNU `make`; the binaries are put into bin/. To execute
-the tests, run `make test`.
+To build the project, set GLIBC\_DIR in the `config` file to the path
+containing your glibc's include directory
+(`/usr/lib/gcc/x86_64-pc-linux-gnu/13.2.1` on my machine) and run GNU
+`make`; the binaries are put into bin/. To execute the tests, run
+`make test`.
 
 ---
 

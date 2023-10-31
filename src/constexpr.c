@@ -469,7 +469,7 @@ static CValue evalExprBase (Parse *parse) {
 
 	case Tok_Key_Alignof: {
 		expect(parse, Tok_OpenParen);
-		Type t; // TODO = parseTypeName(parse, NULL);
+		Type t = {0}; // TODO = parseTypeName(parse, NULL);
 		expect(parse, Tok_CloseParen);
 
 		BasicType res_type = parse->opt->target.ptrdiff.basic;

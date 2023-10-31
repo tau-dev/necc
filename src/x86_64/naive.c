@@ -394,7 +394,7 @@ static void emitLabel (Module module, u32 i) {
 	emitZString(":\n");
 }
 
-void emitX64AsmSimple(EmitParams params) {
+void emitX64AsmSimple (EmitParams params) {
 	Codegen globals = {
 		.out = params.out,
 		.arena = params.arena,

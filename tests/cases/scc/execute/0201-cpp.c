@@ -1,3 +1,4 @@
+//!necc-dbg @ -run
 /* taken from ISO/IEC 9899:1999 Section 6.10.3.5 p7 */
 
 #define t(x,y,z) x ## y ## z

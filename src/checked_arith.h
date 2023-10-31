@@ -31,20 +31,20 @@ bool mulUnsignedOverflow(u64 a, u64 b, PrimitiveSize size);
 bool mulSignedOverflow(i64 a, i64 b, PrimitiveSize size);
 
 
-static inline u64 signBit(PrimitiveSize size) {
+static inline u64 signBit (PrimitiveSize size) {
 	return ((u64) 1 << (size * 8 - 1));
 }
 
-static inline bool sign(u64 x, PrimitiveSize size) {
+static inline bool sign (u64 x, PrimitiveSize size) {
 	assert(size);
 	assert(size <= I64);
 	return (x & signBit(size)) != 0;
 }
 
-static inline u64 bitsBelow(PrimitiveSize size) {
+static inline u64 bitsBelow (PrimitiveSize size) {
 	return size >= 8 ? ~(u64) 0 : ((u64) 1 << (size*8)) - 1;
 }
 
-static inline u64 bitsAbove(PrimitiveSize size) {
+static inline u64 bitsAbove (PrimitiveSize size) {
 	return size >= 8 ? 0 : ~(((u64) 1 << (size*8)) - 1);
 }

@@ -730,14 +730,14 @@ IrRef genFloatToInt (IrBuild *build, IrRef source, u16 target, Signedness sign) 
 		double flt = doubleFromConst(source_inst.constant, source_inst.size);
 
 		if (sign) {
-			if (flt >= INT64_MIN && flt <= INT64_MAX) {
+			if (flt >= (double) INT64_MIN && flt <= (double) INT64_MAX) {
 				i.kind = Ir_Constant;
 				i.constant = truncate((i64) flt, target);
 			} else {
 				i.properties |= Prop_Arith_WouldOverflow;
 			}
 		} else {
-			if (flt >= 0 && flt <= UINT64_MAX) {
+			if (flt >= 0 && flt <= (double) UINT64_MAX) {
 				i.kind = Ir_Constant;
 				i.constant = truncate((u64) flt, target);
 			} else {
@@ -960,7 +960,11 @@ void printBlock (FILE *dest, Block *blk, IrList ir) {
 
 	for (size_t i = blk->first_inst; i < blk->inst_end; i++) {
 		Inst inst = ir.ptr[i];
-		fprintf(dest, " %3lu /%lu = ", (ulong) i, (ulong) inst.size);
+		ulong size = inst.size;
+		ulong isize = inst.size * 8;
+		ulong unop = inst.unop;
+
+		fprintf(dest, " %3lu /%lu = ", (ulong) i, size);
 
 		switch ((InstKind) inst.kind) {
 		case Ir_Reloc:
@@ -993,7 +997,7 @@ void printBlock (FILE *dest, Block *blk, IrList ir) {
 			fprintf(dest, "in-phi\n");
 			continue;
 		case Ir_Parameter:
-			fprintf(dest, "param %lu\n", (ulong) inst.size);
+			fprintf(dest, "param %lu\n", size);
 			continue;
 		case Ir_StackAllocFixed:
 			fprintf(dest, "stack %lu\n", (ulong) inst.alloc.size);
@@ -1002,10 +1006,10 @@ void printBlock (FILE *dest, Block *blk, IrList ir) {
 			fprintf(dest, "stack_vla %lu\n", (ulong) inst.alloc.size);
 			continue;
 		case Ir_Copy:
-			fprintf(dest, "copy %lu\n", (ulong) inst.unop);
+			fprintf(dest, "copy %lu\n", unop);
 			continue;
 		case Ir_StackDeallocVLA:
-			fprintf(dest, "discard %lu\n", (ulong) inst.unop);
+			fprintf(dest, "discard %lu\n", unop);
 			continue;
 		case Ir_Load:
 			fprintf(dest, "load%s %lu", inst.properties & Prop_Mem_Volatile ? " volatile" : "",
@@ -1018,37 +1022,37 @@ void printBlock (FILE *dest, Block *blk, IrList ir) {
 			printOrder(dest, inst.mem.ordered_after);
 			continue;
 		case Ir_BitNot:
-			fprintf(dest, "not %lu\n", (ulong) inst.unop);
+			fprintf(dest, "not %lu\n", unop);
 			continue;
 		case Ir_Truncate:
-			fprintf(dest, "trunc i%lu, %lu\n", (ulong) inst.size * 8, (ulong) inst.unop);
+			fprintf(dest, "trunc i%lu, %lu\n", isize, unop);
 			continue;
 		case Ir_SignExtend:
-			fprintf(dest, "signex i%lu, %lu\n", (ulong) inst.size * 8, (ulong) inst.unop);
+			fprintf(dest, "signex i%lu, %lu\n", isize, unop);
 			continue;
 		case Ir_ZeroExtend:
-			fprintf(dest, "zeroex i%lu, %lu\n", (ulong) inst.size * 8, (ulong) inst.unop);
+			fprintf(dest, "zeroex i%lu, %lu\n", isize, unop);
 			continue;
 		case Ir_FCast:
-			fprintf(dest, "fcast f%lu, %lu\n", (ulong) inst.size * 8, (ulong) inst.unop);
+			fprintf(dest, "fcast f%lu, %lu\n", isize, unop);
 			break;
 		case Ir_Access:
-			fprintf(dest, "access /%lu, %lu @ %lu\n", (ulong) inst.size, (ulong) inst.unop_const.val, (ulong) inst.unop_const.offset);
+			fprintf(dest, "access /%lu, %lu @ %lu\n", size, (ulong) inst.unop_const.val, (ulong) inst.unop_const.offset);
 			continue;
 		case Ir_SIntToFloat:
-			fprintf(dest, "s%lu->float %lu\n", (ulong) inst.size * 8, (ulong) inst.unop);
+			fprintf(dest, "s%lu->float %lu\n", isize, unop);
 			continue;
 		case Ir_UIntToFloat:
-			fprintf(dest, "u%lu->float %lu\n", (ulong) inst.size * 8, (ulong) inst.unop);
+			fprintf(dest, "u%lu->float %lu\n", isize, unop);
 			continue;
 		case Ir_FloatToSInt:
-			fprintf(dest, "float->s%lu %lu\n", (ulong) inst.size * 8, (ulong) inst.unop);
+			fprintf(dest, "float->s%lu %lu\n", isize, unop);
 			continue;
 		case Ir_FloatToUInt:
-			fprintf(dest, "float->u%lu %lu\n", (ulong) inst.size * 8, (ulong) inst.unop);
+			fprintf(dest, "float->u%lu %lu\n", isize, unop);
 			continue;
 		case Ir_VaArg:
-			fprintf(dest, "va_arg /%lu, %lu\n", (ulong) inst.size, (ulong) inst.unop);
+			fprintf(dest, "va_arg /%lu, %lu\n", size, unop);
 			continue;
 		case Ir_VaStart:
 			fprintf(dest, "va_start %lu, param %lu\n", (ulong) inst.unop_const.val, (ulong) inst.unop_const.offset);
