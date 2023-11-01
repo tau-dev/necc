@@ -222,7 +222,7 @@ static void printComplete (char **pos, const char *end, Type t, String name) {
 	default:
 		printto(pos, end, " ");
 		printTypeHead(t, pos, end);
-		printto(pos, end, "%.*s", STRING_PRINTAGE(name));
+		printto(pos, end, "%.*s", STR_PRINTAGE(name));
 		printTypeTail(t, pos, end);
 		break;
 	}
@@ -255,7 +255,7 @@ char *printTypeHighlighted (Arena *arena, Type t) {
 
 void printTypeUnnamed(char **pos, const char *end, SourceFile *source, unsigned long line, unsigned long column) {
 	String name = sourceName(source);
-	printto(pos, end, "[unnamed at %.*s line %lu column %lu]", STRING_PRINTAGE(name),
+	printto(pos, end, "[unnamed at %.*s line %lu column %lu]", STR_PRINTAGE(name),
 			(unsigned long) line, (unsigned long) column);
 }
 
@@ -281,6 +281,7 @@ void printTypeBase(Type t, char **pos, const char *end) {
 		} else if (basic == Int_suchar) {
 			printto(pos, end, "signed ");
 		}
+
 		switch (basic) {
 		case Int_bool:
 			printto(pos, end, "_Bool"); break;
@@ -322,13 +323,13 @@ void printTypeBase(Type t, char **pos, const char *end) {
 		printTypeUnnamed(pos, end, t.unnamed_enum.source, t.unnamed_enum.line, t.unnamed_enum.column);
 		break;
 	case Kind_Struct_Named:
-		printto(pos, end, "struct %.*s", STRING_PRINTAGE(t.nametagged->name));
+		printto(pos, end, "struct %.*s", STR_PRINTAGE(t.nametagged->name));
 		break;
 	case Kind_Union_Named:
-		printto(pos, end, "union %.*s", STRING_PRINTAGE(t.nametagged->name));
+		printto(pos, end, "union %.*s", STR_PRINTAGE(t.nametagged->name));
 		break;
 	case Kind_Enum_Named:
-		printto(pos, end, "enum %.*s", STRING_PRINTAGE(t.nametagged->name));
+		printto(pos, end, "enum %.*s", STR_PRINTAGE(t.nametagged->name));
 		break;
 	default:
 		unreachable;

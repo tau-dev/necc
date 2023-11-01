@@ -918,7 +918,7 @@ static void preprocExpandLine(ExpansionParams params, TokenList *buf);
 static String includeFilename(ExpansionParams params, TokenList *buf, bool *quoted);
 static u64 preprocExpression(ExpansionParams params, TokenList *buf, const Token **end);
 static const char *defineMacro(Arena *arena, Arena *generated_strings, SymbolList *, String name, SourceFile *, Location *loc, const char *pos, bool gnu);
-static void predefineMacros(Arena *arena, Arena *genrated_strings, SymbolList *, FileList *, StringList to_define, SourceKind, bool gnu);
+static void predefineMacros(Arena *arena, Arena *genrated_strings, SymbolList *, FileList *, MacroDefiners to_define, SourceKind, bool gnu);
 static void resolveSymbolIndicesToPointers(TokenList t, Symbol *syms);
 static void markMacroDecl(FILE *dest, SourceFile source, Location, String macro_name);
 static void loadKeywords(Tokenization *toks, Keyword *keys, u32 count);
@@ -978,7 +978,7 @@ Tokenization lex (Arena *generated_strings, String input, LexParams params) {
 
 	SourceFile *initial_source = tryOpen(&sources, &t.files, input_directory, filename);
 	if (initial_source == NULL)
-		generalFatal("could not open file \"%.*s\"", STRING_PRINTAGE(filename));
+		generalFatal("could not open file \"%.*s\"", STR_PRINTAGE(filename));
 
 	const char *pos = initial_source->content.ptr;
 	SourceFile source = *initial_source;
@@ -1106,7 +1106,7 @@ Tokenization lex (Arena *generated_strings, String input, LexParams params) {
 					}
 				}
 				if (new_source == NULL)
-					lexerror(source, begin, "could not open include file \"%.*s\"", STRING_PRINTAGE(includefilename));
+					lexerror(source, begin, "could not open include file \"%.*s\"", STR_PRINTAGE(includefilename));
 				new_source->next_include_index = include_order;
 
 				if (includes_stack.len >= MAX_INCLUDES)
@@ -1170,13 +1170,13 @@ Tokenization lex (Arena *generated_strings, String input, LexParams params) {
 			case Directive_Error: {
 				Location start = loc;
 				String str = restOfLine(source, &loc, &pos);
-				lexerror(source, start, "%.*s", STRING_PRINTAGE(str));
+				lexerror(source, start, "%.*s", STR_PRINTAGE(str));
 
 			} break;
 			case Directive_Warn: {
 				Location start = loc;
 				String str = restOfLine(source, &loc, &pos);
-				lexwarning(source, start, "%.*s", STRING_PRINTAGE(str));
+				lexwarning(source, start, "%.*s", STR_PRINTAGE(str));
 
 			} break;
 			case Directive_Line: {
@@ -1298,7 +1298,7 @@ static void expansionError (const ExpansionParams ex, Location loc, const char *
 			Location loc = repl.loc;
 
 			printInfo(*sources[loc.file_id], loc);
-			fprintf(stderr, "in expansion of macro %.*s\n", STRING_PRINTAGE(repl.mac->name));
+			fprintf(stderr, "in expansion of macro %.*s\n", STR_PRINTAGE(repl.mac->name));
 		}
 	}
 	exit(1);
@@ -2189,7 +2189,7 @@ void strPrintToken (char **dest, const char *end, const Symbol *symbols, Token t
 		FALLTHROUGH;
 	case Tok_Intrinsic:
 	case Tok_Identifier:
-		printto(dest, end, "%.*s", STRING_PRINTAGE(symbols[t.val.symbol_idx].name));
+		printto(dest, end, "%.*s", STR_PRINTAGE(symbols[t.val.symbol_idx].name));
 		return;
 	case Tok_String: {
 		**dest = '\"';
@@ -2204,7 +2204,7 @@ void strPrintToken (char **dest, const char *end, const Symbol *symbols, Token t
 	case Tok_Real:
 	case Tok_Integer:
 	case Tok_Char: {
-		printto(dest, end, "%.*s", STRING_PRINTAGE(literalText(t)));
+		printto(dest, end, "%.*s", STR_PRINTAGE(literalText(t)));
 	} return;
 
 	case Tok_IntegerReplaced:
@@ -2386,50 +2386,32 @@ static void predefineMacros (
 	Arena *genrated_strings,
 	SymbolList *symbols,
 	FileList *files,
-	StringList to_define,
+	MacroDefiners to_define,
 	SourceKind kind,
 	bool gnu)
 {
-#ifdef NDEBUG
-	SourceFile *sources = calloc(to_define.len, sizeof(SourceFile));
-#endif
-
 	foreach (i, to_define) {
-#ifdef NDEBUG
-		SourceFile *source = &sources[i];
-#else
 		SourceFile *source = calloc(sizeof(SourceFile), 1);
-#endif
 		source->kind = kind;
 		source->idx = files->len;
 		PUSH(*files, source);
 
-		String def = to_define.ptr[i];
+		MacroDefiner def = to_define.ptr[i];
 
-		u32 equals = 0;
-		while (equals < def.len && def.ptr[equals] != '=') equals++;
-
-		// TODO Without default "1", the name and content parsing would not need to be sparated.
-
-		char *name = malloc(equals);
-		memcpy(name, def.ptr, equals);
-		source->plain_name = (String) {equals, name};
-		source->content = zstr("1");
-		if (equals < def.len) {
-			source->plain_name.len = equals;
-			equals++;
-			source->content = (String) {def.len - equals, def.ptr + equals};
-		}
+		source->plain_name = zstr(def.name);
+		source->content = zstr(def.content);
 
 		Location loc = {source->idx, 1, 1};
 		defineMacro(arena, genrated_strings, symbols, source->plain_name, source, &loc, source->content.ptr, gnu);
 	}
 }
 
+
+
 static void markMacroDecl(FILE *dest, SourceFile source, Location loc, String macro_name) {
 	String name = sourceName(&source);
-	fprintf(dest, "%.*s:%lu:%lu:macro:%.*s:\n", STRING_PRINTAGE(name),
-			(unsigned long) loc.line, (unsigned long) loc.column, STRING_PRINTAGE(macro_name));
+	fprintf(dest, "%.*s:%lu:%lu:macro:%.*s:\n", STR_PRINTAGE(name),
+			(unsigned long) loc.line, (unsigned long) loc.column, STR_PRINTAGE(macro_name));
 }
 
 
@@ -2512,14 +2494,13 @@ static SourceFile *tryOpen (StringMap *sources, FileList *files, String dir, Str
 	memcpy(full_path + dir.len, name.ptr, name.len);
 	full_path[full_len] = 0;
 
-#ifdef HAVE_POSIX
+#if HAVE_POSIX
 	char *resolved = realpath(full_path, NULL);
 	if (!resolved) {
 		free(full_path);
 		return NULL;
 	}
-#else
-#ifdef HAVE_WINDOWS
+#elif HAVE_WINDOWS
 	char *resolved = _fullpath(NULL, full_path, PATH_MAX);
 	free(full_path);
 	if (!resolved) {
@@ -2527,10 +2508,8 @@ static SourceFile *tryOpen (StringMap *sources, FileList *files, String dir, Str
 		return NULL;
 	}
 #else
-	char *resolved = malloc(strlen(full_len + 1);
-	memcpy(resolved, full_path, full_len + 1);
-#endif // HAVE_WINDOWS
-#endif // HAVE_POSIX
+	char *resolved = mdupe(full_path, strlen(full_len) + 1)
+#endif
 
 	String resolved_str = zstr(resolved);
 	void **entry = mapGetOrCreate(sources, resolved_str);
@@ -2689,7 +2668,7 @@ void emitPreprocessed (Tokenization *tok, FILE *dest) {
 		if (loc.file_id != prev.file_id) {
 			SourceFile *newfile = tok->files.ptr[loc.file_id];
 			String name = sourceName(newfile);
-			fprintf(dest, "\n#line %llu \"%.*s\"\n", (ullong) loc.line, STRING_PRINTAGE(name));
+			fprintf(dest, "\n#line %llu \"%.*s\"\n", (ullong) loc.line, STR_PRINTAGE(name));
 			prev = loc;
 		} else if (loc.line != prev.line) {
 			if (loc.line > prev.line && loc.line < prev.line + 6) { // Arbitrary.
@@ -2712,7 +2691,7 @@ void emitPreprocessed (Tokenization *tok, FILE *dest) {
 			FALLTHROUGH;
 		case Tok_Intrinsic:
 		case Tok_Identifier:
-			fprintf(dest, "%.*s", STRING_PRINTAGE(t.val.symbol->name));
+			fprintf(dest, "%.*s", STR_PRINTAGE(t.val.symbol->name));
 			break;
 		case Tok_String: {
 			fputc('\"', dest);
@@ -2724,7 +2703,7 @@ void emitPreprocessed (Tokenization *tok, FILE *dest) {
 		case Tok_Real:
 		case Tok_Integer:
 		case Tok_Char:
-			fprintf(dest, "%.*s", STRING_PRINTAGE(literalText(t)));
+			fprintf(dest, "%.*s", STR_PRINTAGE(literalText(t)));
 			break;
 		case Tok_IntegerReplaced:
 			fprintf(dest, "%llu", (ullong)t.val.integer);

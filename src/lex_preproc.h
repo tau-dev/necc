@@ -217,11 +217,18 @@ typedef struct Tokenization {
 } Tokenization;
 
 typedef struct {
+	char *name;
+	char *content;
+} MacroDefiner;
+
+typedef LIST(MacroDefiner) MacroDefiners;
+
+typedef struct {
 	StringList sys_include_dirs;
 	StringList user_include_dirs;
 
-	StringList command_line_macros;
-	StringList system_macros;
+	MacroDefiners command_line_macros;
+	MacroDefiners system_macros;
 
 	Options *options;
 } LexParams;

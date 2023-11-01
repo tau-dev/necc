@@ -384,6 +384,8 @@ static void emitInt(u64 i);
 static void emitIntSigned(i64 i);
 static void flushit(FILE *f);
 
+#include "encode.h"
+
 int splice_dest_order (const void *a, const void *b) {
 	return (i32) ((Reference*) a)->splice_pos - (i32) ((Reference*) b)->splice_pos;
 }
@@ -748,11 +750,11 @@ static void emitFunctionForward (EmitParams params, u32 id) {
 
 	// No need to do callee-saves because those registers are never touched.
 
-	emit(&c, " push R", RBP_8);
-	emit(&c, " mov R, R", RSP_8, RBP_8);
-	emit(&c, " sub $I, R", stack_allocated, RSP_8);
+	push(&c, RBP_8);
+	movRR(&c, RSP_8, RBP_8);
+	subRC(&c, RSP_8, stack_allocated);
 	if (mem_return)
-		emit(&c, " movq R, ~I(R)", RDI_8, c.return_pointer_storage, RBP_8);
+		movRM(&c, RDI_8, (Mem) {RBP_8, c.return_pointer_storage});
 
 
 
@@ -769,7 +771,7 @@ static void emitFunctionForward (EmitParams params, u32 id) {
 
 				if (info.class.registers[j] == Param_INTEGER) {
 					Register reg = gp_parameter_regs[info.registers[j]];
-					emit(&c, " movZ R, ~I(R)", sizeSuffix(size), registerSized(reg, size), info.storage + 8*j, RBP_8);
+					movRM(&c, registerSized(reg, size), (Mem) {RBP_8, info.storage + 8*j});
 				} else {
 					assert(info.class.registers[j] == Param_SSE);
 					emit(&c, " movsZ %xmmI, ~I(R)", sizeFSuffix(size), (u32) info.registers[j], info.storage + 8*j, RBP_8);
@@ -789,8 +791,8 @@ static void emitFunctionForward (EmitParams params, u32 id) {
 
 		// Copy out the registers into the register save area.
 		for (u32 i = gp_params; i < gp_parameter_regs_count; i++)
-			emit(&c, " movq R, ~I(R)", registerSized(gp_parameter_regs[i], I64), -reg_save_area_size + i*8, RBP_8);
-		emit(&c, " test R, R", RAX, RAX);
+			movRM(&c, registerSized(gp_parameter_regs[i], I64), (Mem) {RBP_8, -reg_save_area_size + i*8});
+		testRR(&c, RAX_4, RAX_4);
 		emit(&c, " je ..vaarg_no_float_args_I", id);
 		for (u32 i = 0; i < 8; i++)
 			emit(&c, " movaps %xmmI, ~I(R)", i, -reg_save_area_size + 48 + i*16, RBP_8);
@@ -826,20 +828,19 @@ static void copyTo (Codegen *c, Register to_addr, i32 to_offset, Register from_a
 	to_addr = registerSized(to_addr, 8);
 	from_addr = registerSized(from_addr, 8);
 	while (size - offset > 8) {
-		emit(c, " movq ~I(R), R", offset+from_offset, from_addr, R10_8);
-		emit(c, " movq R, ~I(R)", R10_8, offset+to_offset, to_addr);
+		movMR(c, (Mem) {from_addr, offset+from_offset}, R10_8);
+		movRM(c, R10_8, (Mem) {to_addr, offset+to_offset});
 		offset += 8;
 	}
 
 	// This will break for non-power-of-two remainders.
 	Register tmp = registerSized(R10, size - offset);
-	const char *op = sizeSuffix(size - offset);
-	emit(c, " movZ ~I(R), R", op, offset+from_offset, from_addr, tmp);
-	emit(c, " movZ R, ~I(R)", op, tmp, offset+to_offset, to_addr);
+	movMR(c, (Mem) {from_addr, offset+from_offset}, tmp);
+	movRM(c, tmp, (Mem) {to_addr, offset+to_offset});
 }
 
 
-static Register loadTo (Codegen *c, Register reg, IrRef i) {
+static Register movIR (Codegen *c, IrRef i, Register reg) {
 	Register dest = registerSized(reg, c->ir.ptr[i].size);
 	emit(c, " mov #, R", i, dest);
 	return dest;
@@ -847,7 +848,7 @@ static Register loadTo (Codegen *c, Register reg, IrRef i) {
 
 
 static void triple (Codegen *c, const char *inst, u16 size, IrRef lhs, IrRef rhs, IrRef dest) {
-	Register rax = loadTo(c, RAX, lhs);
+	Register rax = movIR(c, lhs, RAX);
 	emit(c, " ZZ #, R", inst, sizeSuffix(size), rhs, rax);
 	emit(c, " mov R, #", rax, dest);
 }
@@ -904,7 +905,7 @@ static void emitBlockForward (Codegen *c, Blocks blocks, u32 i) {
 		foreach (k, false_phis) {
 			Inst inst  = c->ir.ptr[false_phis.ptr[k]];
 			emit(c, " mov R, #",
-				loadTo(c, RAX, inst.phi_out.source), inst.phi_out.on_false);
+				movIR(c, inst.phi_out.source, RAX), inst.phi_out.on_false);
 		}
 
 		if (exit.branch.on_false != next)
@@ -974,7 +975,7 @@ static void emitInstForward (Codegen *c, IrRef i) {
 	case Ir_Mul: triple(c, "imul", inst.size, inst.binop.lhs, inst.binop.rhs, i); break;
 	case Ir_Div:
 	case Ir_Mod: {
-		loadTo(c, RAX, inst.binop.lhs);
+		movIR(c, inst.binop.lhs, RAX);
 		emit(c, " xor R, R", RDX_8, RDX_8);
 
 		emit(c, " divZ #", sizeSuffix(inst.size), inst.binop.rhs);
@@ -982,7 +983,7 @@ static void emitInstForward (Codegen *c, IrRef i) {
 	} break;
 	case Ir_SDiv:
 	case Ir_SMod: {
-		loadTo(c, RAX, inst.binop.lhs);
+		movIR(c, inst.binop.lhs, RAX);
 		switch (inst.size) {
 		case 1: emit(c, " cbw"); break;
 		case 2: emit(c, " cwd"); break;
@@ -1004,7 +1005,7 @@ static void emitInstForward (Codegen *c, IrRef i) {
 	case Ir_BitXor: triple(c, "xor", inst.size, inst.binop.lhs, inst.binop.rhs, i); break;
 	case Ir_BitAnd: triple(c, "and", inst.size, inst.binop.lhs, inst.binop.rhs, i); break;
 	case Ir_BitNot: {
-		Register reg = loadTo(c, RAX, inst.unop);
+		Register reg = movIR(c, inst.unop, RAX);
 		emit(c, " not R", reg);
 		emit(c, " mov R, #", reg, i);
 	} break;
@@ -1021,7 +1022,7 @@ static void emitInstForward (Codegen *c, IrRef i) {
 			emit(c, " movsZ #, %xmm1", sizeFSuffix(sz), inst.binop.lhs);
 			emit(c, " comisZ #, %xmm1", sizeFSuffix(sz), inst.binop.rhs);
 		} else {
-			emit(c, " cmp R, #", loadTo(c, RAX, inst.binop.rhs), inst.binop.lhs);
+			emit(c, " cmp R, #", movIR(c, inst.binop.rhs, RAX), inst.binop.lhs);
 		}
 		switch (inst.kind) {
 			case Ir_LessThan:
@@ -1042,14 +1043,14 @@ static void emitInstForward (Codegen *c, IrRef i) {
 		emit(c, " mov R, #", registerSized(RSI, inst.size), i);
 	} break;
 	case Ir_ShiftLeft: {
-		loadTo(c, RCX, inst.binop.rhs);
-		Register shiftee = loadTo(c, R8, inst.binop.lhs);
+		movIR(c, inst.binop.rhs, RCX);
+		Register shiftee = movIR(c, inst.binop.lhs, R8);
 		emit(c, " shl R, R", RCX, shiftee);
 		emit(c, " mov R, #", shiftee, i);
 	} break;
 	case Ir_ShiftRight: {
-		loadTo(c, RCX, inst.binop.rhs);
-		Register shiftee = loadTo(c, R8, inst.binop.lhs);
+		movIR(c, inst.binop.rhs, RCX);
+		Register shiftee = movIR(c, inst.binop.lhs, R8);
 		emit(c, " shr R, R", RCX, shiftee);
 		emit(c, " mov R, #", shiftee, i);
 	} break;
@@ -1070,10 +1071,10 @@ static void emitInstForward (Codegen *c, IrRef i) {
 		emit(c, " mov R, #", registerSized(RAX, inst.size), i);
 	} break;
 	case Ir_Store: {
-		copyTo(c, loadTo(c, RAX, inst.mem.address), 0, RBP, c->storage[inst.mem.source], inst.size);
+		copyTo(c, movIR(c, inst.mem.address, RAX), 0, RBP, c->storage[inst.mem.source], inst.size);
 	} break;
 	case Ir_Load: {
-		copyTo(c, RBP, c->storage[i], loadTo(c, RAX, inst.mem.address), 0, inst.size);
+		copyTo(c, RBP, c->storage[i], movIR(c, inst.mem.address, RAX), 0, inst.size);
 	} break;
 	case Ir_Access: {
 		copyTo(c, RBP, c->storage[i],
@@ -1135,7 +1136,7 @@ static void emitInstForward (Codegen *c, IrRef i) {
 			// x86 doesn't have a 64 bit int->float instruction, so we
 			// use this polyfill, taken from GCC output.
 
-			loadTo(c, RAX, inst.unop);
+			movIR(c, inst.unop, RAX);
 			emit(c, " test R, R", RAX_8, RAX_8);
 			emit(c, " js .u2f_negative_I_I", c->current_id, i);
 			// When no sign bit is set, we can use the signed instruction.
@@ -1157,7 +1158,7 @@ static void emitInstForward (Codegen *c, IrRef i) {
 			emit(c, ".u2f_done_I_I:", c->current_id, i);
 		} else {
 			emit(c, " xor R, R", RAX_8, RAX_8);
-			loadTo(c, RAX, inst.unop);
+			movIR(c, inst.unop, RAX);
 			emit(c, " cvtsi2sZ R, %xmm0", fsuff, RAX_8);
 		}
 		emit(c, " movsZ %xmm0, #", fsuff, i);
@@ -1218,7 +1219,7 @@ static void emitInstForward (Codegen *c, IrRef i) {
 		emit(c, " mov R, #", registerSized(RAX, inst.size), i);
 	} break;
 	case Ir_VaStart: {
-		loadTo(c, RAX, inst.binop.lhs);
+		movIR(c, inst.binop.lhs, RAX);
 		// State of affairs: rhs should be the last parameter, but it is currently ignored.
 
 		emit(c, " movl $I, (R)", c->vaarg_gp_offset, RAX_8);
@@ -1233,7 +1234,7 @@ static void emitInstForward (Codegen *c, IrRef i) {
 		ParameterClass class = classifyParam(c->target, type);
 
 		// Put the va_list's address into RAX.
-		loadTo(c, RAX, inst.unop);
+		movIR(c, inst.unop, RAX);
 
 		if (class.count) {
 			u32 gp_count = class.count - class.sse_count;

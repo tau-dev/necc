@@ -480,7 +480,7 @@ static CValue evalExprBase (Parse *parse) {
 	case Tok_Identifier: {
 		OrdinaryIdentifier *ident = t.val.symbol->ordinary;
 		if (ident == NULL)
-			cevalerror(parse, "undefined identifier ‘%.*s’", STRING_PRINTAGE(t.val.symbol->name));
+			cevalerror(parse, "undefined identifier ‘%.*s’", STR_PRINTAGE(t.val.symbol->name));
 
 		switch (ident->kind) {
 		case Sym_Typedef:

@@ -362,13 +362,13 @@ void popScope (Parse *parse, Scope replacement) {
 		if (ord && ord->scope_depth == parse->scope_depth) {
 			if (!ord->is_used && parse->opt->warn_unused) {
 				if (ord->kind == Sym_Value_Auto) {
-					parsemsg(Log_Warn, parse, ord->decl_location, "‘%.*s’ is never used", STRING_PRINTAGE(def.ptr[i]->name));
+					parsemsg(Log_Warn, parse, ord->decl_location, "‘%.*s’ is never used", STR_PRINTAGE(def.ptr[i]->name));
 				} else if (ord->kind == Sym_Value_Static && ord->def_location &&
 						locationOf(parse, ord->def_location).file_id == 1)
 				{
 					StaticValue *val = &parse->module->ptr[ord->static_id];
 					if (!val->is_public && val->name.len && val->name.ptr[0] != '_')
-						parsemsg(Log_Warn, parse, ord->decl_location, "‘%.*s’ is never used", STRING_PRINTAGE(def.ptr[i]->name));
+						parsemsg(Log_Warn, parse, ord->decl_location, "‘%.*s’ is never used", STR_PRINTAGE(def.ptr[i]->name));
 				}
 			}
 			if (ord->kind == Sym_Value_Auto) {
@@ -530,7 +530,7 @@ void parseFunction (Parse *parse, Symbol *symbol) {
 		Symbol *sym = parse->func_goto_labels.ptr[i];
 		Block *b = sym->label.block;
 		if (b && b->exit.kind == Exit_None)
-			parseerror(parse, sym->label.def_location, "a `goto` references label `%.*s`, which is not declared in this function", STRING_PRINTAGE(b->label));
+			parseerror(parse, sym->label.def_location, "a `goto` references label `%.*s`, which is not declared in this function", STR_PRINTAGE(b->label));
 		sym->label.block = NULL;
 		sym->label.def_location = NULL;
 	}
@@ -1680,7 +1680,7 @@ static Value parseExprBase (Parse *parse) {
 	case Tok_Identifier: {
 		OrdinaryIdentifier *ident = t.val.symbol->ordinary;
 		if (ident == NULL)
-			parseerror(parse, NULL, "undeclared identifier ‘%.*s’", STRING_PRINTAGE(t.val.symbol->name));
+			parseerror(parse, NULL, "undeclared identifier ‘%.*s’", STR_PRINTAGE(t.val.symbol->name));
 		ident->is_used = true;
 
 		switch (ident->kind) {
@@ -2006,7 +2006,7 @@ static Value parseIntrinsic (Parse *parse, Intrinsic i) {
 			Symbol *rightmost = LAST(params).name;
 			if (rightmost != sym) {
 				parseerror(parse, param, "the second argument to va_start must be the rightmost named parameter (%.*s)",
-						STRING_PRINTAGE(rightmost->name));
+						STR_PRINTAGE(rightmost->name));
 			}
 		}
 		genVaStart(build, v, IDX_NONE /*ignored*/);
@@ -3207,11 +3207,11 @@ static void emitDecl (FILE *dest, Arena *arena, SourceFile *source, Location loc
 	char *kind_name = kind == DeclKind_Typedef ? "type" :
 			kind == DeclKind_Declaration ? "decl" : "def";
 	String source_name = sourceName(source);
-	fprintf(dest, "%.*s:%lu:%lu:%s:", STRING_PRINTAGE(source_name),
+	fprintf(dest, "%.*s:%lu:%lu:%s:", STR_PRINTAGE(source_name),
 			(unsigned long) loc.line, (unsigned long) loc.column, kind_name);
 	foreach (i, decl_scopes)
-		fprintf(dest, "%.*s.", STRING_PRINTAGE(decl_scopes.ptr[i]));
-	fprintf(dest, "%.*s:%s\n", STRING_PRINTAGE(decl.name->name), type_name);
+		fprintf(dest, "%.*s.", STR_PRINTAGE(decl_scopes.ptr[i]));
+	fprintf(dest, "%.*s:%s\n", STR_PRINTAGE(decl.name->name), type_name);
 }
 
 static inline void markDecl (const Parse *parse, const Token *tok, Declaration decl, DeclKind kind) {
@@ -3287,7 +3287,7 @@ static void defGlobal (
 
 		if (!typeCompatible(decl.type, existing_type)) {
 			parsemsg(Log_Err, parse, decl_token, "redeclaration of %.*s with incompatible type %s",
-					STRING_PRINTAGE(decl.name->name), printTypeHighlighted(parse->arena, decl.type));
+					STR_PRINTAGE(decl.name->name), printTypeHighlighted(parse->arena, decl.type));
 			parsemsg(Log_Info | Log_Fatal, parse, existing_val->decl_location, "previous declaration had type %s", printTypeHighlighted(parse->arena, existing_type));
 		}
 		if (tentative && existing_val->def_state == Def_Undefined)
@@ -3466,7 +3466,7 @@ static bool tryEatStaticAssert (Parse *parse) {
 		parseerror(parse, keyword, "static assert requires a constant expression");
 	if (res == 0) {
 		if (message.len)
-			parseerror(parse, keyword, "static assertion failed: %.*s", STRING_PRINTAGE(message));
+			parseerror(parse, keyword, "static assertion failed: %.*s", STR_PRINTAGE(message));
 		else
 			parseerror(parse, keyword, "static assertion failed");
 	}

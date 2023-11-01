@@ -34,8 +34,9 @@ selfs: selfself/necc
 all: debug release selfs
 
 test: bin/necc-dbg bin/necc tests/runner testcases selfs
+	@echo " === SUCCESS === "
 
-testcases:
+testcases: debug
 	@./tests/runner
 
 

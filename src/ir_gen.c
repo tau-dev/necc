@@ -901,7 +901,7 @@ void emitIr (EmitParams params) {
 			fprintf(dest, "public ");
 
 		if (val.def_state != Def_Defined) {
-			fprintf(dest, "extern %.*s\n", STRING_PRINTAGE(val.name));
+			fprintf(dest, "extern %.*s\n", STR_PRINTAGE(val.name));
 		} else if (val.def_kind == Static_Function) {
 			fprintf(dest, "%s:\n", printDeclarator(params.arena, val.type, val.name));
 			printBlock(dest, val.function_ir.entry, val.function_ir);
@@ -913,7 +913,7 @@ void emitIr (EmitParams params) {
 			String name = val.name;
 			if (name.len == 0)
 				name = zstr("[anon]");
-			fprintf(dest, "%d (%.*s):\n", (int) i, STRING_PRINTAGE(name));
+			fprintf(dest, "%d (%.*s):\n", (int) i, STR_PRINTAGE(name));
 
 			bool is_string = true;
 			String data = val.value_data;
@@ -923,7 +923,7 @@ void emitIr (EmitParams params) {
 			}
 			is_string = is_string && data.ptr[data.len - 1] == 0;
 			if (is_string) {
-				fprintf(dest, "\"%.*s\"\n", STRING_PRINTAGE(data));
+				fprintf(dest, "\"%.*s\"\n", STR_PRINTAGE(data));
 			} else {
 				for (u32 i = 0; i < data.len; i++) {
 					fprintf(dest, "%02hhx ", data.ptr[i]);
@@ -945,7 +945,7 @@ void printBlock (FILE *dest, Block *blk, IrList ir) {
 		return;
 	blk->visited = 31;
 
-	fprintf(dest, " %.*s%lu: { ", STRING_PRINTAGE(blk->label), (ulong) blk->id);
+	fprintf(dest, " %.*s%lu: { ", STR_PRINTAGE(blk->label), (ulong) blk->id);
 	if (blk->mem_instructions.len) {
 		fprintf(dest, "mem: ");
 		for (u32 i = 0; i < blk->mem_instructions.len; i++)
@@ -1090,14 +1090,14 @@ void printBlock (FILE *dest, Block *blk, IrList ir) {
 	Exit exit = blk->exit;
 	switch (exit.kind) {
 	case Exit_Unconditional:
-		fprintf(dest, "       jmp %.*s%lu\n", STRING_PRINTAGE(exit.unconditional->label), (ulong) exit.unconditional->id);
+		fprintf(dest, "       jmp %.*s%lu\n", STR_PRINTAGE(exit.unconditional->label), (ulong) exit.unconditional->id);
 		printBlock(dest, exit.unconditional, ir);
 		break;
 	case Exit_Branch:
 		fprintf(dest, "       branch %lu ? %.*s%lu : %.*s%lu\n",
 			(ulong) exit.branch.condition,
-			STRING_PRINTAGE(exit.branch.on_true->label), (ulong) exit.branch.on_true->id,
-			STRING_PRINTAGE(exit.branch.on_false->label), (ulong) exit.branch.on_false->id);
+			STR_PRINTAGE(exit.branch.on_true->label), (ulong) exit.branch.on_true->id,
+			STR_PRINTAGE(exit.branch.on_false->label), (ulong) exit.branch.on_false->id);
 		printBlock(dest, exit.branch.on_true, ir);
 		printBlock(dest, exit.branch.on_false, ir);
 		break;
@@ -1113,10 +1113,10 @@ void printBlock (FILE *dest, Block *blk, IrList ir) {
 		for (u32 i = 0; i < cases.len; i++) {
 			Block *target = cases.ptr[i].dest;
 			fprintf(dest, "%llu => %.*s%lu, ", (unsigned long long) cases.ptr[i].value,
-					STRING_PRINTAGE(target->label), (ulong) target->id);
+					STR_PRINTAGE(target->label), (ulong) target->id);
 		}
 		Block *def = exit.switch_.default_case;
-		fprintf(dest, "default => %.*s%lu\n", STRING_PRINTAGE(def->label), (ulong) def->id);
+		fprintf(dest, "default => %.*s%lu\n", STR_PRINTAGE(def->label), (ulong) def->id);
 		for (u32 i = 0; i < cases.len; i++) {
 			printBlock(dest, cases.ptr[i].dest, ir);
 		}

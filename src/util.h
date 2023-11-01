@@ -63,7 +63,7 @@
 
 #define STRING_EMPTY ((String) {0})
 // Generate arguments for printf("%.*s", ...);
-#define STRING_PRINTAGE(str) ((int) (str).len), ((str).ptr)
+#define STR_PRINTAGE(str) ((int) (str).len), ((str).ptr)
 
 typedef SPAN(const char) String;
 typedef SPAN(char) MutableString;
@@ -173,6 +173,8 @@ void mapFree(StringMap *);
 bool eql(const char *, String);
 bool startsWith(const char *, String);
 String zstr(const char *);
+void *mdupe(const void *data, size_t len);
+
 SourceFile *readAllAlloc(String path_owning);
 String sourceName(SourceFile *source);
 bool isDirectory(const char *path);

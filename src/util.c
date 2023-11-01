@@ -66,6 +66,12 @@ String zstr (const char *s) {
 	return (String) {strlen(s), s};
 }
 
+void *mdupe(const void *data, size_t len) {
+	void *new = malloc(len);
+	memcpy(new, data, len);
+	return new;
+}
+
 
 static void printError (SourceFile source, Location loc, const char *msg, ...) {
 	printErr(source, loc);
@@ -171,14 +177,14 @@ void printMsg (Log level, SourceFile source, Location loc) {
 	assert(loc.file_id == source.idx);
 	switch (source.kind) {
 	case Source_SystemDefinedMacro:
-		fprintf(stderr, "%s<system defined macro>%s %.*s:\t", BOLD, RESET, STRING_PRINTAGE(source.plain_name));
+		fprintf(stderr, "%s<system defined macro>%s %.*s:\t", BOLD, RESET, STR_PRINTAGE(source.plain_name));
 		break;
 	case Source_CommandLineMacro:
-		fprintf(stderr, "%s<command-line defined macro>%s %.*s:\t", BOLD, RESET, STRING_PRINTAGE(source.plain_name));
+		fprintf(stderr, "%s<command-line defined macro>%s %.*s:\t", BOLD, RESET, STR_PRINTAGE(source.plain_name));
 		break;
 	default: {
 		String name = sourceName(&source);
-		fprintf(stderr, "%s%.*s:%lu:%lu:%s\t", BOLD, STRING_PRINTAGE(name),
+		fprintf(stderr, "%s%.*s:%lu:%lu:%s\t", BOLD, STR_PRINTAGE(name),
 			(unsigned long) loc.line, (unsigned long) loc.column, RESET);
 	}
 	}

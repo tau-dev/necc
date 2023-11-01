@@ -1,10 +1,7 @@
 #include <stdio.h>
 #include <stdbool.h>
 
-// TODO The compiler itself should be completely platform-independent.
-// Enable -run platform-dependently.
-#include <unistd.h>
-
+// For ctime_s.
 #define __STDC_WANT_LIB_EXT1__ 1
 #include <time.h>
 
@@ -13,8 +10,15 @@
 #include "ansi.h"
 #include "analysis.h"
 #include "emit.h"
+#include "limits.h"
+#include "checked_arith.h"
+
+#if HAVE_POSIX
+#include <unistd.h>
+#endif
 
 
+#define VERSION "0.01"
 
 typedef struct {
 	const char *name;
@@ -237,6 +241,7 @@ Target target_x64_linux_gcc = {
 	.link_std = true,
 };
 
+static void addPredefMacro(MacroDefiners *def, char *name, char *content);
 static String checkIncludePath(Arena *, const char *path);
 static const char *sourceWithSuffix(Arena *arena, String source, const char *suffix);
 static const char *concat(Arena *arena, ...);
@@ -270,7 +275,7 @@ typedef struct {
 } CompileConfig;
 
 static void compile(String input, CompileConfig comp);
-static void setupPaths(LexParams *paths, bool stdinc);
+static void setupPaths(Arena *arena, LexParams *paths, bool stdinc);
 
 int main (int argc, char **args) {
 	Arena arena = create_arena(256 * 1024);
@@ -336,12 +341,13 @@ int main (int argc, char **args) {
 			if (!arg_param && (flag->param & Param_After))
 				arg_param = args[++i];
 
+
 			switch ((Flag) flag->flag) {
 			case F_Help:
 				fprintf(stderr, help_string, args[0]);
 				return 0;
 			case F_Version:
-				fprintf(stderr, "%s NECC Version 0.0%s\n", BOLD, RESET);
+				fprintf(stderr, "%s NECC Version "VERSION"%s\n", BOLD, RESET);
 				return 0;
 			case F_Crashing: options.crash_on_error = true; break;
 			case F_Debug: options.emit_debug = true; break;
@@ -386,7 +392,18 @@ int main (int argc, char **args) {
 			case F_Define: {
 				if (!arg_param)
 					generalFatal("supply a definition text for the macro");
-				PUSH(paths.command_line_macros, zstr(arg_param));
+
+				// Split the definition at the first equals sign.
+				char *equals = arg_param;
+				while (*equals && *equals != '=') equals++;
+				if (*equals) {
+					*equals = '\0';
+					equals++;
+				} else {
+					equals = NULL;
+				}
+
+				addPredefMacro(&paths.command_line_macros, arg_param, equals);
 			} break;
 			case F_StdInc: {
 				PUSH(paths.sys_include_dirs, checkIncludePath(&arena, arg_param));
@@ -452,7 +469,7 @@ int main (int argc, char **args) {
 	options.any_decl_emit = decls_out || all_decls_out || std_decls_out;
 
 	paths.options = &options;
-	setupPaths(&paths, stdinc);
+	setupPaths(&arena, &paths, stdinc);
 
 	comp.lex_params = paths;
 
@@ -534,16 +551,17 @@ int main (int argc, char **args) {
 	free(paths.system_macros.ptr);
 #endif
 
-
 	if (runit) {
-		u32 len = strlen(exe_out)+1;
-		char *c = malloc(len);
-		memcpy(c, exe_out, len);
+#if HAVE_POSIX
+		// Copy to non-const string.
+		char *c = mdupe(exe_out, strlen(exe_out) + 1);
 		char *new_argv[2] = {c, NULL};
 		execve(exe_out, new_argv, NULL);
-
 		perror("");
 		generalFatal("could not run the generated executable");
+#else
+		return system(exe_out);
+#endif
 	}
 
 	return 0;
@@ -555,8 +573,10 @@ static void freeTokens (Tokenization tokens) {
 		SourceFile *file = tokens.files.ptr[i];
 		if (file) {
 			assert(file->idx == i);
-			free((char *)file->abs_name.ptr);
-			free((char *)file->plain_name.ptr);
+			if (file->abs_name.ptr)
+				free((char *)file->abs_name.ptr);
+			if (file->plain_name.ptr)
+				free((char *)file->plain_name.ptr);
 			free(file);
 		}
 	}
@@ -669,64 +689,156 @@ static void compile(String input, CompileConfig comp) {
 }
 
 
-static void setupPaths(LexParams *paths, bool stdinc) {
+typedef struct {
+	char *name;
+	BasicType type;
+} BuiltinType;
+
+BuiltinType builtins_types[];
+
+static void setupPaths (Arena *arena, LexParams *paths, bool stdinc) {
 	if (stdinc) {
 		PUSH(paths->sys_include_dirs, zstr(GLIBC_DIR "/include/"));
 		PUSH(paths->sys_include_dirs, zstr("/usr/include/"));
 		PUSH(paths->sys_include_dirs, zstr(GLIBC_DIR "/include-fixed/"));
 	}
+	MacroDefiners *sys_macros = &paths->system_macros;
+	addPredefMacro(sys_macros, "__STDC__", "1");
+	addPredefMacro(sys_macros, "__x86_64__", "1");
+	addPredefMacro(sys_macros, "__STDC_IEC_559__", "1");
 
-	PUSH(paths->system_macros, zstr("__STDC__=1"));
-	PUSH(paths->system_macros, zstr("__x86_64__=1"));
-	PUSH(paths->system_macros, zstr("__STDC_IEC_559__=1"));
+	addPredefMacro(sys_macros, "__LITTLE_ENDIAN__", "1");
+
+	addPredefMacro(sys_macros, "__VERSION__", "\"NECC 0.001\"");
 
 
 	time_t compilation_time = time(NULL);
 #ifdef __STDC_LIB_EXT1__
 	static char buf[26];
 	ctime_s(buf, 26, &compilation_time);
-	char *date_text = buf;
+	char *ctime_text = buf;
 #else
-	char *date_text = ctime(&compilation_time);
+	char *ctime_text = ctime(&compilation_time);
 #endif
 
-	static char date_macro_text[30] = {0};
-	sprintf(date_macro_text, "__DATE__=\"%.*s %.*s\"",
-		6, date_text+4,   // "Mmm dd" part
-		4, date_text+20); // "yyyy" part
-	PUSH(paths->system_macros, zstr(date_macro_text));
+	static char date_text[30] = {0};
+	sprintf(date_text, "\"%.*s %.*s\"",
+		6, ctime_text+4,   // "Mmm dd" part
+		4, ctime_text+20); // "yyyy" part
+	addPredefMacro(sys_macros, "__DATE__", date_text);
 
-	static char time_macro_text[30] = {0};
-	sprintf(time_macro_text, "__TIME__=\"%.*s\"", 8, date_text+11);  // "hh:mm:ss" part
-	PUSH(paths->system_macros, zstr(time_macro_text));
+	static char time_text[30] = {0};
+	sprintf(time_text, "\"%.*s\"", 8, ctime_text+11);  // "hh:mm:ss" part
+	addPredefMacro(sys_macros, "__TIME__", time_text);
 
 	Options options = *paths->options;
+
+
 	if (options.target.version & Features_C23) {
-		PUSH(paths->system_macros, zstr("__STDC_VERSION__=202311L"));
-		PUSH(paths->system_macros, zstr("__STDC_IEC_60559_BFP__=202311L"));
+		addPredefMacro(sys_macros, "__STDC_VERSION__", "202311L");
+		addPredefMacro(sys_macros, "__STDC_IEC_60559_BFP__", "202311L");
 	} else if (options.target.version & Features_C11) {
-		PUSH(paths->system_macros, zstr("__STDC_VERSION__=201710L"));
+		addPredefMacro(sys_macros, "__STDC_VERSION__", "201710L");
 	} else if (options.target.version & Features_C99) {
-		PUSH(paths->system_macros, zstr("__STDC_VERSION__=199901L"));
+		addPredefMacro(sys_macros, "__STDC_VERSION__", "199901L");
 	}
 
 
 	if (options.target.version & Features_C99) {
-		PUSH(paths->system_macros, zstr("__STDC_HOSTED__=1"));
+		addPredefMacro(sys_macros, "__STDC_HOSTED__", "1");
 	}
 
 	if (options.target.version & Features_C11) {
-		PUSH(paths->system_macros, zstr("__STDC_ANALYZABLE__=1"));
-		PUSH(paths->system_macros, zstr("__STDC_NO_ATOMICS__=1"));
-		PUSH(paths->system_macros, zstr("__STDC_NO_COMPLEX__=1"));
-		PUSH(paths->system_macros, zstr("__STDC_NO_THREADS__=1"));
+		addPredefMacro(sys_macros, "__STDC_ANALYZABLE__", "1");
+		addPredefMacro(sys_macros, "__STDC_NO_ATOMICS__", "1");
+		addPredefMacro(sys_macros, "__STDC_NO_COMPLEX__", "1");
+		addPredefMacro(sys_macros, "__STDC_NO_THREADS__", "1");
 	}
 
 	if (options.target.version & Features_GNU_Extensions) {
-		PUSH(paths->system_macros, zstr("unix=1"));
-		PUSH(paths->system_macros, zstr("__unix__=1"));
-		PUSH(paths->system_macros, zstr("__LITTLE_ENDIAN__=1"));
+		addPredefMacro(sys_macros, "__unix__", "1");
+		addPredefMacro(sys_macros, "unix", "1");
+		addPredefMacro(sys_macros, "__LP64__", "1");
+		addPredefMacro(sys_macros, "_LP64", "1");
 	}
+
+	bool using_glibc = true;
+	if (using_glibc) {
+		for (int i = 0; builtins_types[i].name; i++) {
+			BasicType t = builtins_types[i].type;
+
+			u32 name_len = 9 + strlen(builtins_types[i].name);
+			char *mem = aalloc(arena, name_len + 21);
+			u32 got = sprintf(mem, "__%s_MAX__", builtins_types[i].name) + 1;
+			assert(got == name_len);
+			char *content = mem + got;
+
+			u32 size = options.target.typesizes[t & ~Int_unsigned];
+			u64 bits = ULLONG_MAX & bitsBelow(size);
+			if ((t & Int_unsigned) == 0) bits /= 2;
+			sprintf(content, "%llu", (unsigned long long)bits);
+
+			addPredefMacro(sys_macros, mem, content);
+		}
+	}
+}
+
+BuiltinType builtins_types[] = {
+	// These are actually target-dependent!
+	{"SCHAR", Int_suchar | Int_unsigned},
+	{"WCHAR", Int_int},
+	{"SHRT", Int_short},
+	{"INT", Int_int},
+	{"LONG", Int_long},
+	{"LONG_LONG", Int_longlong},
+	{"WINT", Int_int},
+	{"SIZE", Int_long | Int_unsigned},
+	{"PTRDIFF", Int_long},
+	{"INTMAX", Int_longlong},
+	{"UINTMAX", Int_longlong | Int_unsigned},
+
+	{"INT8", Int_suchar},
+	{"INT16", Int_short},
+	{"INT32", Int_int},
+	{"INT64", Int_long},
+	{"UINT8", Int_suchar | Int_unsigned},
+	{"UINT16", Int_short | Int_unsigned},
+	{"UINT32", Int_int | Int_unsigned},
+	{"UINT64", Int_long | Int_unsigned},
+
+	{"INT_LEAST8", Int_suchar},
+	{"INT_LEAST16", Int_short},
+	{"INT_LEAST32", Int_int},
+	{"INT_LEAST64", Int_long},
+	{"UINT_LEAST8", Int_suchar | Int_unsigned},
+	{"UINT_LEAST16", Int_short | Int_unsigned},
+	{"UINT_LEAST32", Int_int | Int_unsigned},
+	{"UINT_LEAST64", Int_long | Int_unsigned},
+
+	{"INT_FAST8", Int_suchar},
+	{"INT_FAST16", Int_short},
+	{"INT_FAST32", Int_int},
+	{"INT_FAST64", Int_long},
+	{"UINT_FAST8", Int_suchar | Int_unsigned},
+	{"UINT_FAST16", Int_short | Int_unsigned},
+	{"UINT_FAST32", Int_int | Int_unsigned},
+	{"UINT_FAST64", Int_long | Int_unsigned},
+
+	{"INTPTR", Int_long},
+	{"UINTPTR", Int_long | Int_unsigned},
+	{0},
+};
+
+
+static void addPredefMacro (MacroDefiners *def, char *name, char *content) {
+	assert(name);
+	if (content == NULL) content = "1";
+
+	name = mdupe(name, strlen(name) + 1);
+	content = mdupe(content, strlen(content) + 1);
+
+	MacroDefiner m = {.name = name, .content = content};
+	PUSH(*def, m);
 }
 
 static String checkIncludePath (Arena *arena, const char *path) {
@@ -789,7 +901,7 @@ static void emitDeps (FILE *dest, const char *out_name, FileList files, bool emi
 				fprintf(dest, " \\\n ");
 				line_length = 1;
 			}
-			fprintf(dest, " %.*s", STRING_PRINTAGE(name));
+			fprintf(dest, " %.*s", STR_PRINTAGE(name));
 			line_length += name.len + 1;
 		}
 	}
