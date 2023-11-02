@@ -410,7 +410,7 @@ static CValue evalExprPrefix (Parse *parse) {
 		CValue v = evalExprPrefix(parse);
 		if (!(v.type & Int_unsigned) && (v.val == signBit(size(parse, v.type))))
 			cevalerror(parse, "signed integer overflow");
-		v.val = -v.val;
+		v.val = 0-v.val; // Dear MSVC, please learn to read a standard. It is really not that hard.
 		return v;
 	}
 // 	case Tok_OpenParen: {

@@ -1810,8 +1810,8 @@ static void parseAttributes (Parse *parse, Attributes *attr) {
 		requires(parse, "attributes", Features_C23);
 		parse->pos += 2;
 		parseerror(parse, NULL, "TODO Implement attributes");
-		expect(parse, Tok_CloseBracket);
-		expect(parse, Tok_CloseBracket);
+		// expect(parse, Tok_CloseBracket);
+		// expect(parse, Tok_CloseBracket);
 	}
 }
 
@@ -3162,7 +3162,7 @@ static Declaration parseDeclarator (Parse *parse, Type base_type, Namedness name
 
 			if (tryEat(parse, Tok_Asterisk)) {
 				parseerror(parse, open_bracket, "TODO Support ‘variable length array of unspecified size’, whatever that may be");
-				array->kind = Kind_UnsizedArray;
+				// array->kind = Kind_UnsizedArray;
 			} else if (parse->pos->kind == Tok_CloseBracket) {
 				array->kind = Kind_UnsizedArray;
 			} else {

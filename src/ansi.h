@@ -1,6 +1,7 @@
+// Whether ANSI escapes are supported on stderr.
+extern bool have_ansi_terminal;
 
-// Returns the supplied formatting code if stderr is a terminal
-// supporting ANSI escapes, the empty string otherwise.
+// Returns the supplied formatting code if have_terminal is true, the empty string otherwise.
 const char *ifTerminal(const char*);
 
 #define BLACK ifTerminal("\x1b[30m")

@@ -73,9 +73,16 @@ typedef LIST(char) DynString;
 void strAppend(DynString *str, String s);
 
 
+#if defined(__GNUC__)
+#define unreach_impl __builtin_unreachable
+#elif HAVE_WINDOWS
+__declspec(noreturn) __forceinline void unreach_impl() { __assume(false); }
+#else
+#define unreach_impl() assert(!"unreachable"))
+#endif
 
 // #define CHECK(a, msg) do { if (!(a)) {puts("error: " msg); exit(EXIT_FAILURE); } } while(0)
-#define unreachable (assert(!"unreachable"))
+#define unreachable unreach_impl()
 
 
 #if (__STDC_VERSION__ >= 201904L) || (defined(_MSC_VER) && (_MSC_VER >= 1911) && (_MSVC_LANG >= 201703L))
@@ -115,6 +122,7 @@ void strAppend(DynString *str, String s);
 u64 strHash(String);
 
 typedef enum {
+	Source_None,
 	Source_Regular,
 	Source_StandardHeader,
 
@@ -179,6 +187,7 @@ SourceFile *readAllAlloc(String path_owning);
 String sourceName(SourceFile *source);
 bool isDirectory(const char *path);
 bool isFile(const char *path);
+bool isDirSeparator(char);
 
 
 typedef enum {

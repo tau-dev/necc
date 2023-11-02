@@ -13,8 +13,12 @@
 #include "limits.h"
 #include "checked_arith.h"
 
+#if HAVE_WINDOWS
+#include "windows_setup.h"
+#endif
+
 #if HAVE_POSIX
-#include <unistd.h>
+#include "posix_setup.h"
 #endif
 
 
@@ -214,7 +218,7 @@ static FILE *openOut (const char *name) {
 		return NULL;
 	if (name == default_output)
 		return stdout;
-	FILE *f = fopen(name, "w");
+	FILE *f = fopen(name, "wb");
 	if (f == NULL)
 		generalFatal("could not open output file %s", name);
 	return f;
@@ -279,6 +283,7 @@ static void setupPaths(Arena *arena, LexParams *paths, bool stdinc);
 
 int main (int argc, char **args) {
 	Arena arena = create_arena(256 * 1024);
+	setupTerminal();
 
 	Options options = {
 		.target = target_x64_linux_gcc,
@@ -697,11 +702,8 @@ typedef struct {
 BuiltinType builtins_types[];
 
 static void setupPaths (Arena *arena, LexParams *paths, bool stdinc) {
-	if (stdinc) {
-		PUSH(paths->sys_include_dirs, zstr(GLIBC_DIR "/include/"));
-		PUSH(paths->sys_include_dirs, zstr("/usr/include/"));
-		PUSH(paths->sys_include_dirs, zstr(GLIBC_DIR "/include-fixed/"));
-	}
+	if (stdinc) setupStdIncludes(&paths->sys_include_dirs);
+
 	MacroDefiners *sys_macros = &paths->system_macros;
 	addPredefMacro(sys_macros, "__STDC__", "1");
 	addPredefMacro(sys_macros, "__x86_64__", "1");
@@ -845,7 +847,7 @@ static String checkIncludePath (Arena *arena, const char *path) {
 	if (!isDirectory(path))
 		generalFatal("could not access include path %s", path);
 	u32 len = strlen(path);
-	if (path[len-1] == '/')
+	if (isDirSeparator(path[len-1]))
 		return (String) {len, path};
 	char *c = aalloc(arena, len + 2);
 	memcpy(c, path, len);

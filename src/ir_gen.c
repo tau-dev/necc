@@ -54,7 +54,7 @@ static u32 pushAuxData(IrList *ir, const void *data, u32 len) {
 		}
 	}
 	memcpy(ir->aux_data.ptr + ir->aux_data.len, data, len);
-	u32 res = ir->aux_data.len;
+	u32 res = (u32) ir->aux_data.len;
 	ir->aux_data.len += len;
 	return res;
 }
@@ -172,31 +172,30 @@ void discardBlock(Block *blk) {
 }
 
 
+typedef union { float f; double d; u64 i; } FloatPun;
 static inline double doubleFromConst(u64 i, u16 size) {
+	FloatPun p = { 0 };
+	p.i = i;
 	switch (size) {
 	case 4: {
-		float flt;
-		memcpy(&flt, &i, 4);
-		return flt;
+		return p.f;
 	}
 	case 8: {
-		double flt;
-		memcpy(&flt, &i, 8);
-		return flt;
+		return p.d;
 	}
 	default: unreachable;
 	}
 }
 
 static inline u64 constFromFloat(float f) {
-	u64 i = 0;
-	memcpy(&i, &f, 4);
-	return i;
+	FloatPun p = { 0 };
+	p.f = f;
+	return p.i;
 }
-static inline u64 constFromDouble(double f) {
-	u64 i = 0;
-	memcpy(&i, &f, 8);
-	return i;
+static inline u64 constFromDouble(double d) {
+	FloatPun p = { 0 };
+	p.d = d;
+	return p.i;
 }
 
 static IrRef genBinOp (IrBuild *build, InstKind op, u8 properties, IrRef a, IrRef b) {
@@ -917,16 +916,16 @@ void emitIr (EmitParams params) {
 
 			bool is_string = true;
 			String data = val.value_data;
-			for (u32 i = 0; i < data.len - 1; i++) {
-				if (data.ptr[i] < 32 || (uchar) data.ptr[i] >= 128)
+			for (u32 j = 0; j < data.len - 1; j++) {
+				if (data.ptr[j] < 32 || (uchar) data.ptr[j] >= 128)
 					is_string = false;
 			}
 			is_string = is_string && data.ptr[data.len - 1] == 0;
 			if (is_string) {
 				fprintf(dest, "\"%.*s\"\n", STR_PRINTAGE(data));
 			} else {
-				for (u32 i = 0; i < data.len; i++) {
-					fprintf(dest, "%02hhx ", data.ptr[i]);
+				for (u32 j = 0; j < data.len; j++) {
+					fprintf(dest, "%02hhx ", data.ptr[j]);
 				}
 				fprintf(dest, "\n");
 			}
@@ -977,9 +976,9 @@ void printBlock (FILE *dest, Block *blk, IrList ir) {
 			fprintf(dest, "call %lu (", (ulong) inst.call.function_ptr);
 
 			Call call = AUX_DATA(Call, ir, inst.call.data);
-			for (u32 i = 0; i < call.arguments.len; i++) {
-				fprintf(dest, "%lu", (ulong) call.arguments.ptr[i].arg_inst);
-				if (i + 1 < call.arguments.len)
+			for (u32 j = 0; j < call.arguments.len; j++) {
+				fprintf(dest, "%lu", (ulong) call.arguments.ptr[j].arg_inst);
+				if (j + 1 < call.arguments.len)
 					fprintf(dest, ", ");
 			}
 			fprintf(dest, ")");

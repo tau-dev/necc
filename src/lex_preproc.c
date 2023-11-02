@@ -39,6 +39,7 @@ static inline bool isOctDigit(char c);
 static inline int hexToInt(char c);
 static inline bool isDigit(char c);
 static inline bool isAlnum(char c);
+static inline bool isLinebreak(const char *c);
 
 static_assert(sizeof(Token) == 16, "sizeof(Token) == 16");
 
@@ -668,7 +669,7 @@ static Token getToken (Arena *str_arena, SourceFile source, Location *loc, Symbo
 		u32 len = pos - start;
 		if (len > UINT16_MAX)
 			lexerror(source, *loc, "this number is too long; the maximum supported length is 65535 characters");
-		tok.literal_len = len;
+		tok.literal_len = (u16) len;
 
 		pos--;
 	} break;
@@ -970,15 +971,15 @@ Tokenization lex (Arena *generated_strings, String input, LexParams params) {
 	PUSH(t.files, NULL);
 
 
-	u32 slash = input.len - 1;
-	while (slash > 0 && input.ptr[slash-1] != '/') slash--;
+	size_t slash = input.len - 1;
+	while (slash > 0 && !isDirSeparator(input.ptr[slash-1])) slash--;
 
 	String input_directory = {slash, input.ptr};
 	String filename = {input.len - slash, input.ptr + slash};
 
 	SourceFile *initial_source = tryOpen(&sources, &t.files, input_directory, filename);
 	if (initial_source == NULL)
-		generalFatal("could not open file \"%.*s\"", STR_PRINTAGE(filename));
+		generalFatal("could not open file ‘%.*s’", STR_PRINTAGE(filename));
 
 	const char *pos = initial_source->content.ptr;
 	SourceFile source = *initial_source;
@@ -1094,7 +1095,7 @@ Tokenization lex (Arena *generated_strings, String input, LexParams params) {
 					}
 				}
 				if (new_source == NULL) {
-					start_at_order -= params.user_include_dirs.len;
+					start_at_order -= (i32) params.user_include_dirs.len;
 					if (start_at_order < 0) start_at_order = 0;
 					for (u32 i = start_at_order; i < params.sys_include_dirs.len; i++) {
 						new_source = tryOpen(&sources, &t.files, params.sys_include_dirs.ptr[i], includefilename);
@@ -1106,7 +1107,7 @@ Tokenization lex (Arena *generated_strings, String input, LexParams params) {
 					}
 				}
 				if (new_source == NULL)
-					lexerror(source, begin, "could not open include file \"%.*s\"", STR_PRINTAGE(includefilename));
+					lexerror(source, begin, "could not open include file ‘%.*s’", STR_PRINTAGE(includefilename));
 				new_source->next_include_index = include_order;
 
 				if (includes_stack.len >= MAX_INCLUDES)
@@ -1697,7 +1698,9 @@ static String restOfLine (SourceFile source, Location *loc, const char **pos) {
 	const char *start = *pos;
 	while (**pos && **pos != '\n')
 		(*pos)++;
-	return (String) {*pos - start, start};
+	size_t len = *pos - start;
+	if ((*pos)[-1] == '\r') len--;
+	return (String) {len, start};
 }
 
 static inline void newLine(Location *loc) { loc->line++; loc->column = 1; }
@@ -1711,7 +1714,7 @@ static SpaceClass tryGobbleSpace (SourceFile source, Location *loc, const char *
 		// TODO Do I really want to handle the ??/ trigraph everywhere
 		// that newlines need to be skipped? Consider the performance
 		// impact versus replacing all trigraphs on file input.
-		if (pos[0] == '\\' && pos[1] == '\n') {
+		if (pos[0] == '\\' && isLinebreak(pos + 1)) {
 			pos += 2;
 			newLine(loc);
 			line_begin = pos;
@@ -1750,7 +1753,7 @@ static SpaceClass tryGobbleSpace (SourceFile source, Location *loc, const char *
 
 static bool followedByOpenParen(const char *p) {
 	while (*p) {
-		if (p[0] == '\\' && p[1] == '\n') {
+		if (p[0] == '\\' && isLinebreak(p + 1)) {
 			p += 2;
 		} else if (p[0] == '/' && p[1] == '/') {
 			// TODO Check for C99
@@ -1907,10 +1910,11 @@ static IfClass skipToElseIfOrEnd (SourceFile source, Location *loc, const char *
 			}
 			pos--;
 		} else if (!isSpace(*pos)) {
-			if (pos[0] == '\\' && pos[1] == '\n') {
-				pos++;
+			if (pos[0] == '\\' && isLinebreak(pos + 1)) {
+				pos += 2;
+				if (*pos == '\n') pos++;
 				newLine(loc);
-				line_begin = pos + 1;
+				line_begin = pos;
 			} else if (pos[0] == '/' && pos[1] == '*') {
 				while (*pos && !(pos[0] == '*' && pos[1] == '/')) {
 					if (*pos == '\n') {
@@ -1949,8 +1953,9 @@ static bool gobbleSpaceToNewline (const char **p, Location *loc) {
 	const char *line_begin = pos;
 	while (*pos && *pos != '\n') {
 		if (!isSpace(*pos)) {
-			if (pos[0] == '\\' && pos[1] == '\n') {
-				pos++;
+			if (pos[0] == '\\' && isLinebreak(pos + 1)) {
+				pos += 2;
+				if (*pos == '\n') pos++;
 				newLine(loc);
 				line_begin = pos;
 			} else if (pos[0] == '/' && pos[1] == '/') {
@@ -2094,7 +2099,7 @@ static String includeFilename (ExpansionParams params, TokenList *buf, bool *quo
 	gobbleSpaceToNewline(&pos, params.loc);
 	*params.src = pos;
 
-	if (pos[0] && pos[0] != '\n')
+	if (pos[0] && !isLinebreak(pos))
 		lexerror(source, *params.loc, "extra text after file name");
 	return res;
 }
@@ -2124,10 +2129,10 @@ static u64 preprocExpression (ExpansionParams params, TokenList *buf, const Toke
 // TODO Come up with a better system for nice highlighting.
 
 
-static char name[256] = {0};
-static const char *const name_end = name + 256;
 
 const char *tokenNameHighlighted (TokenKind kind) {
+	static char name[256] = { 0 };
+	static const char *const name_end = name + 256;
 	switch (kind) {
 	case Tok_Identifier: return "identifier";
 	case Tok_Real: return "floating-point-literal";
@@ -2260,6 +2265,9 @@ static inline bool isAlnum (char c) {
 	return isAlpha(c) || isDigit(c);
 }
 
+static inline bool isLinebreak (const char *c) {
+	return c[0] == '\n' || (c[0] == '\r' && c[1] == '\n');
+}
 
 static const char *defineMacro (
 	Arena *arena,
@@ -2408,7 +2416,7 @@ static void predefineMacros (
 
 
 
-static void markMacroDecl(FILE *dest, SourceFile source, Location loc, String macro_name) {
+static void markMacroDecl (FILE *dest, SourceFile source, Location loc, String macro_name) {
 	String name = sourceName(&source);
 	fprintf(dest, "%.*s:%lu:%lu:macro:%.*s:\n", STR_PRINTAGE(name),
 			(unsigned long) loc.line, (unsigned long) loc.column, STR_PRINTAGE(macro_name));
@@ -2416,7 +2424,7 @@ static void markMacroDecl(FILE *dest, SourceFile source, Location loc, String ma
 
 
 
-static u32 lexEscapeCode(SourceFile *source, Location loc, const char **p) {
+static u32 lexEscapeCode (SourceFile *source, Location loc, const char **p) {
 	const char *pos = *p;
 	assert(pos[0] == '\\');
 	pos++;
@@ -2449,7 +2457,7 @@ static u32 lexEscapeCode(SourceFile *source, Location loc, const char **p) {
 	return res;
 }
 
-static String processStringLiteral(SourceFile *file, Location loc, Arena *arena, String src) {
+static String processStringLiteral (SourceFile *file, Location loc, Arena *arena, String src) {
 	char *res = aalloc(arena, src.len + 1);
 	char *dest = res;
 
@@ -2501,8 +2509,7 @@ static SourceFile *tryOpen (StringMap *sources, FileList *files, String dir, Str
 		return NULL;
 	}
 #elif HAVE_WINDOWS
-	char *resolved = _fullpath(NULL, full_path, PATH_MAX);
-	free(full_path);
+	char *resolved = _fullpath(NULL, full_path, _MAX_PATH);
 	if (!resolved) {
 		free(full_path);
 		return NULL;
@@ -2523,11 +2530,12 @@ static SourceFile *tryOpen (StringMap *sources, FileList *files, String dir, Str
 		if (file) {
 			*entry = file;
 
-			u32 slash;
-			for (slash = full_len; slash > 0; slash--) {
-				if (full_path[slash-1] == '/')
-					break;
+			u32 slash = full_len;
+			while (slash > 0) {
+				slash--;
+				if (isDirSeparator(full_path[slash])) break;
 			}
+			file->kind = Source_Regular;
 			file->plain_name = (String) {full_len, full_path};
 			file->plain_path = (String) {slash, full_path};
 			file->idx = files->len;

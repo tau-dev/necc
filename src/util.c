@@ -2,7 +2,9 @@
 #include "wyhash.h"
 #include "stdio.h"
 #include "ansi.h"
-#ifdef __unix__
+
+
+#if HAVE_POSIX
 #include <sys/stat.h>
 #include <unistd.h>
 #endif
@@ -18,16 +20,18 @@ Provides functions for strings, hash maps and error reporting.
 
 */
 
-const char *ifTerminal(const char *val) {
-#ifdef __unix__
-	if (isatty(2))
+
+bool have_ansi_terminal = false;
+
+const char *ifTerminal (const char *val) {
+	if (have_ansi_terminal)
 		return val;
-#endif
-	return "";
+	else
+		return "";
 }
 
 // TODO Do not allow regular files.
-bool isDirectory(const char *path) {
+bool isDirectory (const char *path) {
 	assert(path);
 #ifdef __unix__
 	struct stat path_stat;
@@ -39,7 +43,7 @@ bool isDirectory(const char *path) {
 }
 
 // TODO Do not allow regular files.
-bool isFile(const char *path) {
+bool isFile (const char *path) {
 #ifdef __unix__
 	struct stat path_stat;
 	if (stat(path, &path_stat) == -1)
@@ -51,6 +55,14 @@ bool isFile(const char *path) {
 		return false;
 	fclose(f);
 	return true;
+}
+
+bool isDirSeparator (char c) {
+#if HAVE_WINDOWS
+	return c == '/' || c == '\\';
+#else
+	return c == '/';
+#endif
 }
 
 bool eql (const char* a, String b) {
@@ -66,7 +78,7 @@ String zstr (const char *s) {
 	return (String) {strlen(s), s};
 }
 
-void *mdupe(const void *data, size_t len) {
+void *mdupe (const void *data, size_t len) {
 	void *new = malloc(len);
 	memcpy(new, data, len);
 	return new;
@@ -121,7 +133,7 @@ SourceFile *readAllAlloc (String filename) {
 	FILE *f = NULL;
 
 	if (isFile(filename.ptr))
-		f = fopen(filename.ptr, "r");
+		f = fopen(filename.ptr, "rb");
 	if (f) {
 		if (fseek(f, 0, SEEK_END) == 0) {
 			long count = ftell(f);
@@ -176,6 +188,8 @@ static Log plainLevel (Log l) { return l & ~Log_Fatal & ~Log_Noexpand; }
 void printMsg (Log level, SourceFile source, Location loc) {
 	assert(loc.file_id == source.idx);
 	switch (source.kind) {
+	case Source_None:
+		break;
 	case Source_SystemDefinedMacro:
 		fprintf(stderr, "%s<system defined macro>%s %.*s:\t", BOLD, RESET, STR_PRINTAGE(source.plain_name));
 		break;
@@ -214,7 +228,7 @@ void printInfo (SourceFile source, Location loc) {
 }
 
 void generalFatal(const char *msg, ...) {
-	fprintf(stderr, "%s%serror:   %s", BOLD, RED, RESET);
+	printErr((SourceFile) {0}, (Location) {0});
 	va_list args;
 	va_start(args, msg);
 	vfprintf(stderr, msg, args);

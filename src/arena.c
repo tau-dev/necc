@@ -1,5 +1,12 @@
 #include <stdio.h>
+
+// Dear MSVC team,
+// didn't you promise to be better and finally adhere to standards?
+// Sincerely,
+// A Concerned Programmer
+#ifndef _MSC_VER
 #include <stdalign.h>
+#endif
 
 #include "arena.h"
 
@@ -33,11 +40,15 @@ void *aalloc(Arena* arena, size_t size) {
 	if (size == 0)
 		return NULL;
 
-	size_t alignment = alignof(max_align_t);
+#ifdef _MSC_VER
+	size_t alignment = 16; // Sod it. 
+#else
+	size_t alignment = _Alignof(max_align_t);
+#endif
 	size = (size + alignment - 1) / alignment * alignment;
 
 	if (arena->last_used + size > arena->block_size) {
-		u32 next_size = size >= arena->block_size ? size : arena->block_size;
+		size_t next_size = size >= arena->block_size ? size : arena->block_size;
 		ArenaBlock *new = malloc(next_size + BLOCK_HEADER);
 		if (!new) {
 			puts("ERROR: Out ouf memory on arena extension.");
