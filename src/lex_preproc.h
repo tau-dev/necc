@@ -174,9 +174,6 @@ typedef struct Token {
 	u8 literal_type;
 	u16 literal_len;
 
-	// TODO Do not convert numbers in the lexer: for stringification or
-	// preprocessor-only invocation, we need to be able to re-emit any
-	// token exactly as given.
 	union {
 		Symbol *symbol;
 		const char *literal_src; // Length is in literal_len

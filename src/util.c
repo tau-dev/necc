@@ -30,7 +30,6 @@ const char *ifTerminal (const char *val) {
 		return "";
 }
 
-// TODO Do not allow regular files.
 bool isDirectory (const char *path) {
 	assert(path);
 #ifdef __unix__
@@ -42,7 +41,6 @@ bool isDirectory (const char *path) {
 	return !isFile(path);
 }
 
-// TODO Do not allow regular files.
 bool isFile (const char *path) {
 #ifdef __unix__
 	struct stat path_stat;
@@ -80,8 +78,15 @@ String zstr (const char *s) {
 
 void *mdupe (const void *data, size_t len) {
 	void *new = malloc(len);
+	relAssert(new);
 	memcpy(new, data, len);
 	return new;
+}
+
+void relAssert (bool b) {
+	if (!b) {
+		generalFatal("internal compiler error");
+	}
 }
 
 

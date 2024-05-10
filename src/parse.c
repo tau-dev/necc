@@ -63,7 +63,7 @@ typedef struct {
 	MutableString reloc_data;
 } InitializationDest;
 
-static Location locationOf(const Parse *parse, const Token *tok) {
+static Location locationOf (const Parse *parse, const Token *tok) {
 	return parse->tokens.list.positions[tok - parse->tokens.list.tokens].source;
 }
 
@@ -655,6 +655,7 @@ static void parseStatement (Parse *parse, bool *had_non_declaration) {
 	} break;
 	case Tok_Key_Do: {
 		parse->pos++;
+		Scope s = pushScope(parse);
 		*had_non_declaration = true;
 
 		Block *outer_head = parse->current_loop_head;
@@ -680,9 +681,12 @@ static void parseStatement (Parse *parse, bool *had_non_declaration) {
 
 		parse->current_loop_head = outer_head;
 		parse->current_loop_switch_exit = outer_exit;
+		popScope(parse, s);
 	} break;
 	case Tok_Key_While: {
 		parse->pos++;
+		Scope s = pushScope(parse);
+
 		*had_non_declaration = true;
 
 		Block *outer_head = parse->current_loop_head;
@@ -707,6 +711,7 @@ static void parseStatement (Parse *parse, bool *had_non_declaration) {
 
 		parse->current_loop_head = outer_head;
 		parse->current_loop_switch_exit = outer_exit;
+		popScope(parse, s);
 	} break;
 	case Tok_Key_For: {
 		*had_non_declaration = true;
@@ -765,6 +770,7 @@ static void parseStatement (Parse *parse, bool *had_non_declaration) {
 	} break;
 	case Tok_Key_If: {
 		parse->pos++;
+		Scope s = pushScope(parse);
 		*had_non_declaration = true;
 
 		expect(parse, Tok_OpenParen);
@@ -773,26 +779,32 @@ static void parseStatement (Parse *parse, bool *had_non_declaration) {
 		genBranch(build, toBoolean(parse, primary, condition, 1));
 		Block *head = build->insertion_block;
 
+		Scope subblock = pushScope(parse);
 		head->exit.branch.on_true = startNewBlock(build, zstr("if_true"));
 		parseStatement(parse, had_non_declaration);
 		Block *on_true = build->insertion_block;
 		genJump(build, NULL);
+		popScope(parse, subblock);
 
 		Block *join = newBlock(build, zstr("if_join"));
 
 		if (parse->pos->kind == Tok_Key_Else) {
 			parse->pos++;
+			subblock = pushScope(parse);
 			head->exit.branch.on_false = startNewBlock(build, zstr("if_else"));
 			parseStatement(parse, had_non_declaration);
 			genJump(build, join);
+			popScope(parse, subblock);
 		} else {
 			head->exit.branch.on_false = join;
 			startBlock(build, join);
 		}
 		on_true->exit.unconditional = join;
+		popScope(parse, s);
 	} break;
 	case Tok_Key_Switch: {
 		parse->pos++;
+		Scope s = pushScope(parse);
 		expect(parse, Tok_OpenParen);
 		Value v = parseExpression(parse);
 		expect(parse, Tok_CloseParen);
@@ -814,6 +826,7 @@ static void parseStatement (Parse *parse, bool *had_non_declaration) {
 
 		parse->switch_block = outer_switch;
 		parse->current_loop_switch_exit = outer_exit;
+		popScope(parse, s);
 	} break;
 	case Tok_Key_Break:
 	case Tok_Key_Continue:
@@ -2718,9 +2731,12 @@ static bool tryParseTypeBase (Parse *parse, Type *type, u8 *storage_dest, Attrib
 		case Tok_Key_Restrict: base.qualifiers |= Qualifier_Restrict; break;
 		case Tok_Key_Atomic:
 			requires(parse, "atomic types", Features_C11);
-			base.qualifiers |= Qualifier_Atomic;
+			if (parse->pos[1].kind == Tok_OpenParen)  {
+				// TODO Parse _Atomic() type operator
+			} else {
+				base.qualifiers |= Qualifier_Atomic;
+			}
 			break;
-		// TODO Parse _Atomic() type operator
 		case Tok_Key_Unsigned:
 			if (signedness) {
 				if (is_unsigned)
@@ -2913,6 +2929,7 @@ static Type parseStructUnionBody (Parse *parse, bool is_struct) {
 		if (tryEatStaticAssert(parse))
 			continue;
 
+		u64 bitsize;
 		u8 storage;
 		Attributes field_base_attr;
 		Type base = parseTypeBase(parse, &storage, &field_base_attr);
@@ -2921,17 +2938,17 @@ static Type parseStructUnionBody (Parse *parse, bool is_struct) {
 
 
 		if (tryEat(parse, Tok_Semicolon)) {
-			Type t = resolveType(base);
-			if (t.kind != Kind_Struct && t.kind != Kind_Union)
-				parseerror(parse, begin, "missing ???");
+			Type anonymousMember = resolveType(base);
+			if (anonymousMember.kind != Kind_Struct && anonymousMember.kind != Kind_Union)
+				parseerror(parse, begin, "missing declarator");
 			requires(parse, "anonymous members", Features_C11);
 
 			u32 offset = 0;
 			if (is_struct)
-				offset = addMemberOffset(&current_offset, t, &parse->target);
-			foreach (i, t.compound.members) {
+				offset = addMemberOffset(&current_offset, anonymousMember, &parse->target);
+			foreach (i, anonymousMember.compound.members) {
 				// TODO Check that the last member is not a flexible array.
-				CompoundMember m = t.compound.members.ptr[i];
+				CompoundMember m = anonymousMember.compound.members.ptr[i];
 				m.offset += offset;
 				PUSH_A(parse->code_arena, members, m);
 			}
@@ -2943,13 +2960,13 @@ static Type parseStructUnionBody (Parse *parse, bool is_struct) {
 			bool bare_colon = tryEat(parse, Tok_Colon);
 
 			Attributes field_attr = field_base_attr;
-			Declaration decl;
+			Declaration decl = {.type = base};
 			if (!bare_colon)
 				decl = parseDeclarator(parse, base, Decl_Named, &field_attr);
 
 			if (bare_colon || tryEat(parse, Tok_Colon)) {
 				const Token *colon = parse->pos - 1;
-				Type basetype = bare_colon ? base : decl.type;
+				Type basetype = decl.type;
 				if (basetype.basic != Int_bool && (basetype.basic & ~Int_unsigned) != Int_int) {
 					requires(parse, "bit-fields of types other than int", Features_GNU_Extensions);
 					removeEnumness(parse, &basetype);
@@ -2958,7 +2975,6 @@ static Type parseStructUnionBody (Parse *parse, bool is_struct) {
 								printTypeHighlighted(parse->arena, basetype));
 				}
 
-				u64 bitsize;
 				if (!tryIntConstant(parse, parseExpression(parse), &bitsize))
 					parseerror(parse, colon, "the width of a bit field must be a constant integer expression");
 // 				parsemsg(Log_Warn, parse, colon, "TODO bit-fields");
@@ -2984,6 +3000,7 @@ static Type parseStructUnionBody (Parse *parse, bool is_struct) {
 
 			PUSH_A(parse->code_arena, members, ((CompoundMember) {decl.type, decl.name, member_offset}));
 		} while (tryEat(parse, Tok_Comma));
+
 		expect(parse, Tok_Semicolon);
 	}
 	return (Type) {

@@ -1948,7 +1948,7 @@ static Token getTokenSpaced (Arena *str_arena, SourceFile source, Location *loc,
 }
 
 static bool gobbleSpaceToNewline (const char **p, Location *loc) {
-	bool got = false;
+	bool got_space = false;
 	const char *pos = *p;
 	const char *line_begin = pos;
 	while (*pos && *pos != '\n') {
@@ -1958,6 +1958,8 @@ static bool gobbleSpaceToNewline (const char **p, Location *loc) {
 				if (*pos == '\n') pos++;
 				newLine(loc);
 				line_begin = pos;
+				got_space = true;
+				continue;
 			} else if (pos[0] == '/' && pos[1] == '/') {
 				while (*pos && *pos != '\n') pos++;
 				break;
@@ -1974,12 +1976,12 @@ static bool gobbleSpaceToNewline (const char **p, Location *loc) {
 			} else
 				break;
 		}
-		got = true;
+		got_space = true;
 		pos++;
 	}
 	loc->column += pos - line_begin;
 	*p = pos;
-	return got;
+	return got_space;
 }
 
 
@@ -2129,9 +2131,10 @@ static u64 preprocExpression (ExpansionParams params, TokenList *buf, const Toke
 // TODO Come up with a better system for nice highlighting.
 
 
-
+// FIXME This should be a static local variable, but that causes a
+// linker error in self-hosted.
+static char name[256] = { 0 };
 const char *tokenNameHighlighted (TokenKind kind) {
-	static char name[256] = { 0 };
 	static const char *const name_end = name + 256;
 	switch (kind) {
 	case Tok_Identifier: return "identifier";
@@ -2533,7 +2536,7 @@ static SourceFile *tryOpen (StringMap *sources, FileList *files, String dir, Str
 			u32 slash = full_len;
 			while (slash > 0) {
 				slash--;
-				if (isDirSeparator(full_path[slash])) break;
+				if (slash > 0 && isDirSeparator(full_path[slash-1])) break;
 			}
 			file->kind = Source_Regular;
 			file->plain_name = (String) {full_len, full_path};
@@ -2565,6 +2568,7 @@ static Symbol *getSymbol (SymbolList *list, String name) {
 }
 
 static u32 getSymbolId (SymbolList *list, String name) {
+	relAssert(name.ptr);
 	u64 hash = strHash(name);
 
 	if ((u32) hash == 0) hash = 1073741824; // 2^30, lel

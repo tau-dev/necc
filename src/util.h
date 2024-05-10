@@ -78,7 +78,7 @@ void strAppend(DynString *str, String s);
 #elif HAVE_WINDOWS
 __declspec(noreturn) __forceinline void unreach_impl() { __assume(false); }
 #else
-#define unreach_impl() assert(!"unreachable"))
+#define unreach_impl() assert(!"unreachable")
 #endif
 
 // #define CHECK(a, msg) do { if (!(a)) {puts("error: " msg); exit(EXIT_FAILURE); } } while(0)
@@ -182,6 +182,8 @@ bool eql(const char *, String);
 bool startsWith(const char *, String);
 String zstr(const char *);
 void *mdupe(const void *data, size_t len);
+// Assert that remains active in release mode.
+void relAssert(bool);
 
 SourceFile *readAllAlloc(String path_owning);
 String sourceName(SourceFile *source);

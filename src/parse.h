@@ -61,8 +61,8 @@ struct OrdinaryIdentifier {
 	bool is_used;
 };
 
+// A tagged struct/union/enum.
 typedef struct NameTaggedType NameTaggedType;
-
 struct NameTaggedType {
 	String name;
 	NameTaggedType *shadowed;

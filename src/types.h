@@ -77,6 +77,7 @@ enum {
 	Qualifier_Const = 1,
 	Qualifier_Volatile = 2,
 	Qualifier_Restrict = 4,
+	// This is a qualifier grammatically but not semantically. Should probably not be here.
 	Qualifier_Atomic = 8,
 };
 
@@ -97,7 +98,6 @@ typedef struct {
 } ArrayType;
 
 
-// TODO struct and union also have a name tag and storage duration!
 typedef struct CompoundMember CompoundMember;
 typedef SPAN(CompoundMember) Members;
 
@@ -118,6 +118,7 @@ typedef struct UnnamedEnum {
 } UnnamedEnum;
 
 typedef struct NameTaggedType NameTaggedType;
+
 typedef struct Type {
 	u8 kind;
 	u8 qualifiers;

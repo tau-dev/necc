@@ -844,6 +844,8 @@ static void addPredefMacro (MacroDefiners *def, char *name, char *content) {
 }
 
 static String checkIncludePath (Arena *arena, const char *path) {
+	if (path == NULL)
+		generalFatal("please supply a path to include");
 	if (!isDirectory(path))
 		generalFatal("could not access include path %s", path);
 	u32 len = strlen(path);

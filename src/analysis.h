@@ -1,5 +1,7 @@
 #include "ir.h"
 
+void calcLoopDepths(const IrList *ir, Blocks blocks);
+
 // Reduce the ir to only those instructions used by the blocks, in
 // def-before-use order.
 void decimateIr(IrList *ir, Blocks blocks);
@@ -24,5 +26,5 @@ void storeLoadPropagate(IrList ir, Blocks blocks);
 
 // Elide stores and copies within a block
 void innerBlockPropagate(IrList ir, Blocks blocks);
-// Perform more involved memory propagation; should do mostly complete SSAification of variables.
 // TODO
+// Perform more involved memory propagation; should do mostly complete SSAification of variables.
