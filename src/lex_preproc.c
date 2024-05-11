@@ -1693,10 +1693,12 @@ static void expandMacroWithoutRescan (ExpansionParams params, Macro *macro, Macr
 	Token stringified;
 	TokenLocation stringified_loc = {0};
 	bool preceded_by_concat = false;
+	bool prev_arg_empty = false;
 	foreach (i, macro->tokens)  {
 		MacroToken m = macro->tokens.ptr[i];
 		Token t = m.tok;
 
+		bool need_to_concat = preceded_by_concat && !prev_arg_empty;
 		if (m.parameter) {
 			MacroArgument *arg = &arguments[m.parameter-1];
 			if (t.kind == Tok_PreprocDirective) {
@@ -1715,17 +1717,23 @@ static void expandMacroWithoutRescan (ExpansionParams params, Macro *macro, Macr
 
 			u32 res_idx = 0;
 
-			if (preceded_by_concat && dest->count > 0 && used_argument.count > 0) {
-				*lastToken(*dest) = concatenate(params, m.loc, *lastToken(*dest), used_argument.tokens[0]);
-				res_idx++;
+			if (need_to_concat) {
+				if (used_argument.count > 0) {
+					*lastToken(*dest) = concatenate(params, m.loc, *lastToken(*dest), used_argument.tokens[0]);
+					res_idx++;
+				}
+			} else {
+				prev_arg_empty = used_argument.count == 0;
 			}
 
 			// PERFORMANCE Should resize once, then copy.
 			for (; res_idx < used_argument.count; res_idx++)
 				appendOneToken(dest, used_argument.tokens[res_idx], used_argument.positions[res_idx]);
-		} else if (preceded_by_concat && dest->count > 0) {
+
+		} else if (need_to_concat) {
 			*lastToken(*dest) = concatenate(params, m.loc, *lastToken(*dest), t);
 		} else {
+			prev_arg_empty = false;
 			appendOneToken(dest, t, (TokenLocation) {.source = m.loc});
 		}
 		preceded_by_concat = m.followed_by_concat;
