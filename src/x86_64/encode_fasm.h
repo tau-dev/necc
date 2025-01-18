@@ -112,35 +112,36 @@ typedef struct Mem {
 	i32 offset;
 } Mem;
 
-static void push (Codegen *c, Register r) {
-	emit(c, " push R", r);
+static void push (Codegen *c, u16 size, Register r) {
+	emit(c, " push R", registerSized(r, size));
+}
+static void pop (Codegen *c, u16 size, Register r) {
+	emit(c, " pop R", registerSized(r, size));
 }
 
-static void movRR (Codegen *c, Register src, Register dest) {
-	emit(c, " mov R, R", src, dest);
+static void movRR (Codegen *c, u16 size, Register src, Register dest) {
+	emit(c, " mov R, R", registerSized(src, size), registerSized(dest, size));
 }
 
-static void movRM (Codegen *c, Register src, Mem mem) {
-	emit(c, " movZ R, ~I(R)", sizeSuffix(sizeOfRegister(src)), src, mem.offset, mem.reg);
+static void movRM (Codegen *c, u16 size, Register src, Mem mem) {
+	emit(c, " movZ R, ~I(R)", sizeSuffix(size), registerSized(src, size), mem.offset, registerSized(mem.reg, I64));
 }
-static void movMR (Codegen *c, Mem mem, Register dest) {
-	emit(c, " movZ ~I(R), R", sizeSuffix(sizeOfRegister(dest)), mem.offset, mem.reg, dest);
+static void movMR (Codegen *c, u16 size, Mem mem, Register dest) {
+	emit(c, " movZ ~I(R), R", sizeSuffix(size), mem.offset, registerSized(mem.reg, I64), registerSized(dest, size));
 }
-static void movCM (Codegen *c, u32 val, Register size, Mem mem) {
-	emit(c, " movZ $I, ~I(R)", sizeSuffix(sizeOfRegister(size)), val, mem.offset, mem.reg);
+static void movCM (Codegen *c, u16 size, u32 val, Mem mem) {
+	emit(c, " movZ $I, ~I(R)", sizeSuffix(size), val, mem.offset, registerSized(mem.reg, I64));
 }
-static void movCR (Codegen *c, u32 val, Register dest) {
-	emit(c, " movZ $I, R", sizeSuffix(sizeOfRegister(dest)), val, dest);
+static void movCR (Codegen *c, u16 size, u32 val, Register dest) {
+	if (size == I16) size = I32; // IMM16 is slow to decode.
+	emit(c, " movZ $I, R", sizeSuffix(size), val, registerSized(dest, size));
 }
 
-static void movFR (Codegen *c, VecRegister src, Register dest) {
-	emit(c, " movsZ F, R", sizeFSuffix(dest), src, dest);
+static void movFM (Codegen *c, u16 size, VecRegister src, Mem mem) {
+	emit(c, " movsZ F, ~I(R)", sizeFSuffix(size), src, mem.offset, registerSized(mem.reg, I64));
 }
-static void movFM (Codegen *c, VecRegister src, u16 size, Mem mem) {
-	emit(c, " movsZ F, ~I(R)", sizeFSuffix(size), src, mem.offset, mem.reg);
-}
-static void movMF (Codegen *c, Mem mem, VecRegister dest, u16 size) {
-	emit(c, " movsZ ~I(R), F", sizeFSuffix(size), mem.offset, mem.reg, dest);
+static void movMF (Codegen *c, u16 size, Mem mem, VecRegister dest) {
+	emit(c, " movsZ ~I(R), F", sizeFSuffix(size), mem.offset, registerSized(mem.reg, I64), dest);
 }
 
 static void jmpB (Codegen *c, const Block *dest) {
@@ -171,12 +172,12 @@ static void jccL (Codegen *c, Condition cond, Label l) {
 }
 
 
-static void testRR (Codegen *c, Storage a, Storage b) {
-	emit(c, " test R, R", a, b);
+static void testRR (Codegen *c, u16 size, Register a, Register b) {
+	emit(c, " test R, R", registerSized(a, size), registerSized(b, size));
 }
 
-static void subRC (Codegen *c, Register dest, i32 val) {
-	emit(c, " sub $~I, R", val, dest);
+static void subRC (Codegen *c, u16 size, Register dest, i32 val) {
+	emit(c, " sub $~I, R", val, registerSized(dest, size));
 }
 
 static void emitString (Codegen *c, String s) {

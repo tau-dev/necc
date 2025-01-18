@@ -577,23 +577,23 @@ static void emitData (Codegen *c, Module module, String data, References referen
 
 
 static void movCI (Codegen *c, u32 val, IrRef dest) {
-	movCM(c, val, registerSize(c->ir.ptr[dest].size), (Mem) {RBP_8, c->storage[dest]});
+	movCM(c, c->ir.ptr[dest].size, val, (Mem) {RBP_8, c->storage[dest]});
 }
 static Register movIR (Codegen *c, IrRef src, Register dest) {
-	dest = registerSized(dest, c->ir.ptr[src].size);
-	movMR(c, (Mem) {RBP_8, c->storage[src]}, dest);
-	return dest;
+	u16 size = c->ir.ptr[src].size;
+	movMR(c, size, (Mem) {RBP_8, c->storage[src]}, dest);
+	return registerSized(dest, size);
 }
 static void movRI (Codegen *c, Register src, IrRef dest) {
-	assert(registerSize(c->ir.ptr[dest].size) == (src & RSIZE_MASK));
-	movRM(c, src, (Mem) {RBP_8, c->storage[dest]});
+	u16 size = c->ir.ptr[dest].size;
+	movRM(c, size, src, (Mem) {RBP_8, c->storage[dest]});
 }
 
 static void movIF (Codegen *c, IrRef src, VecRegister dest) {
-	movMF(c, (Mem) {RBP_8, c->storage[src]}, dest, c->ir.ptr[src].size);
+	movMF(c, c->ir.ptr[src].size, (Mem) {RBP_8, c->storage[src]}, dest);
 }
 static void movFI (Codegen *c, VecRegister src, IrRef dest) {
-	movFM(c, src, c->ir.ptr[dest].size, (Mem) {RBP_8, c->storage[dest]});
+	movFM(c, c->ir.ptr[dest].size, src, (Mem) {RBP_8, c->storage[dest]});
 }
 
 
@@ -712,11 +712,11 @@ static void emitFunctionForward (EmitParams params, u32 id) {
 
 	// No need to do callee-saves because those registers are never touched.
 
-	push(&c, RBP_8);
-	movRR(&c, RSP_8, RBP_8);
-	subRC(&c, RSP_8, stack_allocated);
+	push(&c, I64, RBP);
+	movRR(&c, I64, RSP, RBP);
+	subRC(&c, I64, RSP, stack_allocated);
 	if (mem_return)
-		movRM(&c, RDI_8, (Mem) {RBP_8, c.return_pointer_storage});
+		movRM(&c, I64, RDI, (Mem) {RBP_8, c.return_pointer_storage});
 
 
 
@@ -733,10 +733,10 @@ static void emitFunctionForward (EmitParams params, u32 id) {
 
 				if (info.class.registers[j] == Param_INTEGER) {
 					Register reg = gp_parameter_regs[info.registers[j]];
-					movRM(&c, registerSized(reg, size), (Mem) {RBP_8, info.storage + 8*j});
+					movRM(&c, size, reg, (Mem) {RBP_8, info.storage + 8*j});
 				} else {
 					assert(info.class.registers[j] == Param_SSE);
-					movFM(&c, info.registers[j], size, (Mem) {RBP_8, info.storage + 8*j});
+					movFM(&c, size, info.registers[j], (Mem) {RBP_8, info.storage + 8*j});
 				}
 			}
 		} else {
@@ -753,8 +753,8 @@ static void emitFunctionForward (EmitParams params, u32 id) {
 
 		// Copy out the registers into the register save area.
 		for (u32 i = gp_params; i < gp_parameter_regs_count; i++)
-			movRM(&c, registerSized(gp_parameter_regs[i], I64), (Mem) {RBP_8, -reg_save_area_size + i*8});
-		testRR(&c, RAX_4, RAX_4);
+			movRM(&c, I64, gp_parameter_regs[i], (Mem) {RBP_8, -reg_save_area_size + i*8});
+		testRR(&c, I32, RAX, RAX);
 		Label no_float_args = newLabel(&c, "vaarg_no_float_args", id);
 		jccL(&c, Cond_Equal, no_float_args);
 		for (u32 i = 0; i < 8; i++)
@@ -791,15 +791,15 @@ static void copyTo (Codegen *c, Register to_addr, i32 to_offset, Register from_a
 	to_addr = registerSized(to_addr, 8);
 	from_addr = registerSized(from_addr, 8);
 	while (size - offset > 8) {
-		movMR(c, (Mem) {from_addr, offset+from_offset}, R10_8);
-		movRM(c, R10_8, (Mem) {to_addr, offset+to_offset});
+		movMR(c, I64, (Mem) {from_addr, offset+from_offset}, R10);
+		movRM(c, I64, R10, (Mem) {to_addr, offset+to_offset});
 		offset += 8;
 	}
 
-	// This will break for non-power-of-two remainders.
-	Register tmp = registerSized(R10, size - offset);
-	movMR(c, (Mem) {from_addr, offset+from_offset}, tmp);
-	movRM(c, tmp, (Mem) {to_addr, offset+to_offset});
+	// FIXME This will break for non-power-of-two remainders.
+	size -= offset;
+	movMR(c, size, (Mem) {from_addr, offset+from_offset}, R10);
+	movRM(c, size, R10, (Mem) {to_addr, offset+to_offset});
 }
 
 static void triple (Codegen *c, const char *inst, u16 size, IrRef lhs, IrRef rhs, IrRef dest) {
@@ -887,7 +887,7 @@ static void emitBlockForward (Codegen *c, Blocks blocks, u32 i) {
 	case Exit_Return:
 		if (exit.ret != IDX_NONE) {
 			if (c->ret_class.count == 0) {
-				movMR(c, (Mem) {RBP_8, c->return_pointer_storage}, RAX_8);
+				movMR(c, I64, (Mem) {RBP_8, c->return_pointer_storage}, RAX);
 				copyTo(c, RAX, 0, RBP, c->storage[exit.ret], valueSize(c, exit.ret));
 			} else {
 				u32 gp_returns = 0;
@@ -898,18 +898,18 @@ static void emitBlockForward (Codegen *c, Blocks blocks, u32 i) {
 					i32 src = c->storage[exit.ret] + 8*j;
 					if (c->ret_class.registers[j] == Param_INTEGER) {
 						int reg = gp_returns == 0 ? RAX_8 : RDX_8;
-						movMR(c, (Mem) {RBP_8, src}, registerSized(reg, size));
+						movMR(c, size, (Mem) {RBP_8, src}, reg);
 						gp_returns++;
 					} else {
 						assert(c->ret_class.registers[j] == Param_SSE);
-						movMF(c, (Mem) {RBP_8, src}, XMM+fp_returns, size);
+						movMF(c, size, (Mem) {RBP_8, src}, XMM+fp_returns);
 						fp_returns++;
 					}
 				}
 			}
 		}
-		movRR(c, RBP_8, RSP_8);
-		emit(c, " pop R", RBP_8);
+		movRR(c, I64, RBP, RSP);
+		pop(c, I64, RBP);
 		emit(c, " ret");
 		break;
 	case Exit_None: unreachable;
@@ -1010,9 +1010,8 @@ static void emitInstForward (Codegen *c, IrRef i) {
 		movRI(c, shiftee, i);
 	} break;
 	case Ir_Truncate: {
-		Register reg = registerSized(RAX, inst.size);
-		movMR(c, (Mem) {RBP_8, c->storage[inst.unop]}, reg);
-		movRI(c, reg, i);
+		movMR(c, inst.size, (Mem) {RBP_8, c->storage[inst.unop]}, RAX);
+		movRI(c, RAX, i);
 	} break;
 	case Ir_SignExtend: {
 		Register reg = registerSized(RAX, inst.size);
@@ -1042,8 +1041,8 @@ static void emitInstForward (Codegen *c, IrRef i) {
 	case Ir_Constant:
 		assert(inst.size <= 8);
 		if (inst.size > 4 && inst.constant > INT32_MAX) {
-			movCM(c, inst.constant, RSIZE_DWORD, (Mem) {RBP_8, c->storage[i]});
-			movCM(c, (inst.constant >> 32), RSIZE_DWORD, (Mem) {RBP_8, c->storage[i] + 4});
+			movCM(c, I32, inst.constant, (Mem) {RBP_8, c->storage[i]});
+			movCM(c, I32, (inst.constant >> 32), (Mem) {RBP_8, c->storage[i] + 4});
 		} else {
 			movCI(c, inst.constant, i);
 		}
@@ -1091,7 +1090,7 @@ static void emitInstForward (Codegen *c, IrRef i) {
 			// use this polyfill, taken from GCC output.
 
 			movIR(c, inst.unop, RAX);
-			emit(c, " test R, R", RAX_8, RAX_8);
+			testRR(c, I64, RAX, RAX);
 
 			Label negative = newLabel(c, "u2f_negative", i);
 			Label done = newLabel(c, "u2f_done", i);
@@ -1102,7 +1101,7 @@ static void emitInstForward (Codegen *c, IrRef i) {
 
 			placeLabel(c, negative);
 			// Divide RAX by two, rounding to odd.
-			movRR(c, RAX_8, RDI_8);
+			movRR(c, I64, RAX, RDI);
 			emit(c, " and $1, R", RDI_8);
 			emit(c, " shrq R", RAX_8);
 			emit(c, " orq R, R", RDI_8, RAX_8);
@@ -1142,7 +1141,7 @@ static void emitInstForward (Codegen *c, IrRef i) {
 
 			// Load INT64_MAX as float.
 			if (float_size == 4)
-				movCR(c, 0x5f000000, RAX_8);
+				movCR(c, I32, 0x5f000000, RAX);
 			else
 				emit(c, " movabsq $0x43e0000000000000, R", RAX_8);
 			emit(c, " movd R, F", RAX_8, XMM+1);
@@ -1150,7 +1149,7 @@ static void emitInstForward (Codegen *c, IrRef i) {
 			Label big = newLabel(c, "f2u_big", i);
 			Label done = newLabel(c, "f2u_done", i);
 
-			movMF(c, (Mem) {RBP_8, c->storage[inst.unop]}, XMM+0, float_size);
+			movMF(c, float_size, (Mem) {RBP_8, c->storage[inst.unop]}, XMM+0);
 			emit(c, " comisZ F, F", fsuff, XMM+1, XMM+0);
 			jccL(c, Cond_UGreaterThanOrEquals, big);
 
@@ -1166,7 +1165,7 @@ static void emitInstForward (Codegen *c, IrRef i) {
 
 			placeLabel(c, done);
 		} else {
-			movMF(c, (Mem) {RBP_8, c->storage[inst.unop]}, XMM+0, float_size);
+			movMF(c, float_size, (Mem) {RBP_8, c->storage[inst.unop]}, XMM+0);
 			emit(c, " cvttsZ2si F, R", fsuff, XMM+0, RAX_8);
 		}
 		movRI(c, registerSized(RAX, inst.size), i);
@@ -1175,7 +1174,7 @@ static void emitInstForward (Codegen *c, IrRef i) {
 		u32 float_size = valueSize(c, inst.unop);
 		const char *fsuff = sizeFSuffix(float_size);
 
-		movMF(c, (Mem) {RBP_8, c->storage[inst.unop]}, XMM+0, float_size);
+		movMF(c, float_size, (Mem) {RBP_8, c->storage[inst.unop]}, XMM+0);
 		emit(c, " cvttsZ2si F, R", fsuff, XMM+0, RAX_8);
 		movRI(c, registerSized(RAX, inst.size), i);
 	} break;
@@ -1183,12 +1182,12 @@ static void emitInstForward (Codegen *c, IrRef i) {
 		movIR(c, inst.binop.lhs, RAX);
 		// State of affairs: rhs should be the last parameter, but it is currently ignored.
 
-		movCM(c, c->vaarg_gp_offset, RSIZE_DWORD, (Mem) {RAX_8});
-		movCM(c, c->vaarg_fp_offset, RSIZE_DWORD, (Mem) {RAX_8, 4});
+		movCM(c, I32, c->vaarg_gp_offset, (Mem) {RAX_8});
+		movCM(c, I32, c->vaarg_fp_offset, (Mem) {RAX_8, 4});
 		emit(c, " lea ~I(R), R", c->vaarg_overflow_args, RBP_8, RDX_8);
-		movRM(c, RDX_8, (Mem) {RAX_8, 8});
+		movRM(c, I64, RDX, (Mem) {RAX_8, 8});
 		emit(c, " lea ~I(R), R", c->vaarg_reg_saves, RBP_8, RDX_8);
-		movRM(c, RDX_8, (Mem) {RAX_8, 16});
+		movRM(c, I64, RDX, (Mem) {RAX_8, 16});
 	} break;
 	case Ir_VaArg: {
 		Type type = AUX_DATA(Type, c->ir, inst.unop_const.offset);
@@ -1204,14 +1203,14 @@ static void emitInstForward (Codegen *c, IrRef i) {
 
 			if (gp_count) {
 				// Test if all INTEGER parts would fit
-				movMR(c, (Mem) {RAX_8}, RDX_4);
+				movMR(c, I32, (Mem) {RAX_8}, RDX);
 				emit(c, " cmp $I, R", 48 - gp_count*8, RDX_4);
 				jccL(c, Cond_UGreaterThan, overflowarg);
 			}
 
 			if (class.sse_count) {
 				// Test if all SSE parts would fit
-				movMR(c, (Mem) {RAX_8, 4}, RDX_4);
+				movMR(c, I32, (Mem) {RAX_8, 4}, RDX);
 				emit(c, " cmp $I, R", reg_save_area_size - class.sse_count*8, RDX_4);
 				jccL(c, Cond_UGreaterThan, overflowarg);
 			}
@@ -1219,22 +1218,22 @@ static void emitInstForward (Codegen *c, IrRef i) {
 			for (u32 j = 0; j < class.count; j++) {
 				// Load the register offset to EDX and update it.
 				if (class.registers[j] == Param_INTEGER) {
-					movMR(c, (Mem) {RAX_8}, RDX_4);
+					movMR(c, I32, (Mem) {RAX_8}, RDX);
 					emit(c, " addl $8, (R)", RAX_8);
 				} else {
-					movMR(c, (Mem) {RAX_8, 4}, RDX_4);
+					movMR(c, I32, (Mem) {RAX_8, 4}, RDX);
 					emit(c, " addq $16, 4(R)", RAX_8);
 				}
 				// Add it to the reg_save_area.
 				emit(c, " addq 16(R), R", RAX_8, RDX_8);
 
-				movMR(c, (Mem) {RDX_8}, RDX_8);
-				movRM(c, RDX_8, (Mem) {RBP_8, c->storage[i] + j*8});
+				movMR(c, I64, (Mem) {RDX_8}, RDX);
+				movRM(c, I64, RDX, (Mem) {RBP_8, c->storage[i] + j*8});
 			}
 			jmpL(c, done);
 			placeLabel(c, overflowarg);
 		}
-		movMR(c, (Mem) {RAX_8, 8}, RDX_8);
+		movMR(c, I64, (Mem) {RAX_8, 8}, RDX);
 		emit(c, " addq $I, 8(R)", inst.size, RAX_8);
 		copyTo(c, RBP, c->storage[i], RDX, 0, inst.size);
 
@@ -1279,12 +1278,11 @@ static void emitInstForward (Codegen *c, IrRef i) {
 
 					// TODO Do small arguments need to be zero-extended?
 					if (class.registers[j] == Param_INTEGER) {
-						Register reg = registerSized(gp_parameter_regs[gp_params], size);
-						movMR(c, (Mem) {RBP_8, c->storage[arg.arg_inst] + 8*j}, reg);
+						movMR(c, size, (Mem) {RBP_8, c->storage[arg.arg_inst] + 8*j}, gp_parameter_regs[gp_params]);
 						gp_params++;
 					} else {
 						assert(class.registers[j] == Param_SSE);
-						movMF(c, (Mem) {RBP_8, c->storage[arg.arg_inst] + 8*j}, XMM+fp_params, size);
+						movMF(c, size, (Mem) {RBP_8, c->storage[arg.arg_inst] + 8*j}, XMM+fp_params);
 						fp_params++;
 					}
 				}
@@ -1308,7 +1306,7 @@ static void emitInstForward (Codegen *c, IrRef i) {
 			emit(c, " sub $I, R", arg_stack_memory, RSP_8);
 
 		if (inst.properties & Prop_Call_Vararg)
-			movCR(c, fp_params, RAX_4);
+			movCR(c, I32, fp_params, RAX);
 
 		emit(c, " call *~I(R)", c->storage[inst.call.function_ptr], RBP_8);
 		if (arg_stack_memory)
@@ -1324,11 +1322,11 @@ static void emitInstForward (Codegen *c, IrRef i) {
 
 				if (ret_class.registers[j] == Param_INTEGER) {
 					int reg = gp_returns == 0 ? RAX_8 : RDX_8;
-					movRM(c, registerSized(reg, size), (Mem) {RBP_8, dest_offset});
+					movRM(c, size, reg, (Mem) {RBP_8, dest_offset});
 					gp_returns++;
 				} else {
 					assert(ret_class.registers[j] == Param_SSE);
-					movFM(c, XMM+fp_returns, size, (Mem) {RBP_8, dest_offset});
+					movFM(c, size, XMM+fp_returns, (Mem) {RBP_8, dest_offset});
 					fp_returns++;
 				}
 			}
