@@ -1108,8 +1108,13 @@ Tokenization lex (Arena *generated_strings, String input, LexParams params) {
 						}
 					}
 				}
-				if (new_source == NULL)
-					lexerror(source, begin, "could not open include file ‘%.*s’", STR_PRINTAGE(includefilename));
+
+				if (new_source == NULL) {
+					lexerror(source, begin, "could not open include file %c%.*s%c",
+						quoted ? '"' : '<',
+						STR_PRINTAGE(includefilename),
+						quoted ? '"' : '>');
+				}
 				new_source->next_include_index = include_order;
 
 				if (includes_stack.len >= MAX_INCLUDES)
@@ -2292,7 +2297,7 @@ static void predefineMacros (
 	bool gnu)
 {
 	foreach (i, to_define) {
-		SourceFile *source = calloc(sizeof(SourceFile), 1);
+		SourceFile *source = calloc(1, sizeof(SourceFile));
 		source->kind = kind;
 		source->idx = files->len;
 		PUSH(*files, source);

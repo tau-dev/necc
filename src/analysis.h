@@ -28,3 +28,4 @@ void storeLoadPropagate(IrList ir, Blocks blocks);
 void innerBlockPropagate(IrList ir, Blocks blocks);
 // TODO
 // Perform more involved memory propagation; should do mostly complete SSAification of variables.
+
