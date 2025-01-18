@@ -50,20 +50,8 @@ u32 typeSize (Type t, const Target *target) {
 		return typeSize(actual, target);
 	}
 	case Kind_Union:
-	case Kind_Struct: {
-		u32 max_alignment = 1;
-		u32 tightsize = 0;
-		foreach (i, t.compound.members) {
-			CompoundMember member = t.compound.members.ptr[i];
-			u32 align = typeAlignment(member.type, target);
-			if (align > max_alignment)
-				max_alignment = align;
-			u32 end = member.offset + typeSize(member.type, target);
-			if (end > tightsize)
-				tightsize = end;
-		}
-		return ((tightsize + max_alignment - 1) / max_alignment) * max_alignment;
-	}
+	case Kind_Struct:
+		return t.compound.size;
 	case Kind_Void:
 		return 0;
 	case Kind_Basic:
@@ -114,16 +102,34 @@ bool isIncomplete (Type t) {
 
 
 u32 typeAlignment (Type t, const Target *target) {
+	while (t.kind == Kind_Array || t.kind == Kind_VLArray)
+		t = *t.array.inner;
+	t = resolveType(t);
+	if (t.kind == Kind_Struct || t.kind == Kind_Union)
+		return t.compound.alignment;
+
 	u32 size = typeSize(t, target);
-	return size == 0 ? 1 :
-			size < 8 ? size : 8;
+	assert(size <= 8);
+	if (size == 0)
+		size = 1;
+	return size;
 }
 
-u32 addMemberOffset (u32 *offset, Type t, const Target *target) {
-	u32 alignment = typeAlignment(t, target);
-	u32 aligned = ((*offset + alignment - 1) / alignment) * alignment;
-	*offset = aligned + typeSize(t, target);
-	return aligned;
+u32 addMemberOffset (bool is_struct, u32 *current_size, u32 *total_alignment, Type t, const Target *target) {
+	u32 part_alignment = typeAlignment(t, target);
+	if (part_alignment > *total_alignment)
+		*total_alignment = part_alignment;
+
+	if (is_struct) {
+		u32 aligned = ((*current_size + part_alignment - 1) / part_alignment) * part_alignment;
+		*current_size = aligned + typeSize(t, target);
+		return aligned;
+	} else {
+		u32 size = typeSize(t, target);
+		if (size > *current_size)
+			*current_size = size;
+		return 0;
+	}
 }
 
 

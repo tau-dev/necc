@@ -2919,7 +2919,8 @@ static Type parseStructUnionBody (Parse *parse, bool is_struct) {
 	const Tokenization *tok = &parse->tokens;
 	SourceFile *source = tok->files.ptr[loc.file_id];
 
-	u32 current_offset = 0;
+	u32 current_size = 0;
+	u32 alignment = 1;
 	while (!tryEat(parse, Tok_CloseBrace)) {
 		// May not be function type, struct or union ending
 		// with an incomplete array, or incomplete type except
@@ -2943,14 +2944,13 @@ static Type parseStructUnionBody (Parse *parse, bool is_struct) {
 				parseerror(parse, begin, "missing declarator");
 			requires(parse, "anonymous members", Features_C11);
 
-			u32 offset = 0;
-			if (is_struct)
-				offset = addMemberOffset(&current_offset, anonymousMember, &parse->target);
+			u32 offset = addMemberOffset(is_struct, &current_size, &alignment, anonymousMember, &parse->target);
+
 			foreach (i, anonymousMember.compound.members) {
 				// TODO Check that the last member is not a flexible array.
-				CompoundMember m = anonymousMember.compound.members.ptr[i];
-				m.offset += offset;
-				PUSH_A(parse->code_arena, members, m);
+				CompoundMember inner = anonymousMember.compound.members.ptr[i];
+				inner.offset += offset;
+				PUSH_A(parse->code_arena, members, inner);
 			}
 			continue;
 		}
@@ -2981,9 +2981,7 @@ static Type parseStructUnionBody (Parse *parse, bool is_struct) {
 			}
 
 			// TODO Support VLAs
-			u32 member_offset = 0;
-			if (is_struct)
-				member_offset = addMemberOffset(&current_offset, decl.type, &parse->target);
+			u32 member_offset = addMemberOffset(is_struct, &current_size, &alignment, decl.type, &parse->target);
 
 			if (decl.type.kind == Kind_UnsizedArray) {
 				if (!(parse->pos[0].kind == Tok_Semicolon && parse->pos[1].kind == Tok_CloseBrace)) {
@@ -3009,6 +3007,8 @@ static Type parseStructUnionBody (Parse *parse, bool is_struct) {
 			.members = { .ptr = members.ptr, .len = members.len },
 			.line = loc.line,
 			.column = loc.column,
+			.alignment = alignment,
+			.size = (current_size + alignment - 1) / alignment * alignment,
 			.source = source,
 		},
 	};

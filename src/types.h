@@ -102,10 +102,11 @@ typedef struct CompoundMember CompoundMember;
 typedef SPAN(CompoundMember) Members;
 
 typedef struct UnnamedCompound {
-	// TODO Pre-calculate size, do not store these inline.
 	Members members;
 	u32 line;
 	u32 column;
+	u32 alignment;
+	u32 size;
 	SourceFile *source;
 } UnnamedCompound;
 
@@ -155,7 +156,7 @@ bool fnTypeEqual(FunctionType a, FunctionType b);
 u32 typeSize(Type t, const Target *target);
 bool isIncomplete(Type t);
 u32 typeAlignment(Type t, const Target *target);
-u32 addMemberOffset(u32 *offset, Type t, const Target *target);
+u32 addMemberOffset(bool is_struct, u32 *current_size, u32 *alignment, Type t, const Target *target);
 int rankDiff(BasicType a, BasicType b);
 
 char *printDeclarator(Arena *a, Type t, String name);
