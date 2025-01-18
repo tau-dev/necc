@@ -58,6 +58,30 @@ typedef enum {
 } VecRegister;
 
 typedef enum {
+	Cond_Overflow,
+	Cond_NoOverflow,
+
+	Cond_ULessThan, Cond_Carry = Cond_ULessThan,
+	Cond_UGreaterThanOrEquals, Cond_NoCarry = Cond_UGreaterThanOrEquals,
+
+	Cond_Equal, Cond_Zero = Cond_Equal,
+	Cond_NotEqual, Cond_NotZero = Cond_NotEqual,
+
+	Cond_UGreaterThan,
+	Cond_ULessThanOrEquals,
+
+	Cond_Sign,
+	Cond_NoSign,
+	Cond_ParityEven,
+	Cond_ParityOdd,
+
+	Cond_SLessThan,
+	Cond_SGreaterThanOrEquals,
+	Cond_SGreaterThan,
+	Cond_SLessThanOrEquals,
+} Condition;
+
+typedef enum {
 	Param_MEM,
 	Param_NONE = Param_MEM,
 	Param_INTEGER,
@@ -258,7 +282,6 @@ static void emitDataLine(Codegen *, u32 len, const char *data);
 static void emitDataString(Codegen *c, u32 len, const char *data);
 static void emitDataRaw(u32 len, const char *data);
 static void emitName(Codegen *, Module mod, u32 id);
-static void emitJump(Codegen *, const char *inst, const Block *dest);
 static void emitFunctionForward(EmitParams, u32);
 static void emitBlockForward(Codegen *, Blocks, u32);
 static inline bool isNewLine(Codegen *c, u32 i);
@@ -732,10 +755,11 @@ static void emitFunctionForward (EmitParams params, u32 id) {
 		for (u32 i = gp_params; i < gp_parameter_regs_count; i++)
 			movRM(&c, registerSized(gp_parameter_regs[i], I64), (Mem) {RBP_8, -reg_save_area_size + i*8});
 		testRR(&c, RAX_4, RAX_4);
-		emit(&c, " je ..vaarg_no_float_args_I", id);
+		Label no_float_args = newLabel(&c, "vaarg_no_float_args", id);
+		jccL(&c, Cond_Equal, no_float_args);
 		for (u32 i = 0; i < 8; i++)
 			emit(&c, " movaps F, ~I(R)", XMM+i, -reg_save_area_size + 48 + i*16, RBP_8);
-		emit(&c, "..vaarg_no_float_args_I:", id);
+		placeLabel(&c, no_float_args);
 	}
 
 
@@ -826,11 +850,11 @@ static void emitBlockForward (Codegen *c, Blocks blocks, u32 i) {
 	switch (exit.kind) {
 	case Exit_Unconditional:
 		if (exit.unconditional != next)
-			emitJump(c, "jmp", exit.unconditional);
+			jmpB(c, exit.unconditional);
 		break;
 	case Exit_Branch: {
 		emit(c, " testZ $-1, #", sizeSuffix(valueSize(c, exit.branch.condition)), exit.branch.condition);
-		emitJump(c, "jnz", exit.branch.on_true);
+		jccB(c, Cond_NotEqual, exit.branch.on_true);
 
 
 		foreach (k, false_phis) {
@@ -840,7 +864,7 @@ static void emitBlockForward (Codegen *c, Blocks blocks, u32 i) {
 		}
 
 		if (exit.branch.on_false != next)
-			emitJump(c, "jmp", exit.branch.on_false);
+			jmpB(c, exit.branch.on_false);
 	} break;
 	case Exit_Switch: {
 		assert(!false_phis.len);
@@ -855,10 +879,10 @@ static void emitBlockForward (Codegen *c, Blocks blocks, u32 i) {
 				assert(size <= 4);
 				emit(c, " cmpZ $L, #", sizeSuffix(size), cases.ptr[i].value & 0xffffffff, exit.switch_.value);
 			}
-			emitJump(c, "je", cases.ptr[i].dest);
+			jccB(c, Cond_Equal, cases.ptr[i].dest);
 		}
 		if (exit.switch_.default_case != next)
-			emitJump(c, "jnz", exit.switch_.default_case);
+			jccB(c, Cond_NotEqual, exit.switch_.default_case);
 	} break;
 	case Exit_Return:
 		if (exit.ret != IDX_NONE) {
@@ -1068,12 +1092,15 @@ static void emitInstForward (Codegen *c, IrRef i) {
 
 			movIR(c, inst.unop, RAX);
 			emit(c, " test R, R", RAX_8, RAX_8);
-			emit(c, " js .u2f_negative_I_I", c->current_id, i);
+
+			Label negative = newLabel(c, "u2f_negative", i);
+			Label done = newLabel(c, "u2f_done", i);
+			jccL(c, Cond_Sign, negative);
 			// When no sign bit is set, we can use the signed instruction.
 			emit(c, " cvtsi2sZ R, F", fsuff, RAX_8, XMM+0);
-			emit(c, " jmp .u2f_done_I_I", c->current_id, i);
+			jmpL(c, done);
 
-			emit(c, ".u2f_negative_I_I:", c->current_id, i);
+			placeLabel(c, negative);
 			// Divide RAX by two, rounding to odd.
 			movRR(c, RAX_8, RDI_8);
 			emit(c, " and $1, R", RDI_8);
@@ -1085,7 +1112,7 @@ static void emitInstForward (Codegen *c, IrRef i) {
 			emit(c, " cvtsi2sZ R, F", fsuff, RAX_8, XMM+0);
 			emit(c, " addsZ F, F", fsuff, XMM+0, XMM+0);
 
-			emit(c, ".u2f_done_I_I:", c->current_id, i);
+			placeLabel(c, done);
 		} else {
 			emit(c, " xor R, R", RAX_8, RAX_8);
 			movIR(c, inst.unop, RAX);
@@ -1120,21 +1147,24 @@ static void emitInstForward (Codegen *c, IrRef i) {
 				emit(c, " movabsq $0x43e0000000000000, R", RAX_8);
 			emit(c, " movd R, F", RAX_8, XMM+1);
 
+			Label big = newLabel(c, "f2u_big", i);
+			Label done = newLabel(c, "f2u_done", i);
+
 			movMF(c, (Mem) {RBP_8, c->storage[inst.unop]}, XMM+0, float_size);
 			emit(c, " comisZ F, F", fsuff, XMM+1, XMM+0);
-			emit(c, " jnb .f2u_negative_I_I", c->current_id, i);
+			jccL(c, Cond_UGreaterThanOrEquals, big);
 
 			// When below INT64_MAX, we can use the signed instruction.
 			emit(c, " cvttsZ2siq F, R", fsuff, XMM+0, RAX_8);
-			emit(c, " jmp .f2u_done_I_I", c->current_id, i);
+			jmpL(c, done);
 
-			emit(c, ".f2u_negative_I_I:", c->current_id, i);
+			placeLabel(c, big);
 			// Otherwise, subtract INT64_MAX as float, convert, set sign bit.
 			emit(c, " subsZ F, F", fsuff, XMM+1, XMM+0);
 			emit(c, " cvttsZ2siq F, R", fsuff, XMM+0, RAX_8);
 			emit(c, " btcq $63, R", RAX_8);
 
-			emit(c, ".f2u_done_I_I:", c->current_id, i);
+			placeLabel(c, done);
 		} else {
 			movMF(c, (Mem) {RBP_8, c->storage[inst.unop]}, XMM+0, float_size);
 			emit(c, " cvttsZ2si F, R", fsuff, XMM+0, RAX_8);
@@ -1167,21 +1197,23 @@ static void emitInstForward (Codegen *c, IrRef i) {
 		// Put the va_list's address into RAX.
 		movIR(c, inst.unop, RAX);
 
+		Label done = newLabel(c, "vaarg_done", i);
 		if (class.count) {
 			u32 gp_count = class.count - class.sse_count;
+			Label overflowarg = newLabel(c, "vaarg_overflowarg", i);
 
 			if (gp_count) {
 				// Test if all INTEGER parts would fit
 				movMR(c, (Mem) {RAX_8}, RDX_4);
 				emit(c, " cmp $I, R", 48 - gp_count*8, RDX_4);
-				emit(c, " ja .vaarg_I_I_overflowarg", c->current_id, i);
+				jccL(c, Cond_UGreaterThan, overflowarg);
 			}
 
 			if (class.sse_count) {
 				// Test if all SSE parts would fit
 				movMR(c, (Mem) {RAX_8, 4}, RDX_4);
 				emit(c, " cmp $I, R", reg_save_area_size - class.sse_count*8, RDX_4);
-				emit(c, " ja .vaarg_I_I_overflowarg", c->current_id, i);
+				jccL(c, Cond_UGreaterThan, overflowarg);
 			}
 
 			for (u32 j = 0; j < class.count; j++) {
@@ -1199,15 +1231,15 @@ static void emitInstForward (Codegen *c, IrRef i) {
 				movMR(c, (Mem) {RDX_8}, RDX_8);
 				movRM(c, RDX_8, (Mem) {RBP_8, c->storage[i] + j*8});
 			}
-			emit(c, " jmp .vaarg_I_I_done", c->current_id, i);
-
-			emit(c, ".vaarg_I_I_overflowarg:", c->current_id, i);
+			jmpL(c, done);
+			placeLabel(c, overflowarg);
 		}
 		movMR(c, (Mem) {RAX_8, 8}, RDX_8);
 		emit(c, " addq $I, 8(R)", inst.size, RAX_8);
 		copyTo(c, RBP, c->storage[i], RDX, 0, inst.size);
 
-		emit(c, ".vaarg_I_I_done:", c->current_id, i);
+		if (class.count)
+			placeLabel(c, done);
 	} break;
 	case Ir_Call: {
 		Call call = AUX_DATA(Call, c->ir, inst.call.data);
@@ -1329,10 +1361,6 @@ static inline bool isNewFile (Codegen *c, u32 i) {
 // 	}
 // }
 
-
-static void emitJump (Codegen *c, const char *inst, const Block *dest) {
-	emit(c, " Z ..I_I_S", inst, c->current_id, dest->id, dest->label);
-}
 
 // static bool isSpilled(Storage s) {
 // 	return s >= STACK_BEGIN;

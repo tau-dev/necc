@@ -80,6 +80,33 @@ const char *register_names[STACK_BEGIN] = {
 };
 
 
+static const char *xmm_names[] = {
+	"%xmm",
+	"%ymm",
+	"%zmm",
+};
+
+static const char *condition_names[] = {
+	[Cond_Overflow] = "o",
+	[Cond_NoOverflow] = "no",
+	[Cond_ULessThan] = "b",
+	[Cond_UGreaterThanOrEquals] = "ae",
+	[Cond_Equal] = "e",
+	[Cond_NotEqual] = "ne",
+	[Cond_ULessThanOrEquals] = "be",
+	[Cond_UGreaterThan] = "a",
+	[Cond_Sign] = "s",
+	[Cond_NoSign] = "ns",
+	[Cond_ParityEven] = "pe",
+	[Cond_ParityOdd] = "po",
+	[Cond_SLessThan] = "l",
+	[Cond_SGreaterThanOrEquals] = "ge",
+	[Cond_SLessThanOrEquals] = "le",
+	[Cond_SGreaterThan] = "g",
+};
+
+
+
 typedef struct Mem {
 	Storage reg;
 	i32 offset;
@@ -114,6 +141,33 @@ static void movFM (Codegen *c, VecRegister src, u16 size, Mem mem) {
 }
 static void movMF (Codegen *c, Mem mem, VecRegister dest, u16 size) {
 	emit(c, " movsZ ~I(R), F", sizeFSuffix(size), mem.offset, mem.reg, dest);
+}
+
+static void jmpB (Codegen *c, const Block *dest) {
+	emit(c, " jmp ..I_I_S", c->current_id, dest->id, dest->label);
+}
+static void jccB (Codegen *c, Condition cond, const Block *dest) {
+	emit(c, " jZ ..I_I_S", condition_names[cond], c->current_id, dest->id, dest->label);
+}
+
+typedef struct {
+	String name;
+	u32 func;
+	u32 id;
+} Label;
+
+static Label newLabel (Codegen *c, const char *name, u32 id) {
+	(void) c;
+	return (Label) {zstr(name), c->current_id, id};
+}
+static void placeLabel (Codegen *c, Label l) {
+	emit(c, "..S_I_I:", l.name, l.func, l.id);
+}
+static void jmpL (Codegen *c, Label l) {
+	emit(c, " jmp ..S_I_I", l.name, l.func, l.id);
+}
+static void jccL (Codegen *c, Condition cond, Label l) {
+	emit(c, " jZ ..S_I_I", condition_names[cond], l.name, l.func, l.id);
 }
 
 
@@ -312,12 +366,6 @@ R Register
 H hex char
 
 */
-static const char *xmm_names[] = {
-	"%xmm",
-	"%ymm",
-	"%zmm",
-};
-
 static void emit (Codegen *c, const char *fmt, ...) {
 	va_list args;
 	va_start(args, fmt);
