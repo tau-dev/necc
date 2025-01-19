@@ -22,7 +22,8 @@
 
 #define SPAN(type) struct { size_t len; type *ptr; }
 #define SPAN_EQL(a, b) (sizeof(*(a).ptr) == sizeof(*(b).ptr) && (a).len == (b).len && memcmp((a).ptr, (b).ptr, sizeof(*(a).ptr) * (a).len) == 0)
-#define ARRAY_SPAN(arr) {sizeof(arr)/sizeof((arr)[0]), (arr)}
+#define ARRAY_SPAN(arr) {sizeof((arr))/sizeof((arr)[0]), (arr)}
+#define STR_LITERAL(str) {sizeof((str))-1, (str)}
 
 
 #define LIST(type) struct { size_t capacity; size_t len; type *ptr; }
