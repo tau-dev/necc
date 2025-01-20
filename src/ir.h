@@ -123,6 +123,10 @@ typedef struct Type Type;
 
 // typedef SPAN(PhiNode) PhiNodes;
 
+typedef struct {
+	u32 id;
+	i64 offset;
+} Relocation;
 
 // TODO Compress the heck out of this data.
 typedef struct Inst {
@@ -139,10 +143,7 @@ typedef struct Inst {
 			IrRef ordered_after;
 			u32 data;
 		} call;
-		struct {
-			u32 id;
-			i64 offset;
-		} reloc;
+		Relocation reloc;
 		struct {
 			IrRef lhs;
 			IrRef rhs;

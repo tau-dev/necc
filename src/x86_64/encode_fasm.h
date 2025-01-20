@@ -107,10 +107,6 @@ static const char *condition_names[] = {
 
 
 
-typedef struct Mem {
-	Storage reg;
-	i32 offset;
-} Mem;
 
 static void push (Codegen *c, u16 size, Register r) {
 	emit(c, " push R", registerSized(r, size));
@@ -124,13 +120,13 @@ static void movRR (Codegen *c, u16 size, Register src, Register dest) {
 }
 
 static void movRM (Codegen *c, u16 size, Register src, Mem mem) {
-	emit(c, " movZ R, ~I(R)", sizeSuffix(size), registerSized(src, size), mem.offset, registerSized(mem.reg, I64));
+	emit(c, " movZ R, M", sizeSuffix(size), registerSized(src, size), mem);
 }
 static void movMR (Codegen *c, u16 size, Mem mem, Register dest) {
-	emit(c, " movZ ~I(R), R", sizeSuffix(size), mem.offset, registerSized(mem.reg, I64), registerSized(dest, size));
+	emit(c, " movZ M, R", sizeSuffix(size), mem, registerSized(dest, size));
 }
 static void movCM (Codegen *c, u16 size, u32 val, Mem mem) {
-	emit(c, " movZ $I, ~I(R)", sizeSuffix(size), val, mem.offset, registerSized(mem.reg, I64));
+	emit(c, " movZ $I, M", sizeSuffix(size), val, mem);
 }
 static void movCR (Codegen *c, u16 size, u32 val, Register dest) {
 	if (size == I16) size = I32; // IMM16 is slow to decode.
@@ -138,10 +134,10 @@ static void movCR (Codegen *c, u16 size, u32 val, Register dest) {
 }
 
 static void movFM (Codegen *c, u16 size, VecRegister src, Mem mem) {
-	emit(c, " movsZ F, ~I(R)", sizeFSuffix(size), src, mem.offset, registerSized(mem.reg, I64));
+	emit(c, " movsZ F, M", sizeFSuffix(size), src, mem);
 }
 static void movMF (Codegen *c, u16 size, Mem mem, VecRegister dest) {
-	emit(c, " movsZ ~I(R), F", sizeFSuffix(size), mem.offset, registerSized(mem.reg, I64), dest);
+	emit(c, " movsZ M, F", sizeFSuffix(size), mem, dest);
 }
 
 
@@ -164,37 +160,155 @@ static const String inst_names[] = {
 	[ILea] = STR_LITERAL("lea"),
 	[IBtc] = STR_LITERAL("btc"),
 	[IComis] = STR_LITERAL("comis"),
+	[IRet] = STR_LITERAL("ret"),
 };
 
-static void genCR (Codegen *c, u16 size, BasicInst inst, i32 val, Register dest) {
-	emit(c, " SZ $~I, R", inst_names[inst], sizeSuffix(size), val, registerSized(dest, size));
-}
-static void genCF (Codegen *c, u16 size, BasicInst inst, i32 val, VecRegister dest) {
-	emit(c, " SZ $~I, F", inst_names[inst], sizeSuffix(size), val, dest);
-}
-static void genCM (Codegen *c, u16 size, BasicInst inst, i32 val, Mem dest) {
-	emit(c, " SZ $~I, ~I(R)", inst_names[inst], sizeSuffix(size), val, dest.offset, registerSized(dest.reg, I64));
+static const char *sizeSuffix (u16 size) {
+	if (size == 1)
+		return "b";
+	if (size == 2)
+		return "w";
+	if (size <= 4)
+		return "l";
+	if (size <= 8)
+		return "q";
+	return NULL;
 }
 
-static void genRM (Codegen *c, u16 size, BasicInst inst, Register src, Mem dest) {
-	emit(c, " SZ R, ~I(R)", inst_names[inst], sizeSuffix(size), registerSized(src, size), dest.offset, registerSized(dest.reg, I64));
+static void emitRegister (Codegen *c, Register reg) {
+	(void) c;
+	*insert++ = '%';
+	const char *name = register_names[reg];
+	u32 len = strlen(name);
+	memcpy(insert, name, len);
+	insert += len;
 }
-static void genFM (Codegen *c, u16 size, BasicInst inst, VecRegister src, Mem dest) {
-	emit(c, " SZ F, ~I(R)", inst_names[inst], sizeSuffix(size), src, dest.offset, registerSized(dest.reg, I64));
+
+static void emitStorage (Codegen *c, u16 size, Storage s) {
+	switch (s.kind) {
+	case Location_VecRegister: {
+		const char *name = xmm_names[s.vec_reg >> 5];
+		u32 len = strlen(name);
+		memcpy(insert, name, len);
+		insert += len;
+		emitInt(c, s.vec_reg & ~VRSIZE_MASK);
+	} break;
+	case Location_Register: {
+		emitRegister(c, registerSized(s.reg, size));
+	} break;
+	case Location_Memory: {
+		Mem mem = s.memory;
+		emitIntSigned(c, mem.offset);
+		*insert++ = '(';
+		emitRegister(c, registerSized(mem.reg, I64));
+		if (mem.index_scale) {
+			*insert++ = ',';
+			emitRegister(c, registerSized(mem.index_reg, I64));
+			*insert++ = ',';
+			emitInt(c, mem.index_scale);
+		}
+		*insert++ = ')';
+	} break;
+	case Location_Relocation: {
+		emitName(c, c->module, s.relocation.id);
+		emitInt(c, s.relocation.offset);
+		emitString(c, (String) STR_LITERAL("(%rip)"));
+	} break;
+	case Location_Constant: {
+		*insert++ = '$';
+		i32 val = s.constant;
+		if (size < 4) {
+			val = val & ((1 << (8 * size)) - 1);
+		}
+		emitIntSigned(c, val);
+	} break;
+	case Location_LongConstant:
+		*insert++ = '$';
+		emitInt(c, s.long_constant);
+		break;
+	}
+}
+
+static void genSS (Codegen *c, u16 size, BasicInst inst, Storage src, Storage dest) {
+	*insert++ = ' ';
+	emitString(c, inst_names[inst]);
+	*insert++ = sizeSuffix(size)[0];
+	*insert++ = ' ';
+	emitStorage(c, size, src);
+	*insert++ = ' ';
+	*insert++ = ',';
+	emitStorage(c, size, dest);
+	*insert++ = '\n';
+
+	if (insert > buf + (BUF - MAX_LINE))
+		flushit(c->out);
+}
+
+static void genSR (Codegen *c, u16 size, BasicInst inst, Storage src, Register dest) {
+	genSS(c, size, inst, src, (Storage) {Location_Register, .reg = dest});
+}
+static void genSM (Codegen *c, u16 size, BasicInst inst, Storage src, Mem dest) {
+	genSS(c, size, inst, src, (Storage) {Location_Memory, .memory = dest});
+}
+static void genSF (Codegen *c, u16 size, BasicInst inst, Storage src, VecRegister dest) {
+	genSS(c, size, inst, src, (Storage) {Location_VecRegister, .vec_reg = dest});
+}
+
+static void genCR (Codegen *c, u16 size, BasicInst inst, i32 val, Register dest) {
+	genSR(c, size, inst, (Storage) {Location_Constant, .constant = val}, dest);
+}
+static void genCM (Codegen *c, u16 size, BasicInst inst, i32 val, Mem dest) {
+	genSM(c, size, inst, (Storage) {Location_Constant, .constant = val}, dest);
+}
+static void genCF (Codegen *c, u16 size, BasicInst inst, i32 val, VecRegister dest) {
+	genSF(c, size, inst, (Storage) {Location_Constant, .constant = val}, dest);
+}
+static void genLR (Codegen *c, u16 size, BasicInst inst, u64 val, Register dest) {
+	genSR(c, size, inst, (Storage) {Location_LongConstant, .long_constant = val}, dest);
+}
+static void genLM (Codegen *c, u16 size, BasicInst inst, u64 val, Mem dest) {
+	genSM(c, size, inst, (Storage) {Location_LongConstant, .long_constant = val}, dest);
 }
 
 static void genRR (Codegen *c, u16 size, BasicInst inst, Register src, Register dest) {
-	emit(c, " SZ R, R", inst_names[inst], sizeSuffix(size), registerSized(src, size), registerSized(dest, size));
+	genSR(c, size, inst, (Storage) {Location_Register, .reg = src}, dest);
 }
-static void genFF (Codegen *c, u16 size, BasicInst inst, VecRegister src, VecRegister dest) {
-	emit(c, " SZ R, R", inst_names[inst], sizeSuffix(size), src, dest);
+static void genRM (Codegen *c, u16 size, BasicInst inst, Register src, Mem dest) {
+	genSM(c, size, inst, (Storage) {Location_Register, .reg = src}, dest);
+}
+static void genRF (Codegen *c, u16 size, BasicInst inst, Register src, VecRegister dest) {
+	genSF(c, size, inst, (Storage) {Location_Register, .reg = src}, dest);
 }
 
+static void genFR (Codegen *c, u16 size, BasicInst inst, VecRegister src, Register dest) {
+	genSR(c, size, inst, (Storage) {Location_VecRegister, .vec_reg = src}, dest);
+}
+static void genFM (Codegen *c, u16 size, BasicInst inst, VecRegister src, Mem dest) {
+	genSM(c, size, inst, (Storage) {Location_VecRegister, .vec_reg = src}, dest);
+}
+static void genFF (Codegen *c, u16 size, BasicInst inst, VecRegister src, VecRegister dest) {
+	genSF(c, size, inst, (Storage) {Location_VecRegister, .vec_reg = src}, dest);
+}
+
+
 static void genMR (Codegen *c, u16 size, BasicInst inst, Mem src, Register dest) {
-	emit(c, " SZ ~I(R), R", inst_names[inst], sizeSuffix(size), src.offset, registerSized(src.reg, I64), registerSized(dest, size));
+	genSR(c, size, inst, (Storage) {Location_Memory, .memory = src}, dest);
+}
+static void genMM (Codegen *c, u16 size, BasicInst inst, Mem src, Mem dest) {
+	genSM(c, size, inst, (Storage) {Location_Memory, .memory = src}, dest);
 }
 static void genMF (Codegen *c, u16 size, BasicInst inst, Mem src, VecRegister dest) {
-	emit(c, " SZ ~I(R), F", inst_names[inst], sizeSuffix(size), src.offset, registerSized(src.reg, I64), dest);
+	genSF(c, size, inst, (Storage) {Location_Memory, .memory = src}, dest);
+}
+
+static void genM (Codegen *c, u16 size, BasicInst inst, Mem src) {
+	emit(c, " SZ M", inst_names[inst], sizeSuffix(size), src);
+}
+static void genR (Codegen *c, u16 size, BasicInst inst, Register src) {
+	emit(c, " SZ R", inst_names[inst], sizeSuffix(size), registerSized(src, size));
+}
+static void gen (Codegen *c, u16 size, BasicInst inst) {
+	emit(c, " SZ", inst_names[inst], sizeSuffix(size));
 }
 
 static void jmpB (Codegen *c, const Block *dest) {
@@ -441,11 +555,14 @@ static void emit (Codegen *c, const char *fmt, ...) {
 			emitInt(c, reg & ~VRSIZE_MASK);
 		} break;
 		case 'R': {
-			*insert++ = '%';
-			const char *name = register_names[va_arg(args, Register)];
-			u32 len = strlen(name);
-			memcpy(insert, name, len);
-			insert += len;
+			emitRegister(c, va_arg(args, Register));
+		} break;
+		case 'M': {
+			Mem mem = va_arg(args, Mem);
+			emitIntSigned(c, mem.offset);
+			*insert++ = '(';
+			emitRegister(c, registerSized(mem.reg, I64));
+			*insert++ = ')';
 		} break;
 		case '#': {
 			IrRef ref = va_arg(args, IrRef);
