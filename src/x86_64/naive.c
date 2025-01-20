@@ -86,10 +86,10 @@ typedef enum {
 	Cond_NoOverflow,
 
 	Cond_ULessThan, Cond_Carry = Cond_ULessThan,
-	Cond_UGreaterThanOrEquals, Cond_NoCarry = Cond_UGreaterThanOrEquals,
+	Cond_UGreaterThanOrEqual, Cond_NoCarry = Cond_UGreaterThanOrEqual,
 	Cond_Equal, Cond_Zero = Cond_Equal,
 	Cond_NotEqual, Cond_NotZero = Cond_NotEqual,
-	Cond_ULessThanOrEquals,
+	Cond_ULessThanOrEqual,
 	Cond_UGreaterThan,
 
 	Cond_Sign,
@@ -98,8 +98,8 @@ typedef enum {
 	Cond_ParityOdd,
 
 	Cond_SLessThan,
-	Cond_SGreaterThanOrEquals,
-	Cond_SLessThanOrEquals,
+	Cond_SGreaterThanOrEqual,
+	Cond_SLessThanOrEqual,
 	Cond_SGreaterThan,
 } Condition;
 
@@ -241,7 +241,6 @@ typedef enum {
 	ITest,
 	ILea,
 	IBtc,
-	IRet,
 
 	ISetO,
 	ISetNO,
@@ -276,6 +275,13 @@ typedef enum {
 	IJmpSGTE,
 	IJmpSLTE,
 	IJmpSGT,
+
+	IRet,
+	IMovzxb,
+	IMovzxw,
+	IMovsxb,
+	IMovsxw,
+	IMovsxd,
 
 	IAdds,
 	ISubs,
@@ -690,12 +696,17 @@ static void movFI (Codegen *c, VecRegister src, IrRef dest) {
 	movFM(c, valueSize(c, dest), src, (Mem) {c->storage[dest], RBP_8});
 }
 
+static Storage storage (Codegen *c, IrRef src) {
+	return (Storage) { Location_Memory,
+		.memory = (Mem) {c->storage[src], RBP_8},
+	};
+}
 
 static void genIR (Codegen *c, BasicInst inst, IrRef src, Register dest) {
-	genMR(c, valueSize(c, src), inst, (Mem) {c->storage[src], RBP}, dest);
+	genSR(c, valueSize(c, src), inst, storage(c, src), dest);
 }
 static void genIF (Codegen *c, BasicInst inst, IrRef src, VecRegister dest) {
-	genMF(c, valueSize(c, src), inst, (Mem) {c->storage[src], RBP}, dest);
+	genSF(c, valueSize(c, src), inst, storage(c, src), dest);
 }
 static void genRI (Codegen *c, BasicInst inst, Register src, IrRef dest) {
 	genRM(c, valueSize(c, dest), inst, src, (Mem) {c->storage[dest], RBP});
@@ -704,7 +715,7 @@ static void genCI (Codegen *c, BasicInst inst, i32 val, IrRef dest) {
 	genCM(c, valueSize(c, dest), inst, val, (Mem) {c->storage[dest], RBP});
 }
 static void genI (Codegen *c, BasicInst inst, IrRef src) {
-	genM(c, valueSize(c, src), inst, (Mem) {c->storage[src], RBP});
+	genS(c, valueSize(c, src), inst, storage(c, src));
 }
 
 
@@ -926,6 +937,27 @@ static void ftriple (Codegen *c, BasicInst inst, IrRef lhs, IrRef rhs, IrRef des
 	movFI(c, XMM+1, dest);
 }
 
+static Condition instToCondition (InstKind kind) {
+	switch (kind) {
+	case Ir_LessThan:
+	case Ir_FLessThan:
+		return Cond_ULessThan;
+	case Ir_SLessThan:
+		return Cond_SLessThan;
+	case Ir_LessThanOrEquals:
+	case Ir_FLessThanOrEquals:
+		return Cond_ULessThanOrEqual;
+	case Ir_SLessThanOrEquals:
+		return Cond_SLessThanOrEqual;
+	case Ir_Equals:
+	case Ir_FEquals:
+		return Cond_Equal;
+	default: unreachable;
+	}
+}
+static Condition invertCondition (Condition c) {
+	return c ^ 1;
+}
 
 
 // This backend performs _no_ register allocation.
@@ -988,7 +1020,7 @@ static void emitBlockForward (Codegen *c, Blocks blocks, u32 i) {
 				genRI(c, ICmp, RAX, exit.switch_.value);
 			} else {
 				assert(size <= 4);
-				u64 val = cases.ptr[i].value & 0xffffffff;
+				i64 val = cases.ptr[i].value & 0xffffffffU;
 				if (val > INT32_MAX) val -= UINT32_MAX;
 				genCI(c, ICmp, val, exit.switch_.value);
 			}
@@ -1153,22 +1185,9 @@ static void emitInstForward (Codegen *c, IrRef i) {
 			movIR(c, inst.binop.rhs, RAX);
 			genRI(c, ICmp, RAX, inst.binop.lhs);
 		}
-		switch (inst.kind) {
-			case Ir_LessThan:
-			case Ir_FLessThan:
-				emit(c, " setb R", RAX); break;
-			case Ir_SLessThan:
-				emit(c, " setl R", RAX); break;
-			case Ir_LessThanOrEquals:
-			case Ir_FLessThanOrEquals:
-				emit(c, " setbe R", RAX); break;
-			case Ir_SLessThanOrEquals:
-				emit(c, " setle R", RAX); break;
-			case Ir_Equals:
-			case Ir_FEquals:
-				emit(c, " sete R", RAX); break;
-		}
-		emit(c, " movzx R, R", RAX, RSI_8);
+		BasicInst cmp = ISetO + instToCondition(inst.kind);
+		genR(c, I8, cmp, RAX);
+		genRR(c, I64, IMovzxb, RAX, RSI);
 		movRI(c, registerSized(RSI, inst.size), i);
 	} break;
 	case Ir_ShiftLeft: {
@@ -1189,8 +1208,11 @@ static void emitInstForward (Codegen *c, IrRef i) {
 	} break;
 	case Ir_SignExtend: {
 		Register reg = registerSized(RAX, inst.size);
-		bool dw = inst.size == 8 && valueSize(c, inst.unop) == 4;
-		emit(c, " movsxZ #, R", (dw ? "d" : ""), inst.unop, reg);
+		u32 src_size = valueSize(c, inst.unop);
+		assert(src_size < inst.size);
+		BasicInst sx = src_size == 1 ? IMovsxb :
+			src_size == 2 ? IMovsxw : IMovsxd;
+		genSR(c, inst.size, sx, storage(c, inst.unop), reg);
 		movRI(c, reg, i);
 	} break;
 	case Ir_ZeroExtend: {
@@ -1232,11 +1254,7 @@ static void emitInstForward (Codegen *c, IrRef i) {
 	} break;
 	case Ir_Reloc:
 		assert(inst.size == 8);
-
-		emitZString(c, " lea ");
-		emitName(c, c->module, inst.reloc.id);
-		emit(c, "~L(%rip), R", inst.reloc.offset, RAX_8);
-
+		genSR(c, I64, ILea, (Storage) {Location_Relocation, .relocation = inst.reloc}, RAX_8);
 		movRI(c, RAX_8, i);
 		break;
 	case Ir_PhiOut: {
@@ -1253,8 +1271,6 @@ static void emitInstForward (Codegen *c, IrRef i) {
 		movFI(c, XMM+1, i);
 	} break;
 	case Ir_UIntToFloat: {
-		const char *fsuff = sizeFSuffix(inst.size);
-
 		u32 src_size = valueSize(c, inst.unop);
 
 		BasicInst convert = inst.size == 4 ? ICvtsi2ss : ICvtsi2sd;
@@ -1277,14 +1293,14 @@ static void emitInstForward (Codegen *c, IrRef i) {
 			// Divide RAX by two, rounding to odd.
 			movRR(c, I64, RAX, RDI);
 			genCR(c, I64, IAnd, 1, RDI);
-			emit(c, " shrq R", RAX_8);
+			genR(c, I64,  IShr, RAX);
 			genRR(c, I64, IOr, RDI, RAX);
 
 			// Now convert normally and multiply by 2. Now the lowest
 			// bit would be lost, but it cannot be represented in the
 			// mantissa anyways.
 			genRF(c, I64, convert, RAX_8, XMM+0);
-			emit(c, " addsZ F, F", fsuff, XMM+0, XMM+0);
+			genFF(c, inst.size, IAdds, XMM+0, XMM+0);
 
 			placeLabel(c, done);
 		} else {
@@ -1296,10 +1312,14 @@ static void emitInstForward (Codegen *c, IrRef i) {
 	} break;
 	case Ir_SIntToFloat: {
 		u32 src_size = valueSize(c, inst.unop);
-		if (src_size != 8)
-			emit(c, " movsxZ #, R", (src_size == 4 ? "d" : ""), inst.unop, RAX_8);
-		else
+
+		if (src_size != 8) {
+			BasicInst sx = src_size == 1 ? IMovsxb :
+				src_size == 2 ? IMovsxw : IMovsxd;
+			genSR(c, inst.size, sx, storage(c, inst.unop), RAX_8);
+		} else {
 			movIR(c, inst.unop, RAX_8);
+		}
 
 		BasicInst convert = inst.size == 4 ? ICvtsi2ss : ICvtsi2sd;
 		genRF(c, I64, convert, RAX_8, XMM+1);
@@ -1317,14 +1337,14 @@ static void emitInstForward (Codegen *c, IrRef i) {
 				movCR(c, I32, 0x5f000000, RAX);
 			else
 				emit(c, " movabsq $0x43e0000000000000, R", RAX_8);
-			emit(c, " movd R, F", RAX_8, XMM+1);
+			movRF(c, I64, RAX, XMM+1);
 
 			Label big = newLabel(c, "f2u_big", i);
 			Label done = newLabel(c, "f2u_done", i);
 
 			movMF(c, float_size, (Mem) {c->storage[inst.unop], RBP_8}, XMM+0);
 			genFF(c, float_size, IComis, XMM+1, XMM+0);
-			jccL(c, Cond_UGreaterThanOrEquals, big);
+			jccL(c, Cond_UGreaterThanOrEqual, big);
 
 			// When below INT64_MAX, we can use the signed instruction.
 			BasicInst convert = float_size == 4 ? ICvttss2siq : ICvttsd2siq;

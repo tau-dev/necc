@@ -90,18 +90,18 @@ static const char *condition_names[] = {
 	[Cond_Overflow] = "o",
 	[Cond_NoOverflow] = "no",
 	[Cond_ULessThan] = "b",
-	[Cond_UGreaterThanOrEquals] = "ae",
+	[Cond_UGreaterThanOrEqual] = "ae",
 	[Cond_Equal] = "e",
 	[Cond_NotEqual] = "ne",
-	[Cond_ULessThanOrEquals] = "be",
+	[Cond_ULessThanOrEqual] = "be",
 	[Cond_UGreaterThan] = "a",
 	[Cond_Sign] = "s",
 	[Cond_NoSign] = "ns",
 	[Cond_ParityEven] = "pe",
 	[Cond_ParityOdd] = "po",
 	[Cond_SLessThan] = "l",
-	[Cond_SGreaterThanOrEquals] = "ge",
-	[Cond_SLessThanOrEquals] = "le",
+	[Cond_SGreaterThanOrEqual] = "ge",
+	[Cond_SLessThanOrEqual] = "le",
 	[Cond_SGreaterThan] = "g",
 };
 
@@ -139,6 +139,9 @@ static void movFM (Codegen *c, u16 size, VecRegister src, Mem mem) {
 static void movMF (Codegen *c, u16 size, Mem mem, VecRegister dest) {
 	emit(c, " movsZ M, F", sizeFSuffix(size), mem, dest);
 }
+static void movRF (Codegen *c, u16 size, Register src, VecRegister dest) {
+	emit(c, " movZ R, F", size == 4 ? "d" : "q", registerSized(src, size), dest);
+}
 
 
 
@@ -161,7 +164,6 @@ static const String inst_names[] = {
 	[ITest] = STR_LITERAL("test"),
 	[ILea] =  STR_LITERAL("lea"),
 	[IBtc] =  STR_LITERAL("btc"),
-	[IRet] =  STR_LITERAL("ret"),
 
 	[ISetO] =    STR_LITERAL("seto"),
 	[ISetNO] =   STR_LITERAL("setno"),
@@ -176,9 +178,9 @@ static const String inst_names[] = {
 	[ISetPE] =   STR_LITERAL("setpe"),
 	[ISetPO] =   STR_LITERAL("setpo"),
 	[ISetSLT] =  STR_LITERAL("setl"),
-	[ISetSGTE] = STR_LITERAL("setsge"),
-	[ISetSLTE] = STR_LITERAL("setsle"),
-	[ISetSGT] =  STR_LITERAL("setsg"),
+	[ISetSGTE] = STR_LITERAL("setge"),
+	[ISetSLTE] = STR_LITERAL("setle"),
+	[ISetSGT] =  STR_LITERAL("setg"),
 
 	[IJmpO] =    STR_LITERAL("jmpo"),
 	[IJmpNO] =   STR_LITERAL("jmpno"),
@@ -197,6 +199,12 @@ static const String inst_names[] = {
 	[IJmpSLTE] = STR_LITERAL("jmpsle"),
 	[IJmpSGT] =  STR_LITERAL("jmpsg"),
 
+	[IRet] =  STR_LITERAL("ret"),
+	[IMovzxb] =      STR_LITERAL("movzb"),
+	[IMovzxw] =     STR_LITERAL("movzw"),
+	[IMovsxb] =      STR_LITERAL("movsb"),
+	[IMovsxw] =     STR_LITERAL("movsw"),
+	[IMovsxd] =     STR_LITERAL("movsxd"),
 	[IAdds] =       STR_LITERAL("adds"),
 	[ISubs] =       STR_LITERAL("subs"),
 	[IMuls] =       STR_LITERAL("muls"),
@@ -267,13 +275,14 @@ static void emitStorage (Codegen *c, u16 size, Storage s) {
 	} break;
 	case Location_Relocation: {
 		emitName(c, c->module, s.relocation.id);
-		emitInt(c, s.relocation.offset);
+		emitIntSigned(c, s.relocation.offset);
 		emitString(c, (String) STR_LITERAL("(%rip)"));
 	} break;
 	case Location_Constant: {
 		*insert++ = '$';
 		i32 val = s.constant;
 		if (size < 4) {
+			assert(size);
 			val = val & ((1 << (8 * size)) - 1);
 		}
 		emitIntSigned(c, val);
@@ -301,8 +310,13 @@ static bool isSized (BasicInst inst) {
 	case ITest:
 	case ILea:
 	case IBtc:
+	case IMovzxb:
+	case IMovzxw:
+	case IMovsxb:
+	case IMovsxw:
 		return true;
 
+	case IMovsxd:
 	case ISetO:
 	case ISetNO:
 	case ISetULT:
@@ -368,7 +382,7 @@ static bool isFloat (BasicInst inst) {
 	unreachable;
 }
 
-static void genSS (Codegen *c, u16 size, BasicInst inst, Storage src, Storage dest) {
+static void genS (Codegen *c, u16 size, BasicInst inst, Storage src) {
 	*insert++ = ' ';
 	emitString(c, inst_names[inst]);
 	if (isSized(inst))
@@ -377,8 +391,35 @@ static void genSS (Codegen *c, u16 size, BasicInst inst, Storage src, Storage de
 		*insert++ = size == 4 ? 's' : 'd';
 	*insert++ = ' ';
 	emitStorage(c, size, src);
+	*insert++ = '\n';
+
+	if (insert > buf + (BUF - MAX_LINE))
+		flushit(c->out);
+}
+
+static void genSS (Codegen *c, u16 size, BasicInst inst, Storage src, Storage dest) {
 	*insert++ = ' ';
+	emitString(c, inst_names[inst]);
+	if (isSized(inst))
+		*insert++ = sizeSuffix(size)[0];
+	else if (isFloat(inst))
+		*insert++ = size == 4 ? 's' : 'd';
+	*insert++ = ' ';
+	u32 src_size = size;
+	switch (inst) {
+	case IMovzxb:
+	case IMovsxb:
+		src_size = 1; break;
+	case IMovzxw:
+	case IMovsxw:
+		src_size = 2; break;
+	case IMovsxd:
+		src_size = 4; break;
+	default: break;
+	}
+	emitStorage(c, src_size, src);
 	*insert++ = ',';
+	*insert++ = ' ';
 	emitStorage(c, size, dest);
 	*insert++ = '\n';
 
@@ -444,10 +485,10 @@ static void genMF (Codegen *c, u16 size, BasicInst inst, Mem src, VecRegister de
 }
 
 static void genM (Codegen *c, u16 size, BasicInst inst, Mem src) {
-	emit(c, " SZ M", inst_names[inst], sizeSuffix(size), src);
+	genS(c, size, inst, (Storage) {Location_Memory, .memory = src});
 }
 static void genR (Codegen *c, u16 size, BasicInst inst, Register src) {
-	emit(c, " SZ R", inst_names[inst], sizeSuffix(size), registerSized(src, size));
+	genS(c, size, inst, (Storage) {Location_Register, .reg = src});
 }
 static void gen (Codegen *c, u16 size, BasicInst inst) {
 	emit(c, " SZ", inst_names[inst], sizeSuffix(size));
