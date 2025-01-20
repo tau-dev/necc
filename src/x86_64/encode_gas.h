@@ -35,8 +35,8 @@ const char *register_names[STACK_BEGIN] = {
 	[RSP + RSIZE_WORD] = "sp",
 	[RDI + RSIZE_WORD] = "di",
 	[RBP + RSIZE_WORD] = "bp",
-	[R8 + RSIZE_WORD]  ="r8w",
-	[R9 + RSIZE_WORD]  ="r9w",
+	[R8 + RSIZE_WORD]  = "r8w",
+	[R9 + RSIZE_WORD]  = "r9w",
 	[R10 + RSIZE_WORD] = "r10w",
 	[R11 + RSIZE_WORD] = "r11w",
 	[R12 + RSIZE_WORD] = "r12w",
@@ -52,8 +52,8 @@ const char *register_names[STACK_BEGIN] = {
 	[RSP + RSIZE_DWORD] = "esp",
 	[RDI + RSIZE_DWORD] = "edi",
 	[RBP + RSIZE_DWORD] = "ebp",
-	[R8 + RSIZE_DWORD]  ="r8d",
-	[R9 + RSIZE_DWORD]  ="r9d",
+	[R8 + RSIZE_DWORD]  = "r8d",
+	[R9 + RSIZE_DWORD]  = "r9d",
 	[R10 + RSIZE_DWORD] = "r10d",
 	[R11 + RSIZE_DWORD] = "r11d",
 	[R12 + RSIZE_DWORD] = "r12d",
@@ -147,20 +147,69 @@ static void testRR (Codegen *c, u16 size, Register a, Register b) {
 }
 
 static const String inst_names[] = {
-	[IAdd] = STR_LITERAL("add"),
-	[ISub] = STR_LITERAL("sub"),
+	[IAdd] =  STR_LITERAL("add"),
+	[ISub] =  STR_LITERAL("sub"),
 	[IIMul] = STR_LITERAL("imul"),
-	[IOr] = STR_LITERAL("or"),
-	[IXor] = STR_LITERAL("xor"),
-	[IAnd] = STR_LITERAL("and"),
-	[IShl] = STR_LITERAL("shl"),
-	[IShr] = STR_LITERAL("shr"),
-	[ICmp] = STR_LITERAL("cmp"),
+	[IDiv] =  STR_LITERAL("div"),
+	[IIDiv] = STR_LITERAL("idiv"),
+	[IOr] =   STR_LITERAL("or"),
+	[IXor] =  STR_LITERAL("xor"),
+	[IAnd] =  STR_LITERAL("and"),
+	[IShl] =  STR_LITERAL("shl"),
+	[IShr] =  STR_LITERAL("shr"),
+	[ICmp] =  STR_LITERAL("cmp"),
 	[ITest] = STR_LITERAL("test"),
-	[ILea] = STR_LITERAL("lea"),
-	[IBtc] = STR_LITERAL("btc"),
-	[IComis] = STR_LITERAL("comis"),
-	[IRet] = STR_LITERAL("ret"),
+	[ILea] =  STR_LITERAL("lea"),
+	[IBtc] =  STR_LITERAL("btc"),
+	[IRet] =  STR_LITERAL("ret"),
+
+	[ISetO] =    STR_LITERAL("seto"),
+	[ISetNO] =   STR_LITERAL("setno"),
+	[ISetULT] =  STR_LITERAL("setb"),
+	[ISetUGTE] = STR_LITERAL("setuae"),
+	[ISetE] =    STR_LITERAL("sete"),
+	[ISetNE] =   STR_LITERAL("setne"),
+	[ISetULTE] = STR_LITERAL("setbe"),
+	[ISetUGT] =  STR_LITERAL("setua"),
+	[ISetS] =    STR_LITERAL("sets"),
+	[ISetNS] =   STR_LITERAL("setns"),
+	[ISetPE] =   STR_LITERAL("setpe"),
+	[ISetPO] =   STR_LITERAL("setpo"),
+	[ISetSLT] =  STR_LITERAL("setl"),
+	[ISetSGTE] = STR_LITERAL("setsge"),
+	[ISetSLTE] = STR_LITERAL("setsle"),
+	[ISetSGT] =  STR_LITERAL("setsg"),
+
+	[IJmpO] =    STR_LITERAL("jmpo"),
+	[IJmpNO] =   STR_LITERAL("jmpno"),
+	[IJmpULT] =  STR_LITERAL("jmpb"),
+	[IJmpUGTE] = STR_LITERAL("jmpuae"),
+	[IJmpE] =    STR_LITERAL("jmpe"),
+	[IJmpNE] =   STR_LITERAL("jmpne"),
+	[IJmpULTE] = STR_LITERAL("jmpbe"),
+	[IJmpUGT] =  STR_LITERAL("jmpua"),
+	[IJmpS] =    STR_LITERAL("jmps"),
+	[IJmpNS] =   STR_LITERAL("jmpns"),
+	[IJmpPE] =   STR_LITERAL("jmppe"),
+	[IJmpPO] =   STR_LITERAL("jmppo"),
+	[IJmpSLT] =  STR_LITERAL("jmpl"),
+	[IJmpSGTE] = STR_LITERAL("jmpsge"),
+	[IJmpSLTE] = STR_LITERAL("jmpsle"),
+	[IJmpSGT] =  STR_LITERAL("jmpsg"),
+
+	[IAdds] =       STR_LITERAL("adds"),
+	[ISubs] =       STR_LITERAL("subs"),
+	[IMuls] =       STR_LITERAL("muls"),
+	[IDivs] =       STR_LITERAL("divs"),
+	[IComis] =      STR_LITERAL("comis"),
+	[ICvts2d] =     STR_LITERAL("cvtss2sd"),
+	[ICvtd2s] =     STR_LITERAL("cvtsd2ss"),
+	[ICvtsi2ss] =   STR_LITERAL("cvtsi2ss"),
+	[ICvtsi2sd] =   STR_LITERAL("cvtsi2sd"),
+	[ICvttss2si] =  STR_LITERAL("cvttss2si"),
+	[ICvttss2siq] = STR_LITERAL("cvttss2siq"),
+	[ICvttsd2si] =  STR_LITERAL("cvttsd2si"),
+	[ICvttsd2siq] = STR_LITERAL("cvttsd2siq"),
 };
 
 static const char *sizeSuffix (u16 size) {
@@ -175,6 +224,13 @@ static const char *sizeSuffix (u16 size) {
 	return NULL;
 }
 
+static const char *sizeFSuffix (u16 size) {
+	switch (size) {
+	case 4: return "s";
+	case 8: return "d";
+	}
+	unreachable;
+}
 static void emitRegister (Codegen *c, Register reg) {
 	(void) c;
 	*insert++ = '%';
@@ -229,10 +285,96 @@ static void emitStorage (Codegen *c, u16 size, Storage s) {
 	}
 }
 
+static bool isSized (BasicInst inst) {
+	switch (inst) {
+	case IAdd:
+	case ISub:
+	case IIMul:
+	case IDiv:
+	case IIDiv:
+	case IOr:
+	case IXor:
+	case IAnd:
+	case IShl:
+	case IShr:
+	case ICmp:
+	case ITest:
+	case ILea:
+	case IBtc:
+		return true;
+
+	case ISetO:
+	case ISetNO:
+	case ISetULT:
+	case ISetUGTE:
+	case ISetE:
+	case ISetNE:
+	case ISetULTE:
+	case ISetUGT:
+	case ISetS:
+	case ISetNS:
+	case ISetPE:
+	case ISetPO:
+	case ISetSLT:
+	case ISetSGTE:
+	case ISetSLTE:
+	case ISetSGT:
+	case IJmpO:
+	case IJmpNO:
+	case IJmpULT:
+	case IJmpUGTE:
+	case IJmpE:
+	case IJmpNE:
+	case IJmpULTE:
+	case IJmpUGT:
+	case IJmpS:
+	case IJmpNS:
+	case IJmpPE:
+	case IJmpPO:
+	case IJmpSLT:
+	case IJmpSGTE:
+	case IJmpSLTE:
+	case IJmpSGT:
+	case IRet:
+	case IAdds:
+	case ISubs:
+	case IMuls:
+	case IDivs:
+	case IComis:
+	case ICvts2d:
+	case ICvtd2s:
+	case ICvtsi2ss:
+	case ICvtsi2sd:
+	case ICvttss2si:
+	case ICvttss2siq:
+	case ICvttsd2si:
+	case ICvttsd2siq:
+		return false;
+	}
+	unreachable;
+}
+
+static bool isFloat (BasicInst inst) {
+	switch (inst) {
+	case IAdds:
+	case ISubs:
+	case IMuls:
+	case IDivs:
+	case IComis:
+		return true;
+	default:
+		return false;
+	}
+	unreachable;
+}
+
 static void genSS (Codegen *c, u16 size, BasicInst inst, Storage src, Storage dest) {
 	*insert++ = ' ';
 	emitString(c, inst_names[inst]);
-	*insert++ = sizeSuffix(size)[0];
+	if (isSized(inst))
+		*insert++ = sizeSuffix(size)[0];
+	else if (isFloat(inst))
+		*insert++ = size == 4 ? 's' : 'd';
 	*insert++ = ' ';
 	emitStorage(c, size, src);
 	*insert++ = ' ';
@@ -337,6 +479,22 @@ static void jmpL (Codegen *c, Label l) {
 static void jccL (Codegen *c, Condition cond, Label l) {
 	emit(c, " jZ ..S_I_I", condition_names[cond], l.name, l.func, l.id);
 }
+
+
+static void emitName (Codegen *c, Module module, u32 id) {
+	StaticValue reloc = module.ptr[id];
+	if (reloc.name.len) {
+		if (reloc.parent_decl != IDX_NONE) {
+			emitName(c, module, reloc.parent_decl);
+			*insert++ = '.';
+		}
+		emitString(c, reloc.name);
+	} else {
+		emitZString(c, "__");
+		emitInt(c, id);
+	}
+}
+
 
 
 static void startSection (Codegen *c, ElfSection sec) {

@@ -87,12 +87,10 @@ typedef enum {
 
 	Cond_ULessThan, Cond_Carry = Cond_ULessThan,
 	Cond_UGreaterThanOrEquals, Cond_NoCarry = Cond_UGreaterThanOrEquals,
-
 	Cond_Equal, Cond_Zero = Cond_Equal,
 	Cond_NotEqual, Cond_NotZero = Cond_NotEqual,
-
-	Cond_UGreaterThan,
 	Cond_ULessThanOrEquals,
+	Cond_UGreaterThan,
 
 	Cond_Sign,
 	Cond_NoSign,
@@ -101,8 +99,8 @@ typedef enum {
 
 	Cond_SLessThan,
 	Cond_SGreaterThanOrEquals,
-	Cond_SGreaterThan,
 	Cond_SLessThanOrEquals,
+	Cond_SGreaterThan,
 } Condition;
 
 typedef enum {
@@ -232,20 +230,66 @@ typedef enum {
 	IAdd,
 	ISub,
 	IIMul,
+	IDiv,
+	IIDiv,
 	IOr,
 	IXor,
 	IAnd,
-	IDiv,
-	IIDiv,
 	IShl,
 	IShr,
 	ICmp,
 	ITest,
 	ILea,
 	IBtc,
-	IComis,
-
 	IRet,
+
+	ISetO,
+	ISetNO,
+	ISetULT,
+	ISetUGTE,
+	ISetE,
+	ISetNE,
+	ISetULTE,
+	ISetUGT,
+	ISetS,
+	ISetNS,
+	ISetPE,
+	ISetPO,
+	ISetSLT,
+	ISetSGTE,
+	ISetSLTE,
+	ISetSGT,
+
+	IJmpO,
+	IJmpNO,
+	IJmpULT,
+	IJmpUGTE,
+	IJmpE,
+	IJmpNE,
+	IJmpULTE,
+	IJmpUGT,
+	IJmpS,
+	IJmpNS,
+	IJmpPE,
+	IJmpPO,
+	IJmpSLT,
+	IJmpSGTE,
+	IJmpSLTE,
+	IJmpSGT,
+
+	IAdds,
+	ISubs,
+	IMuls,
+	IDivs,
+	IComis,
+	ICvts2d,
+	ICvtd2s,
+	ICvtsi2ss,
+	ICvtsi2sd,
+	ICvttss2si,
+	ICvttss2siq,
+	ICvttsd2si,
+	ICvttsd2siq,
 } BasicInst;
 
 
@@ -370,7 +414,7 @@ static void emitInt(Codegen *, u64 i);
 static void emitIntSigned(Codegen *, i64 i);
 static void flushit(FILE *f);
 
-#include "encode_fasm.h"
+#include "encode_gas.h"
 
 int splice_dest_order (const void *a, const void *b) {
 	return (i32) ((Reference*) a)->splice_pos - (i32) ((Reference*) b)->splice_pos;
@@ -601,20 +645,6 @@ void emitX64AsmSimple (EmitParams params) {
 }
 
 
-static void emitName (Codegen *c, Module module, u32 id) {
-	StaticValue reloc = module.ptr[id];
-	if (reloc.name.len) {
-		if (reloc.parent_decl != IDX_NONE) {
-			emitName(c, module, reloc.parent_decl);
-			*insert++ = '.';
-		}
-		emitString(c, reloc.name);
-	} else {
-		emitZString(c, "__");
-		emitInt(c, id);
-	}
-}
-
 static void emitData (Codegen *c, Module module, String data, References references) {
 	if (references.len) {
 		qsort(references.ptr, references.len, sizeof(references.ptr[0]),
@@ -664,11 +694,17 @@ static void movFI (Codegen *c, VecRegister src, IrRef dest) {
 static void genIR (Codegen *c, BasicInst inst, IrRef src, Register dest) {
 	genMR(c, valueSize(c, src), inst, (Mem) {c->storage[src], RBP}, dest);
 }
+static void genIF (Codegen *c, BasicInst inst, IrRef src, VecRegister dest) {
+	genMF(c, valueSize(c, src), inst, (Mem) {c->storage[src], RBP}, dest);
+}
 static void genRI (Codegen *c, BasicInst inst, Register src, IrRef dest) {
 	genRM(c, valueSize(c, dest), inst, src, (Mem) {c->storage[dest], RBP});
 }
 static void genCI (Codegen *c, BasicInst inst, i32 val, IrRef dest) {
 	genCM(c, valueSize(c, dest), inst, val, (Mem) {c->storage[dest], RBP});
+}
+static void genI (Codegen *c, BasicInst inst, IrRef src) {
+	genM(c, valueSize(c, src), inst, (Mem) {c->storage[src], RBP});
 }
 
 
@@ -884,10 +920,9 @@ static void triple (Codegen *c, BasicInst inst, IrRef lhs, IrRef rhs, IrRef dest
 	movRI(c, RAX, dest);
 }
 
-static void ftriple (Codegen *c, const char *inst, IrRef lhs, IrRef rhs, IrRef dest) {
-	const char *suff = sizeFSuffix(c->ir.ptr[dest].size);
+static void ftriple (Codegen *c, BasicInst inst, IrRef lhs, IrRef rhs, IrRef dest) {
 	movIF(c, lhs, XMM+1);
-	emit(c, " ZZ #, F", inst, suff, rhs, XMM+1);
+	genIF(c, inst, rhs, XMM+1);
 	movFI(c, XMM+1, dest);
 }
 
@@ -1058,6 +1093,7 @@ static void emitInstForward (Codegen *c, IrRef i) {
 
 	Inst inst = c->ir.ptr[i];
 
+	(void) ir_names;
 // 	emitZString(c, "# ");
 // 	emitZString(c, ir_names[inst.kind]);
 // 	emitZString(c, "\n");
@@ -1071,7 +1107,7 @@ static void emitInstForward (Codegen *c, IrRef i) {
 		movIR(c, inst.binop.lhs, RAX);
 		genRR(c, I32, IXor, RDX, RDX);
 
-		emit(c, " divZ #", sizeSuffix(inst.size), inst.binop.rhs);
+		genI(c, IDiv, inst.binop.rhs);
 		movRI(c, registerSized(inst.kind == Ir_Div ? RAX : RDX, inst.size), i);
 	} break;
 	case Ir_SDiv:
@@ -1085,13 +1121,13 @@ static void emitInstForward (Codegen *c, IrRef i) {
 		default: unreachable;
 		}
 
-		emit(c, " idivZ #", sizeSuffix(inst.size), inst.binop.rhs);
+		genI(c, IIDiv, inst.binop.rhs);
 		movRI(c, registerSized(inst.kind == Ir_SDiv ? RAX : RDX, inst.size), i);
 	} break;
-	case Ir_FAdd: ftriple(c, "adds", inst.binop.lhs, inst.binop.rhs, i); break;
-	case Ir_FSub: ftriple(c, "subs", inst.binop.lhs, inst.binop.rhs, i); break;
-	case Ir_FMul: ftriple(c, "muls", inst.binop.lhs, inst.binop.rhs, i); break;
-	case Ir_FDiv: ftriple(c, "divs", inst.binop.lhs, inst.binop.rhs, i); break;
+	case Ir_FAdd: ftriple(c, IAdds, inst.binop.lhs, inst.binop.rhs, i); break;
+	case Ir_FSub: ftriple(c, ISubs, inst.binop.lhs, inst.binop.rhs, i); break;
+	case Ir_FMul: ftriple(c, IMuls, inst.binop.lhs, inst.binop.rhs, i); break;
+	case Ir_FDiv: ftriple(c, IDivs, inst.binop.lhs, inst.binop.rhs, i); break;
 	case Ir_FMod: unreachable;
 
 	case Ir_BitOr: triple(c, IOr, inst.binop.lhs, inst.binop.rhs, i); break;
@@ -1111,9 +1147,8 @@ static void emitInstForward (Codegen *c, IrRef i) {
 	case Ir_SLessThanOrEquals:
 	case Ir_FLessThanOrEquals: {
 		if (inst.kind == Ir_FLessThan || inst.kind == Ir_FLessThanOrEquals || inst.kind == Ir_FEquals) {
-			u16 sz = valueSize(c, inst.binop.lhs);
 			movIF(c, inst.binop.lhs, XMM+1);
-			emit(c, " comisZ #, F", sizeFSuffix(sz), inst.binop.rhs, XMM+1);
+			genIF(c, IComis, inst.binop.rhs, XMM+1);
 		} else {
 			movIR(c, inst.binop.rhs, RAX);
 			genRI(c, ICmp, RAX, inst.binop.lhs);
@@ -1214,15 +1249,15 @@ static void emitInstForward (Codegen *c, IrRef i) {
 	case Ir_Copy: break;
 	case Ir_PhiIn: break;
 	case Ir_FCast: {
-		u32 source = valueSize(c, inst.unop);
-		const char *fsuff = sizeFSuffix(inst.size);
-		emit(c, " cvtsZ2sZ #, F", sizeFSuffix(source), fsuff, inst.unop, XMM+1);
+		genIF(c, inst.size == 4 ? ICvtd2s : ICvts2d, inst.unop, XMM+1);
 		movFI(c, XMM+1, i);
 	} break;
 	case Ir_UIntToFloat: {
 		const char *fsuff = sizeFSuffix(inst.size);
 
 		u32 src_size = valueSize(c, inst.unop);
+
+		BasicInst convert = inst.size == 4 ? ICvtsi2ss : ICvtsi2sd;
 
 		if (src_size == 8) {
 			// x86 doesn't have a 64 bit int->float instruction, so we
@@ -1235,7 +1270,7 @@ static void emitInstForward (Codegen *c, IrRef i) {
 			Label done = newLabel(c, "u2f_done", i);
 			jccL(c, Cond_Sign, negative);
 			// When no sign bit is set, we can use the signed instruction.
-			emit(c, " cvtsi2sZ R, F", fsuff, RAX_8, XMM+0);
+			genRF(c, I64, convert, RAX_8, XMM+0);
 			jmpL(c, done);
 
 			placeLabel(c, negative);
@@ -1248,32 +1283,30 @@ static void emitInstForward (Codegen *c, IrRef i) {
 			// Now convert normally and multiply by 2. Now the lowest
 			// bit would be lost, but it cannot be represented in the
 			// mantissa anyways.
-			emit(c, " cvtsi2sZ R, F", fsuff, RAX_8, XMM+0);
+			genRF(c, I64, convert, RAX_8, XMM+0);
 			emit(c, " addsZ F, F", fsuff, XMM+0, XMM+0);
 
 			placeLabel(c, done);
 		} else {
 			genRR(c, I32, IXor, RAX, RAX);
 			movIR(c, inst.unop, RAX);
-			emit(c, " cvtsi2sZ R, F", fsuff, RAX_8, XMM+0);
+			genRF(c, I64, convert, RAX_8, XMM+0);
 		}
 		movFI(c, XMM+0, i);
 	} break;
 	case Ir_SIntToFloat: {
-		const char *fsuff = sizeFSuffix(inst.size);
-
 		u32 src_size = valueSize(c, inst.unop);
 		if (src_size != 8)
 			emit(c, " movsxZ #, R", (src_size == 4 ? "d" : ""), inst.unop, RAX_8);
 		else
 			movIR(c, inst.unop, RAX_8);
 
-		emit(c, " cvtsi2sZ R, F", fsuff, RAX_8, XMM+1);
+		BasicInst convert = inst.size == 4 ? ICvtsi2ss : ICvtsi2sd;
+		genRF(c, I64, convert, RAX_8, XMM+1);
 		movFI(c, XMM+1, i);
 	} break;
 	case Ir_FloatToUInt: {
 		u32 float_size = valueSize(c, inst.unop);
-		const char *fsuff = sizeFSuffix(float_size);
 		u32 dest_size = valueSize(c, inst.unop);
 
 		if (dest_size == 8) {
@@ -1290,32 +1323,36 @@ static void emitInstForward (Codegen *c, IrRef i) {
 			Label done = newLabel(c, "f2u_done", i);
 
 			movMF(c, float_size, (Mem) {c->storage[inst.unop], RBP_8}, XMM+0);
-			emit(c, " comisZ F, F", fsuff, XMM+1, XMM+0);
+			genFF(c, float_size, IComis, XMM+1, XMM+0);
 			jccL(c, Cond_UGreaterThanOrEquals, big);
 
 			// When below INT64_MAX, we can use the signed instruction.
-			emit(c, " cvttsZ2siq F, R", fsuff, XMM+0, RAX_8);
+			BasicInst convert = float_size == 4 ? ICvttss2siq : ICvttsd2siq;
+			genFR(c, I64, convert, XMM+0, RAX_8);
 			jmpL(c, done);
 
 			placeLabel(c, big);
 			// Otherwise, subtract INT64_MAX as float, convert, set sign bit.
-			emit(c, " subsZ F, F", fsuff, XMM+1, XMM+0);
-			emit(c, " cvttsZ2siq F, R", fsuff, XMM+0, RAX_8);
+			genFF(c, float_size, ISubs, XMM+1, XMM+0);
+			genFR(c, I64, convert, XMM+0, RAX_8);
 			genCR(c, I64, IBtc, 63, RAX);
 
 			placeLabel(c, done);
 		} else {
 			movMF(c, float_size, (Mem) {c->storage[inst.unop], RBP_8}, XMM+0);
-			emit(c, " cvttsZ2si F, R", fsuff, XMM+0, RAX_8);
+			BasicInst convert = float_size == 4 ? ICvttss2si : ICvttsd2si;
+			genFR(c, I64, convert, XMM+0, RAX_8);
 		}
 		movRI(c, registerSized(RAX, inst.size), i);
 	} break;
 	case Ir_FloatToSInt: {
 		u32 float_size = valueSize(c, inst.unop);
-		const char *fsuff = sizeFSuffix(float_size);
 
 		movMF(c, float_size, (Mem) {c->storage[inst.unop], RBP_8}, XMM+0);
-		emit(c, " cvttsZ2si F, R", fsuff, XMM+0, RAX_8);
+		BasicInst convert = inst.size == 8 ?
+			(float_size == 4 ? ICvttss2siq : ICvttsd2siq) :
+			(float_size == 4 ? ICvttss2si : ICvttsd2si);
+		genFR(c, I64, convert, XMM+0, RAX_8);
 		movRI(c, registerSized(RAX, inst.size), i);
 	} break;
 	case Ir_VaStart: {
@@ -1535,13 +1572,6 @@ static inline Register registerSized (Register stor, u16 size) {
 	return (stor & ~RSIZE_MASK) | registerSize(size);
 }
 
-static const char *sizeFSuffix (u16 size) {
-	switch (size) {
-	case 4: return "s";
-	case 8: return "d";
-	}
-	unreachable;
-}
 static u16 valueSize (Codegen *c, IrRef ref) {
 	return c->ir.ptr[ref].size;
 }
