@@ -505,12 +505,12 @@ void emitX64AsmSimple (EmitParams params) {
 
 
 
-	if (false) {
+	if (params.emit_debug_info) {
 		startSection(c, SectionDebugAbbrev);
 		writeUleb128(c, 1);
 		writeUleb128(c, DW_TAG_compile_unit);
 		writeU8(c, 1); // has children
-			// 	leb2_128 DW_AT_producer,DW_FORM_string
+			// writeUleb128Pair(c, DW_AT_producer,DW_FORM_string)
 		writeUleb128Pair(c, DW_AT_name,DW_FORM_string);
 		// writeUleb128Pair(c, DW_AT_comp_dir,DW_FORM_string);
 		writeUleb128Pair(c, DW_AT_language,DW_FORM_data1);
@@ -599,16 +599,37 @@ void emitX64AsmSimple (EmitParams params) {
 		writeU8(c, 1);
 
 		// include_directories
-		writeU8(c, 0); // T
+// 		for (u32 i = 1; i < params.files.len; i++) {
+// 			SourceFile *file = params.files.ptr[i];
+// 			if (file->abs_name.len == 0) {
+// 				writeString(c, (String) STR_LITERAL("<predefined macro>"));
+// 			} else {
+// 				String dirname;
+// 				splitPath(file->abs_name, &dirname);
+// 				writeString(c, dirname);
+// 			}
+// 		}
+
+		SourceFile *first = params.files.ptr[1];
+		String compilation_dir;
+		splitPath(first->abs_name, &compilation_dir);
+		writeString(c, compilation_dir);
+		writeU8(c, 0); // end of include_directories
+
 
 		// file_names
 		for (u32 i = 1; i < params.files.len; i++) {
 			SourceFile *file = params.files.ptr[i];
-			writeString(c, file->abs_name);
+			if (file->abs_name.len == 0) {
+				writeString(c, (String) STR_LITERAL("<predefined macro>"));
+			} else {
+				writeString(c, file->abs_name);
+			}
 			writeUleb128(c, 0);
 			writeUleb128(c, 0);
 			writeUleb128(c, 0);
 		}
+
 		writeU8(c, 0);
 		emitZString(c, ".line_data:\n");
 		writeU8(c, 0); writeU8(c, 9); // extended opcode over 9 bytes
@@ -974,7 +995,7 @@ static void emitBlockForward (Codegen *c, Blocks blocks, u32 i) {
 
 	for (IrRef ref = block->first_inst; ref < block->inst_end; ref++) {
 		if (c->emit_debug_info) {
-			if (isNewLine(c, ref) || isNewFile(c, ref)) {
+			if (isNewLine(c, ref) || isNewFile(c, ref) || ref == block->first_inst) {
 				emit(c, "..IiI:", c->current_id, ref);
 				DebugMark mark = {.id = c->current_id, .inst = ref};
 				PUSH(line_marks, mark);

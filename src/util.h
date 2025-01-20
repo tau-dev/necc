@@ -186,6 +186,8 @@ String sourceName(SourceFile *source);
 bool isDirectory(const char *path);
 bool isFile(const char *path);
 bool isDirSeparator(char);
+// Returns the filename.
+String splitPath(String path, String *dirname);
 
 
 typedef enum {

@@ -546,6 +546,7 @@ static void startSection (Codegen *c, ElfSection sec) {
 
 static void emitString (Codegen *c, String s) {
 	(void) c;
+	if (s.len == 0) return;
 	memcpy(insert, s.ptr, s.len);
 	insert += s.len;
 }
@@ -583,6 +584,11 @@ static void writeUleb128 (Codegen *c, u64 a) {
 	emitInt(c, a);
 	emitString(c, zstr("\n"));
 }
+static void writeSleb128 (Codegen *c, i64 a) {
+	emitString(c, zstr("	.sleb128 "));
+	emitIntSigned(c, a);
+	emitString(c, zstr("\n"));
+}
 static void writeUleb128Pair (Codegen *c, u64 a, u64 b) {
 	writeUleb128(c, a);
 	writeUleb128(c, b);
@@ -593,7 +599,7 @@ static void writeString (Codegen *c, String val) {
 	emitString(c, zstr("\"\n"));
 }
 static void writeSymbolRef (Codegen *c, String val) {
-	emitString(c, zstr("	.quad ."));
+	emitString(c, zstr("	.quad "));
 	emitString(c, val);
 	emitString(c, zstr("\n"));
 }

@@ -64,6 +64,17 @@ bool isDirSeparator (char c) {
 #endif
 }
 
+String splitPath (String path, String *dirname) {
+	size_t slash = path.len;
+	while (slash) {
+		if (path.ptr[slash-1] == '/') break;
+		slash--;
+	}
+	if (dirname)
+		*dirname = (String) {slash, path.ptr};
+	return (String) {path.len - slash, path.ptr + slash};
+}
+
 bool eql (const char* a, String b) {
 	// PERFORMANCE Remove strlen
 	return strlen(a) == b.len && memcmp(a, b.ptr, b.len) == 0;
