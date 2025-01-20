@@ -31,31 +31,26 @@
 #define LIST_INITIAL_CAPACITY 16
 #define MAKE_LIST(type) { .capacity = LIST_INITIAL_CAPACITY, .ptr = calloc(LIST_INITIAL_CAPACITY, sizeof(type)) }
 
+typedef struct Arena Arena;
 // #define COPY_LIST_TO(list, dest) (assert((dest).len == (list).len), memcpy((dest).ptr, (list).content, (list).len * sizeof(*(list).content)))
-#define PUSH(list, value) \
-	do { \
-		if ((list).len >= (list).capacity) {\
-			(list).capacity = (list).len * 3 / 2 + 4; \
-			(list).ptr = realloc((list).ptr, sizeof(*(list).ptr) * (list).capacity); \
-			if ((list).ptr == NULL) {\
-				puts("ERROR: Out of memory on list growth."); \
-				exit(EXIT_FAILURE); \
-			} \
-		} \
-		(list).ptr[(list).len] = (value); \
-		(list).len++; \
-	} while (0);
-#define PUSH_A(arena, list, value) \
-	do { \
-		if ((list).len >= (list).capacity) { \
-			(list).capacity = (list).len * 2 + 4; \
-			void *new = aalloc(arena, sizeof(*(list).ptr) * (list).capacity); \
-			if ((list).ptr) memcpy(new, (list).ptr, sizeof(*(list).ptr) * (list).len); \
-			(list).ptr = new; \
-		} \
-		(list).ptr[(list).len] = (value); \
-		(list).len++; \
-	} while (0);
+#define PUSH(list, value) (\
+	((list).len >= (list).capacity ? \
+		(list).ptr = list_grow((list).ptr, &(list).capacity, sizeof((list).ptr[0])) : NULL), \
+	(list).ptr[(list).len] = (value), \
+	(list).len++)
+
+#define PUSH_A(arena, list, value) (\
+	((list).len >= (list).capacity ? \
+		(list).ptr = list_grow_arena(arena, (list).ptr, &(list).capacity, sizeof((list).ptr[0]), (list).len) : NULL), \
+	(list).ptr[(list).len] = (value), \
+	(list).len++)
+
+#define RESERVE(list, amount) \
+	((list).ptr = list_reserve((list).ptr, &(list).capacity, sizeof((list).ptr[0]), (list).len, amount)
+
+void *list_grow(void *data, size_t *cap, size_t item_size);
+void *list_grow_arena(Arena *arena, void *data, size_t *cap, size_t item_size, size_t old_len);
+void *list_reserve(void *data, size_t *cap, size_t item_size, size_t len, size_t required);
 
 
 #define POP(list) (assert((list).len > 0), (list).ptr[--(list).len])

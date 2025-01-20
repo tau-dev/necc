@@ -2,6 +2,7 @@
 #include "wyhash.h"
 #include "stdio.h"
 #include "ansi.h"
+#include "arena.h"
 
 
 #if HAVE_POSIX
@@ -256,6 +257,48 @@ void printto (char **insert, const char *end, const char *fmt, ...) {
 	}
 	*insert += count;
 }
+
+void *list_grow (void *data, size_t *cap, size_t item_size) {
+	if (*cap == 0) {
+		*cap = 4;
+	} else {
+		*cap *= 2;
+	}
+	void *res = realloc(data, item_size * *cap);
+	if (res == NULL) {
+		puts("ERROR: Out of memory on list growth.");
+		exit(EXIT_FAILURE);
+	}
+	return res;
+}
+void *list_grow_arena (Arena *arena, void *data, size_t *cap, size_t item_size, size_t old_len) {
+	if (*cap == 0) {
+		*cap = 4;
+	} else {
+		*cap *= 2;
+	}
+	// PERFORMANCE Use the arena better.
+	void *res = aalloc(arena, item_size * *cap);
+	if (data) {
+		memcpy(res, data, item_size * old_len);
+	}
+	return res;
+}
+void *list_reserve (void *data, size_t *cap, size_t item_size, size_t len, size_t required) {
+	if (*cap - len >= required)
+		return data;
+	size_t newcap = *cap == 0 ? 4 : 2 * *cap;
+	if (newcap - len < required)
+		newcap = *cap + required;
+	void *res = realloc(data, item_size * newcap);
+	*cap = newcap;
+	if (res == NULL) {
+		puts("ERROR: Out of memory on list growth.");
+		exit(EXIT_FAILURE);
+	}
+	return res;
+}
+
 
 
 

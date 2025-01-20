@@ -476,7 +476,7 @@ void emitX64AsmSimple (EmitParams params) {
 			emit(c, ".S_end:\n", reloc.name);
 		}
 	}
-	emit(c, ".exec_end:");
+	emitZString(c, ".exec_end:");
 
 	startSection(c, SectionData);
 	foreach (i, module) {
@@ -900,9 +900,6 @@ static void emitFunctionForward (EmitParams params, u32 id) {
 		emitBlockForward(&c, linearized, i);
 	}
 	free(linearized.ptr);
-	emit(&c, "");
-
-
 
 	free(c.storage);
 	mapFree(c.types);
